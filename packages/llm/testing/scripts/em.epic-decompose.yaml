@@ -1,0 +1,32 @@
+# M3 delegation cascade (T36, demo step 11): the EM decomposes the epic into
+# two dev tasks and assigns owners by name (@-mention in the note resolves
+# the sentinel toAgentId against the org).
+match: { role: manager, taskFixture: none }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS, note: Decomposing the epic }
+  - action: create_task
+    args:
+      kind: task
+      title: Implement the feature X service endpoint
+      objective: Add the endpoint plus the service-layer change described in the design.
+      successCriteria: [endpoint implemented, unit tests pass]
+      priority: P1
+      estimatedEffort: 3
+  - action: create_task
+    args:
+      kind: task
+      title: Write integration coverage for feature X
+      objective: Integration tests over the new endpoint including the failure paths.
+      successCriteria: [integration suite green]
+      priority: P2
+      estimatedEffort: 2
+  - action: delegate_task
+    args: { note: "@Alex Demir please take the endpoint work first." }
+  - action: delegate_task
+    args: { note: "@Deniz Kaya integration coverage is yours." }
+  - action: send_message
+    args:
+      body: "Epic decomposed into two tasks; owners assigned along the backend line. Balancing load across the team."
+  - action: complete_task
+    args: { summary: Epic decomposed, both tasks delegated with owners }

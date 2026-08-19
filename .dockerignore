@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/dist
+**/dist-types
+**/.turbo
+**/*.tsbuildinfo
+data
+infrastructure/docker/data
+docs
+.env
+.env.local

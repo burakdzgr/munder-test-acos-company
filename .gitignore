@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.turbo/
+coverage/
+*.tsbuildinfo
+.env
+.env.local
+data/
+infrastructure/docker/data/
+infrastructure/docker/data-e2e/
+.DS_Store
+dist-types/
+apps/web/test-results/
+apps/web/playwright-report/
+apps/web/scripts/.pixellab-cache/
+apps/web/scripts/pixellab-run.log

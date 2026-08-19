@@ -1,0 +1,24 @@
+# M3 delegation cascade (T36, demo steps 8–9): the CEO receives the Founder
+# objective (a groomed goal task, no fixture), decomposes it into an
+# initiative and delegates down the reporting line. Sentinel ids resolve in
+# the worker: parentTaskId → own task, delegate taskId → oldest unassigned
+# child, toAgentId → least-loaded eligible direct report (the CTO).
+match: { role: executive, taskFixture: none, agentName: Aylin Vural }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS, note: Reviewing the Founder objective }
+  - action: create_task
+    args:
+      kind: initiative
+      title: "Initiative: analyze the project and deliver feature X"
+      objective: Break the Founder objective into a technical plan and delivery epics.
+      successCriteria: [technical design exists, epics delegated, delivery tracked]
+      priority: P1
+      estimatedEffort: 8
+  - action: delegate_task
+    args: { note: Delegating the initiative to my technical executive. }
+  - action: send_message
+    args:
+      body: "Objective received and decomposed: one initiative, delegated to the CTO. I will track delivery."
+  - action: complete_task
+    args: { summary: Objective decomposed and delegated down the org }

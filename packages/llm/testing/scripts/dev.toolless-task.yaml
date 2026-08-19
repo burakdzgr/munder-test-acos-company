@@ -1,0 +1,13 @@
+# M3 delegation cascade (T36, demo steps 12/14): a toolless dev run —
+# start work, talk in the task thread (sentinel channel = own task thread),
+# hand the result to review. Shared by every `member` agent; the adapter
+# keys sessions per (agent, task) so parallel devs never share a cursor.
+match: { role: member, taskFixture: none }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS, note: Picking up the delegated task }
+  - action: send_message
+    args:
+      body: "Started on the task — plan drafted, working toolless for the M3 gate; implementation lands with the sandbox milestone."
+  - action: request_review
+    args: { summary: Toolless deliverable ready for review }

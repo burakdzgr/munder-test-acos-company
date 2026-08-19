@@ -1,0 +1,45 @@
+{
+  "name": "agent-company-os",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev",
+    "check-deps": "tsx scripts/check-deps.ts",
+    "test:repo": "vitest run scripts",
+    "seed": "pnpm --filter @acos/server seed",
+    "ops": "echo \"ops: not implemented yet (keygen/backup/restore land later)\" && exit 0",
+    "test:int": "turbo run test:integration",
+    "db:reset": "node scripts/db-reset.mjs",
+    "e2e": "node scripts/e2e-stack.mjs run",
+    "e2e:stack": "node scripts/e2e-stack.mjs",
+    "build:workspace-images": "docker build -t acos/workspace-node infrastructure/docker/workspace-images/node"
+  },
+  "devDependencies": {
+    "@temporalio/client": "^1.22.0",
+    "@testcontainers/postgresql": "^12.1.0",
+    "@types/node": "^26.2.0",
+    "@types/pg": "^8.21.0",
+    "@vitest/coverage-v8": "^2.1.9",
+    "eslint": "^9.17.0",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-boundaries": "^7.2.0",
+    "eslint-plugin-import": "^2.32.0",
+    "pg": "^8.23.0",
+    "prettier": "^3.4.2",
+    "testcontainers": "^12.1.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.23.12",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.19.0",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "// purpose": "Resolver-only tsconfig for eslint-import-resolver-typescript: maps @acos/* specifiers to workspace SOURCE files so eslint-plugin-boundaries can classify imports without requiring a build. Never referenced by tsc builds.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "paths": {
+      "@acos/domain/state-machines": ["packages/domain/src/state-machines/index.ts"],
+      "@acos/domain/policies": ["packages/domain/src/policies/index.ts"],
+      "@acos/server": ["apps/server/src/index.ts"],
+      "@acos/web": ["apps/web/src/index.ts"],
+      "@acos/agent-worker": ["workers/agent-worker/src/index.ts"],
+      "@acos/execution-worker": ["workers/execution-worker/src/index.ts"],
+      "@acos/sandbox-manager": ["services/sandbox-manager/src/index.ts"],
+      "@acos/*": ["packages/*/src/index.ts"]
+    }
+  },
+  "include": ["apps/**/src", "workers/**/src", "services/**/src", "packages/**/src", "scripts"]
+}

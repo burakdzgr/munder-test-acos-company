@@ -1,0 +1,100 @@
+# CI pipeline (32-TESTING-STRATEGY.md §9, 28 §6). Stages:
+#   1 lint + typecheck   2 unit (coverage gates)   3 integration (Testcontainers, T07)
+#   4 contract + workflow (lands with T14/T15/T31)   5 e2e-smoke (compose boot)
+# turbo-affected on PRs via --filter=[origin/main]; full runs on main.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    env:
+      TURBO_ARGS: ${{ github.event_name == 'pull_request' && '--filter=[origin/main]' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Dependency-rule nets (check-deps + boundary fixtures)
+        run: |
+          pnpm check-deps
+          pnpm test:repo
+
+      - name: "Stage 1: lint + typecheck"
+        run: npx turbo run lint typecheck $TURBO_ARGS
+
+      - name: "Stage 2: unit (coverage gates)"
+        run: npx turbo run test $TURBO_ARGS
+
+      - name: "Stage 3: integration"
+        run: npx turbo run test:integration $TURBO_ARGS
+
+  e2e-smoke:
+    name: e2e-smoke
+    runs-on: ubuntu-latest
+    needs: checks
+    env:
+      SEED_FOUNDER_PASSWORD: founder-ci-password
+      # deterministic fake ModelRouter for the whole e2e stack (32 §5/§6)
+      LLM_MODE: scripted
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright chromium
+        run: pnpm --filter @acos/web exec playwright install --with-deps chromium
+
+      - name: Build workspace image (acos/workspace-node, T41)
+        run: pnpm build:workspace-images
+
+      - name: "Stage 5: boot full stack (Mode A)"
+        run: docker compose -f infrastructure/docker/compose.yaml up -d --build --wait
+
+      - name: Probe health endpoints
+        run: |
+          curl -fsS http://localhost:3000/api/health
+          curl -fsS http://localhost:5173/healthz
+          curl -fsS http://localhost:5173/ | grep -q ACOS
+
+      - name: "Playwright: M1 demo specs"
+        run: SEED_FOUNDER_PASSWORD=$SEED_FOUNDER_PASSWORD pnpm --filter @acos/web e2e
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: apps/web/test-results
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f infrastructure/docker/compose.yaml down -v

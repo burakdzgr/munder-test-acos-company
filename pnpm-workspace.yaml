@@ -1,0 +1,5 @@
+packages:
+  - "apps/*"
+  - "workers/*"
+  - "services/*"
+  - "packages/*"

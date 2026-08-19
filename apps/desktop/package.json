@@ -1,0 +1,22 @@
+{
+  "name": "@acos/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "description": "ACOS — AI Agent Company OS masaüstü kabuğu",
+  "author": "ACOS",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "dev": "tsc -b && electron .",
+    "package": "tsc -b && electron-builder --config electron-builder.json"
+  },
+  "devDependencies": {
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.7.2"
+  }
+}

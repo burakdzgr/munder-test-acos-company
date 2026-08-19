@@ -1,0 +1,866 @@
+[
+ {
+  "avatarId": "av01",
+  "portrait": "av01_portrait",
+  "walk": {
+   "down": [
+    "av01_down_0",
+    "av01_down_1",
+    "av01_down_2",
+    "av01_down_3"
+   ],
+   "up": [
+    "av01_up_0",
+    "av01_up_1",
+    "av01_up_2",
+    "av01_up_3"
+   ],
+   "left": [
+    "av01_left_0",
+    "av01_left_1",
+    "av01_left_2",
+    "av01_left_3"
+   ],
+   "right": [
+    "av01_right_0",
+    "av01_right_1",
+    "av01_right_2",
+    "av01_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av01_down_idle",
+   "up": "av01_up_idle",
+   "left": "av01_left_idle",
+   "right": "av01_right_idle"
+  }
+ },
+ {
+  "avatarId": "av02",
+  "portrait": "av02_portrait",
+  "walk": {
+   "down": [
+    "av02_down_0",
+    "av02_down_1",
+    "av02_down_2",
+    "av02_down_3"
+   ],
+   "up": [
+    "av02_up_0",
+    "av02_up_1",
+    "av02_up_2",
+    "av02_up_3"
+   ],
+   "left": [
+    "av02_left_0",
+    "av02_left_1",
+    "av02_left_2",
+    "av02_left_3"
+   ],
+   "right": [
+    "av02_right_0",
+    "av02_right_1",
+    "av02_right_2",
+    "av02_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av02_down_idle",
+   "up": "av02_up_idle",
+   "left": "av02_left_idle",
+   "right": "av02_right_idle"
+  }
+ },
+ {
+  "avatarId": "av03",
+  "portrait": "av03_portrait",
+  "walk": {
+   "down": [
+    "av03_down_0",
+    "av03_down_1",
+    "av03_down_2",
+    "av03_down_3"
+   ],
+   "up": [
+    "av03_up_0",
+    "av03_up_1",
+    "av03_up_2",
+    "av03_up_3"
+   ],
+   "left": [
+    "av03_left_0",
+    "av03_left_1",
+    "av03_left_2",
+    "av03_left_3"
+   ],
+   "right": [
+    "av03_right_0",
+    "av03_right_1",
+    "av03_right_2",
+    "av03_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av03_down_idle",
+   "up": "av03_up_idle",
+   "left": "av03_left_idle",
+   "right": "av03_right_idle"
+  }
+ },
+ {
+  "avatarId": "av04",
+  "portrait": "av04_portrait",
+  "walk": {
+   "down": [
+    "av04_down_0",
+    "av04_down_1",
+    "av04_down_2",
+    "av04_down_3"
+   ],
+   "up": [
+    "av04_up_0",
+    "av04_up_1",
+    "av04_up_2",
+    "av04_up_3"
+   ],
+   "left": [
+    "av04_left_0",
+    "av04_left_1",
+    "av04_left_2",
+    "av04_left_3"
+   ],
+   "right": [
+    "av04_right_0",
+    "av04_right_1",
+    "av04_right_2",
+    "av04_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av04_down_idle",
+   "up": "av04_up_idle",
+   "left": "av04_left_idle",
+   "right": "av04_right_idle"
+  }
+ },
+ {
+  "avatarId": "av05",
+  "portrait": "av05_portrait",
+  "walk": {
+   "down": [
+    "av05_down_0",
+    "av05_down_1",
+    "av05_down_2",
+    "av05_down_3"
+   ],
+   "up": [
+    "av05_up_0",
+    "av05_up_1",
+    "av05_up_2",
+    "av05_up_3"
+   ],
+   "left": [
+    "av05_left_0",
+    "av05_left_1",
+    "av05_left_2",
+    "av05_left_3"
+   ],
+   "right": [
+    "av05_right_0",
+    "av05_right_1",
+    "av05_right_2",
+    "av05_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av05_down_idle",
+   "up": "av05_up_idle",
+   "left": "av05_left_idle",
+   "right": "av05_right_idle"
+  }
+ },
+ {
+  "avatarId": "av06",
+  "portrait": "av06_portrait",
+  "walk": {
+   "down": [
+    "av06_down_0",
+    "av06_down_1",
+    "av06_down_2",
+    "av06_down_3"
+   ],
+   "up": [
+    "av06_up_0",
+    "av06_up_1",
+    "av06_up_2",
+    "av06_up_3"
+   ],
+   "left": [
+    "av06_left_0",
+    "av06_left_1",
+    "av06_left_2",
+    "av06_left_3"
+   ],
+   "right": [
+    "av06_right_0",
+    "av06_right_1",
+    "av06_right_2",
+    "av06_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av06_down_idle",
+   "up": "av06_up_idle",
+   "left": "av06_left_idle",
+   "right": "av06_right_idle"
+  }
+ },
+ {
+  "avatarId": "av07",
+  "portrait": "av07_portrait",
+  "walk": {
+   "down": [
+    "av07_down_0",
+    "av07_down_1",
+    "av07_down_2",
+    "av07_down_3"
+   ],
+   "up": [
+    "av07_up_0",
+    "av07_up_1",
+    "av07_up_2",
+    "av07_up_3"
+   ],
+   "left": [
+    "av07_left_0",
+    "av07_left_1",
+    "av07_left_2",
+    "av07_left_3"
+   ],
+   "right": [
+    "av07_right_0",
+    "av07_right_1",
+    "av07_right_2",
+    "av07_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av07_down_idle",
+   "up": "av07_up_idle",
+   "left": "av07_left_idle",
+   "right": "av07_right_idle"
+  }
+ },
+ {
+  "avatarId": "av08",
+  "portrait": "av08_portrait",
+  "walk": {
+   "down": [
+    "av08_down_0",
+    "av08_down_1",
+    "av08_down_2",
+    "av08_down_3"
+   ],
+   "up": [
+    "av08_up_0",
+    "av08_up_1",
+    "av08_up_2",
+    "av08_up_3"
+   ],
+   "left": [
+    "av08_left_0",
+    "av08_left_1",
+    "av08_left_2",
+    "av08_left_3"
+   ],
+   "right": [
+    "av08_right_0",
+    "av08_right_1",
+    "av08_right_2",
+    "av08_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av08_down_idle",
+   "up": "av08_up_idle",
+   "left": "av08_left_idle",
+   "right": "av08_right_idle"
+  }
+ },
+ {
+  "avatarId": "av09",
+  "portrait": "av09_portrait",
+  "walk": {
+   "down": [
+    "av09_down_0",
+    "av09_down_1",
+    "av09_down_2",
+    "av09_down_3"
+   ],
+   "up": [
+    "av09_up_0",
+    "av09_up_1",
+    "av09_up_2",
+    "av09_up_3"
+   ],
+   "left": [
+    "av09_left_0",
+    "av09_left_1",
+    "av09_left_2",
+    "av09_left_3"
+   ],
+   "right": [
+    "av09_right_0",
+    "av09_right_1",
+    "av09_right_2",
+    "av09_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av09_down_idle",
+   "up": "av09_up_idle",
+   "left": "av09_left_idle",
+   "right": "av09_right_idle"
+  }
+ },
+ {
+  "avatarId": "av10",
+  "portrait": "av10_portrait",
+  "walk": {
+   "down": [
+    "av10_down_0",
+    "av10_down_1",
+    "av10_down_2",
+    "av10_down_3"
+   ],
+   "up": [
+    "av10_up_0",
+    "av10_up_1",
+    "av10_up_2",
+    "av10_up_3"
+   ],
+   "left": [
+    "av10_left_0",
+    "av10_left_1",
+    "av10_left_2",
+    "av10_left_3"
+   ],
+   "right": [
+    "av10_right_0",
+    "av10_right_1",
+    "av10_right_2",
+    "av10_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av10_down_idle",
+   "up": "av10_up_idle",
+   "left": "av10_left_idle",
+   "right": "av10_right_idle"
+  }
+ },
+ {
+  "avatarId": "av11",
+  "portrait": "av11_portrait",
+  "walk": {
+   "down": [
+    "av11_down_0",
+    "av11_down_1",
+    "av11_down_2",
+    "av11_down_3"
+   ],
+   "up": [
+    "av11_up_0",
+    "av11_up_1",
+    "av11_up_2",
+    "av11_up_3"
+   ],
+   "left": [
+    "av11_left_0",
+    "av11_left_1",
+    "av11_left_2",
+    "av11_left_3"
+   ],
+   "right": [
+    "av11_right_0",
+    "av11_right_1",
+    "av11_right_2",
+    "av11_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av11_down_idle",
+   "up": "av11_up_idle",
+   "left": "av11_left_idle",
+   "right": "av11_right_idle"
+  }
+ },
+ {
+  "avatarId": "av12",
+  "portrait": "av12_portrait",
+  "walk": {
+   "down": [
+    "av12_down_0",
+    "av12_down_1",
+    "av12_down_2",
+    "av12_down_3"
+   ],
+   "up": [
+    "av12_up_0",
+    "av12_up_1",
+    "av12_up_2",
+    "av12_up_3"
+   ],
+   "left": [
+    "av12_left_0",
+    "av12_left_1",
+    "av12_left_2",
+    "av12_left_3"
+   ],
+   "right": [
+    "av12_right_0",
+    "av12_right_1",
+    "av12_right_2",
+    "av12_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av12_down_idle",
+   "up": "av12_up_idle",
+   "left": "av12_left_idle",
+   "right": "av12_right_idle"
+  }
+ },
+ {
+  "avatarId": "av13",
+  "portrait": "av13_portrait",
+  "walk": {
+   "down": [
+    "av13_down_0",
+    "av13_down_1",
+    "av13_down_2",
+    "av13_down_3"
+   ],
+   "up": [
+    "av13_up_0",
+    "av13_up_1",
+    "av13_up_2",
+    "av13_up_3"
+   ],
+   "left": [
+    "av13_left_0",
+    "av13_left_1",
+    "av13_left_2",
+    "av13_left_3"
+   ],
+   "right": [
+    "av13_right_0",
+    "av13_right_1",
+    "av13_right_2",
+    "av13_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av13_down_idle",
+   "up": "av13_up_idle",
+   "left": "av13_left_idle",
+   "right": "av13_right_idle"
+  }
+ },
+ {
+  "avatarId": "av14",
+  "portrait": "av14_portrait",
+  "walk": {
+   "down": [
+    "av14_down_0",
+    "av14_down_1",
+    "av14_down_2",
+    "av14_down_3"
+   ],
+   "up": [
+    "av14_up_0",
+    "av14_up_1",
+    "av14_up_2",
+    "av14_up_3"
+   ],
+   "left": [
+    "av14_left_0",
+    "av14_left_1",
+    "av14_left_2",
+    "av14_left_3"
+   ],
+   "right": [
+    "av14_right_0",
+    "av14_right_1",
+    "av14_right_2",
+    "av14_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av14_down_idle",
+   "up": "av14_up_idle",
+   "left": "av14_left_idle",
+   "right": "av14_right_idle"
+  }
+ },
+ {
+  "avatarId": "av15",
+  "portrait": "av15_portrait",
+  "walk": {
+   "down": [
+    "av15_down_0",
+    "av15_down_1",
+    "av15_down_2",
+    "av15_down_3"
+   ],
+   "up": [
+    "av15_up_0",
+    "av15_up_1",
+    "av15_up_2",
+    "av15_up_3"
+   ],
+   "left": [
+    "av15_left_0",
+    "av15_left_1",
+    "av15_left_2",
+    "av15_left_3"
+   ],
+   "right": [
+    "av15_right_0",
+    "av15_right_1",
+    "av15_right_2",
+    "av15_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av15_down_idle",
+   "up": "av15_up_idle",
+   "left": "av15_left_idle",
+   "right": "av15_right_idle"
+  }
+ },
+ {
+  "avatarId": "av16",
+  "portrait": "av16_portrait",
+  "walk": {
+   "down": [
+    "av16_down_0",
+    "av16_down_1",
+    "av16_down_2",
+    "av16_down_3"
+   ],
+   "up": [
+    "av16_up_0",
+    "av16_up_1",
+    "av16_up_2",
+    "av16_up_3"
+   ],
+   "left": [
+    "av16_left_0",
+    "av16_left_1",
+    "av16_left_2",
+    "av16_left_3"
+   ],
+   "right": [
+    "av16_right_0",
+    "av16_right_1",
+    "av16_right_2",
+    "av16_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av16_down_idle",
+   "up": "av16_up_idle",
+   "left": "av16_left_idle",
+   "right": "av16_right_idle"
+  }
+ },
+ {
+  "avatarId": "av17",
+  "portrait": "av17_portrait",
+  "walk": {
+   "down": [
+    "av17_down_0",
+    "av17_down_1",
+    "av17_down_2",
+    "av17_down_3"
+   ],
+   "up": [
+    "av17_up_0",
+    "av17_up_1",
+    "av17_up_2",
+    "av17_up_3"
+   ],
+   "left": [
+    "av17_left_0",
+    "av17_left_1",
+    "av17_left_2",
+    "av17_left_3"
+   ],
+   "right": [
+    "av17_right_0",
+    "av17_right_1",
+    "av17_right_2",
+    "av17_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av17_down_idle",
+   "up": "av17_up_idle",
+   "left": "av17_left_idle",
+   "right": "av17_right_idle"
+  }
+ },
+ {
+  "avatarId": "av18",
+  "portrait": "av18_portrait",
+  "walk": {
+   "down": [
+    "av18_down_0",
+    "av18_down_1",
+    "av18_down_2",
+    "av18_down_3"
+   ],
+   "up": [
+    "av18_up_0",
+    "av18_up_1",
+    "av18_up_2",
+    "av18_up_3"
+   ],
+   "left": [
+    "av18_left_0",
+    "av18_left_1",
+    "av18_left_2",
+    "av18_left_3"
+   ],
+   "right": [
+    "av18_right_0",
+    "av18_right_1",
+    "av18_right_2",
+    "av18_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av18_down_idle",
+   "up": "av18_up_idle",
+   "left": "av18_left_idle",
+   "right": "av18_right_idle"
+  }
+ },
+ {
+  "avatarId": "av19",
+  "portrait": "av19_portrait",
+  "walk": {
+   "down": [
+    "av19_down_0",
+    "av19_down_1",
+    "av19_down_2",
+    "av19_down_3"
+   ],
+   "up": [
+    "av19_up_0",
+    "av19_up_1",
+    "av19_up_2",
+    "av19_up_3"
+   ],
+   "left": [
+    "av19_left_0",
+    "av19_left_1",
+    "av19_left_2",
+    "av19_left_3"
+   ],
+   "right": [
+    "av19_right_0",
+    "av19_right_1",
+    "av19_right_2",
+    "av19_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av19_down_idle",
+   "up": "av19_up_idle",
+   "left": "av19_left_idle",
+   "right": "av19_right_idle"
+  }
+ },
+ {
+  "avatarId": "av20",
+  "portrait": "av20_portrait",
+  "walk": {
+   "down": [
+    "av20_down_0",
+    "av20_down_1",
+    "av20_down_2",
+    "av20_down_3"
+   ],
+   "up": [
+    "av20_up_0",
+    "av20_up_1",
+    "av20_up_2",
+    "av20_up_3"
+   ],
+   "left": [
+    "av20_left_0",
+    "av20_left_1",
+    "av20_left_2",
+    "av20_left_3"
+   ],
+   "right": [
+    "av20_right_0",
+    "av20_right_1",
+    "av20_right_2",
+    "av20_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av20_down_idle",
+   "up": "av20_up_idle",
+   "left": "av20_left_idle",
+   "right": "av20_right_idle"
+  }
+ },
+ {
+  "avatarId": "av21",
+  "portrait": "av21_portrait",
+  "walk": {
+   "down": [
+    "av21_down_0",
+    "av21_down_1",
+    "av21_down_2",
+    "av21_down_3"
+   ],
+   "up": [
+    "av21_up_0",
+    "av21_up_1",
+    "av21_up_2",
+    "av21_up_3"
+   ],
+   "left": [
+    "av21_left_0",
+    "av21_left_1",
+    "av21_left_2",
+    "av21_left_3"
+   ],
+   "right": [
+    "av21_right_0",
+    "av21_right_1",
+    "av21_right_2",
+    "av21_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av21_down_idle",
+   "up": "av21_up_idle",
+   "left": "av21_left_idle",
+   "right": "av21_right_idle"
+  }
+ },
+ {
+  "avatarId": "av22",
+  "portrait": "av22_portrait",
+  "walk": {
+   "down": [
+    "av22_down_0",
+    "av22_down_1",
+    "av22_down_2",
+    "av22_down_3"
+   ],
+   "up": [
+    "av22_up_0",
+    "av22_up_1",
+    "av22_up_2",
+    "av22_up_3"
+   ],
+   "left": [
+    "av22_left_0",
+    "av22_left_1",
+    "av22_left_2",
+    "av22_left_3"
+   ],
+   "right": [
+    "av22_right_0",
+    "av22_right_1",
+    "av22_right_2",
+    "av22_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av22_down_idle",
+   "up": "av22_up_idle",
+   "left": "av22_left_idle",
+   "right": "av22_right_idle"
+  }
+ },
+ {
+  "avatarId": "av23",
+  "portrait": "av23_portrait",
+  "walk": {
+   "down": [
+    "av23_down_0",
+    "av23_down_1",
+    "av23_down_2",
+    "av23_down_3"
+   ],
+   "up": [
+    "av23_up_0",
+    "av23_up_1",
+    "av23_up_2",
+    "av23_up_3"
+   ],
+   "left": [
+    "av23_left_0",
+    "av23_left_1",
+    "av23_left_2",
+    "av23_left_3"
+   ],
+   "right": [
+    "av23_right_0",
+    "av23_right_1",
+    "av23_right_2",
+    "av23_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av23_down_idle",
+   "up": "av23_up_idle",
+   "left": "av23_left_idle",
+   "right": "av23_right_idle"
+  }
+ },
+ {
+  "avatarId": "av24",
+  "portrait": "av24_portrait",
+  "walk": {
+   "down": [
+    "av24_down_0",
+    "av24_down_1",
+    "av24_down_2",
+    "av24_down_3"
+   ],
+   "up": [
+    "av24_up_0",
+    "av24_up_1",
+    "av24_up_2",
+    "av24_up_3"
+   ],
+   "left": [
+    "av24_left_0",
+    "av24_left_1",
+    "av24_left_2",
+    "av24_left_3"
+   ],
+   "right": [
+    "av24_right_0",
+    "av24_right_1",
+    "av24_right_2",
+    "av24_right_3"
+   ]
+  },
+  "idle": {
+   "down": "av24_down_idle",
+   "up": "av24_up_idle",
+   "left": "av24_left_idle",
+   "right": "av24_right_idle"
+  }
+ }
+]

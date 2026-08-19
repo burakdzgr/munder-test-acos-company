@@ -1,0 +1,48 @@
+# Egress allowlist (27 §12, _DECISIONS §13, S8) — TEMPLATE.
+#
+# O11: the workspace subnet used to be hard-coded here while compose lets it
+# be overridden (WORKSPACE_SUBNET, so an ephemeral e2e stack can run beside
+# the dev stack). When the two drifted apart squid silently denied EVERY
+# workspace request — a default-deny proxy fails quietly, which is the worst
+# way for a config mismatch to show up. The subnet is now substituted from the
+# same environment variable compose uses, so the two cannot disagree.
+#
+# The entrypoint renders this to /etc/squid/squid.conf at boot.
+http_port 3128
+
+# Workspace containers (the acos-workspaces network).
+acl workspaces src ${WORKSPACE_SUBNET}
+
+# ACOS's own services on the compose network. `web.fetch` is dispatched from
+# apps/server (17 §3.1 — sandboxLevel "none"), so the server is a legitimate
+# client of this proxy; without this ACL every web.fetch would come back 403.
+# This is not an open proxy: port 3128 is never published to the host, so only
+# containers on a compose network can reach it, and the destination allowlist
+# below applies to them exactly as it does to workspaces.
+acl acos_services src ${SERVICE_SUBNETS}
+
+acl allowed_dst dstdomain .npmjs.org .yarnpkg.com .pypi.org .pythonhosted.org
+acl allowed_dst dstdomain .crates.io .golang.org .githubusercontent.com github.com
+acl CONNECT method CONNECT
+
+# D4 (27 §12): "per-workspace additions come from project settings via a
+# generated include". The server renders this file from
+# projects.settings.egressDomains onto a shared volume; the watcher in the
+# entrypoint reloads squid when it changes. Missing file = no additions.
+include /etc/squid/generated/projects.conf
+
+# 2026-08-19 FOUNDER KARARI (kayıtlı sapma — S8/27 §12 allowlist'inden):
+# "agentlar internete açılmalı, tam açık moda çek." Uyarı verildi (prompt
+# injection ile veri sızdırma riski), Founder kararı yineledi. Alan adı
+# filtresi kaldırıldı: compose ağlarındaki her istemci HER hedefe çıkabilir.
+# Proxy mimaride kalıyor (tek kapı + access log), yani karar tek satırla
+# geri alınabilir: aşağıdaki iki allow'u eski `allowed_dst`'li hâline döndür.
+http_access allow workspaces
+http_access allow acos_services
+http_access deny all                       # yalnız compose dışı (port zaten yayınlanmıyor)
+
+access_log stdio:/dev/stdout               # scraped to Loki; denials alertable
+cache deny all
+cache_log /dev/stderr
+coredump_dir /var/spool/squid
+pid_filename /run/squid.pid

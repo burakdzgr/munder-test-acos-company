@@ -1,0 +1,47 @@
+{
+  "name": "@acos/agent-worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "eslint src",
+    "test": "vitest run src test/replay",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test:integration": "vitest run test/integration",
+    "gen:histories": "tsx scripts/gen-histories.ts"
+  },
+  "dependencies": {
+    "@acos/config": "workspace:*",
+    "@acos/contracts": "workspace:*",
+    "@acos/db": "workspace:*",
+    "@acos/domain": "workspace:*",
+    "@acos/events": "workspace:*",
+    "@acos/llm": "workspace:*",
+    "@acos/tools": "workspace:*",
+    "@temporalio/activity": "^1.13.0",
+    "@temporalio/client": "^1.13.0",
+    "@temporalio/common": "^1.13.0",
+    "@temporalio/proto": "^1.13.0",
+    "@temporalio/worker": "^1.13.0",
+    "@temporalio/workflow": "^1.13.0",
+    "drizzle-orm": "^0.45.2",
+    "nats": "^2.29.3",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@temporalio/testing": "^1.13.0",
+    "@types/pg": "^8.21.0"
+  }
+}

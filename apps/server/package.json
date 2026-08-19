@@ -1,0 +1,55 @@
+{
+  "name": "@acos/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "eslint src",
+    "test": "vitest run src",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test:integration": "vitest run test/integration",
+    "seed": "tsx src/seed-cli.ts"
+  },
+  "dependencies": {
+    "@acos/config": "workspace:*",
+    "@acos/contracts": "workspace:*",
+    "@acos/db": "workspace:*",
+    "@acos/domain": "workspace:*",
+    "@acos/events": "workspace:*",
+    "@acos/llm": "workspace:*",
+    "@acos/tools": "workspace:*",
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/swagger": "^9.8.1",
+    "@fastify/websocket": "^11.2.0",
+    "@node-rs/argon2": "^2.0.2",
+    "@temporalio/client": "^1.13.0",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.11.3",
+    "fastify-type-provider-zod": "^7.0.0",
+    "libsodium-wrappers": "^0.8.4",
+    "nats": "^2.29.3",
+    "typescript": "^5.7.2",
+    "undici": "^7.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@temporalio/worker": "^1.13.0",
+    "@types/libsodium-wrappers": "^0.8.2",
+    "@types/pg": "^8.21.0",
+    "@types/ws": "^8.18.1",
+    "pg": "^8.23.0",
+    "ws": "^8.18.0"
+  }
+}

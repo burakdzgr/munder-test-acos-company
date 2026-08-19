@@ -1,0 +1,21 @@
+# M3 delegation cascade (T36, demo step 10): the CTO turns the initiative
+# into a technical design + one delivery epic and delegates it to the EM.
+match: { role: executive, taskFixture: none, agentName: Mert Aksoy }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS, note: Drafting the technical design }
+  - action: create_task
+    args:
+      kind: epic
+      title: "Epic: implement feature X behind the existing API"
+      objective: "Technical design: extend the service layer, keep the contract stable, ship behind a flag. Deliver as reviewable tasks."
+      successCriteria: [tasks decomposed with owners, all changes reviewed]
+      priority: P1
+      estimatedEffort: 5
+  - action: delegate_task
+    args: { note: Epic ready — over to engineering management for decomposition. }
+  - action: send_message
+    args:
+      body: "Technical design settled: service-layer extension behind a flag. One epic delegated to the Engineering Manager."
+  - action: complete_task
+    args: { summary: Design produced, epic delegated to the EM }

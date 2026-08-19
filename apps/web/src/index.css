@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* P0-B: acosDark is the ONLY theme — applied at the root so every route,
+   popup window and modal sits on the dark canvas (36 §2). */
+@layer base {
+  html {
+    color-scheme: dark;
+    @apply bg-acos-bg0 text-acos-fg0;
+  }
+}
+
+/* new memories fade in on memory.created (36 §5) */
+@keyframes memFade {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.mem-fade-in {
+  animation: memFade 0.6s ease-out;
+}
+
+/* toast slide-in (36 §9) */
+@keyframes toastSlide {
+  from {
+    transform: translateX(260px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.toast-slide-in {
+  animation: toastSlide 0.3s ease-out;
+}
+
+/* dockview → acosDark bridge (36 §2/§3): panel surfaces on the token set,
+   28px headers, hairline separators. Applied on top of dockview-theme-dark. */
+.dockview-theme-acos {
+  --dv-group-view-background-color: #0f1218;
+  --dv-tabs-and-actions-container-background-color: #151a22;
+  --dv-activegroup-visiblepanel-tab-background-color: #0f1218;
+  --dv-activegroup-hiddenpanel-tab-background-color: #151a22;
+  --dv-inactivegroup-visiblepanel-tab-background-color: #0f1218;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: #151a22;
+  --dv-tab-divider-color: #232b36;
+  --dv-separator-border: #232b36;
+  --dv-activegroup-visiblepanel-tab-color: #e6edf3;
+  --dv-activegroup-hiddenpanel-tab-color: #9aa7b4;
+  --dv-inactivegroup-visiblepanel-tab-color: #9aa7b4;
+  --dv-inactivegroup-hiddenpanel-tab-color: #5c6773;
+  --dv-tabs-and-actions-container-height: 28px;
+  --dv-tabs-and-actions-container-font-size: 11px;
+  --dv-sash-color: transparent;
+  --dv-active-sash-color: #4c9aff;
+  --dv-drag-over-background-color: rgba(76, 154, 255, 0.12);
+  --dv-edge-dock-indicator-color: rgba(76, 154, 255, 0.9);
+}

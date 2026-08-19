@@ -1,0 +1,22 @@
+{
+  "appId": "os.acos.desktop",
+  "productName": "ACOS",
+  "electronVersion": "43.4.0",
+  "directories": {
+    "output": "release"
+  },
+  "files": ["dist/**/*", "package.json"],
+  "win": {
+    "target": "nsis"
+  },
+  "nsis": {
+    "oneClick": true,
+    "perMachine": false
+  },
+  "mac": {
+    "target": "dmg"
+  },
+  "linux": {
+    "target": "AppImage"
+  }
+}

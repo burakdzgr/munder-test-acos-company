@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/domain" },
+    { "path": "packages/config" },
+    { "path": "packages/events" },
+    { "path": "packages/tools" },
+    { "path": "packages/db" },
+    { "path": "packages/llm" },
+    { "path": "packages/contracts" },
+    { "path": "packages/ui" },
+    { "path": "apps/server" },
+    { "path": "apps/web" },
+    { "path": "apps/desktop" },
+    { "path": "workers/agent-worker" },
+    { "path": "workers/execution-worker" },
+    { "path": "services/sandbox-manager" }
+  ]
+}

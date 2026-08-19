@@ -1,0 +1,339 @@
+# Base compose file — infrastructure + app services.
+# Spec: 27-INFRASTRUCTURE.md §2, 28-REPOSITORY-STRUCTURE.md §8, 35 §15.
+
+name: acos
+
+networks:
+  default: {}
+  # S8: workspace containers live here; internal => no default route out.
+  # The ONLY way out is egress-proxy. Subnet pinned to match squid.conf's
+  # `acl workspaces src 172.30.0.0/16`. Name/subnet are env-overridable so an
+  # EPHEMERAL e2e stack (compose.e2e.yaml, P0-A) can run beside the dev stack
+  # without a network-name/subnet collision (squid's ACL then denies e2e
+  # workspace egress — acceptable: no e2e spec reaches an external host).
+  acos-workspaces:
+    name: ${WORKSPACE_NET_NAME:-acos-workspaces}
+    internal: true
+    ipam:
+      config:
+        - subnet: ${WORKSPACE_SUBNET:-172.30.0.0/16}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: acos
+      POSTGRES_PASSWORD: acos
+      POSTGRES_DB: acos
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - "${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U acos -d acos"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+    volumes:
+      - "${DATA_DIR:-./data}/nats:/data"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz | grep -q ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: acos
+      POSTGRES_PWD: acos
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      DEFAULT_NAMESPACE: acos
+      DEFAULT_NAMESPACE_RETENTION: 7d
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CLI_ADDRESS: temporal:7233
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address temporal:7233 | grep -q SERVING"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+    ports:
+      - "${TEMPORAL_UI_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  server:
+    image: acos/server
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP_FILTER: "@acos/server"
+        APP_MAIN: apps/server/dist/main.js
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVER_PORT: "3000"
+      DATABASE_URL: postgres://acos:acos@postgres:5432/acos
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: acos
+      SANDBOX_MANAGER_URL: http://sandbox-manager:3010
+      # Dev fallbacks — override via .env in any real install (prod overlay requires them).
+      MASTER_KEY: ${MASTER_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token-change-me}
+      # Single-user mode (Founder decision 2026-08-13): no login UI; the server
+      # auto-mints the Founder session. Set "false" to restore the login flow.
+      AUTH_AUTOLOGIN: ${AUTH_AUTOLOGIN:-true}
+      # REVISION TASK 7: tek kullanıcılı kurulumun BİLİNÇLİ production istisnası
+      AUTH_AUTOLOGIN_ALLOW_PRODUCTION: ${AUTH_AUTOLOGIN_ALLOW_PRODUCTION:-false}
+      SEED_FOUNDER_PASSWORD: ${SEED_FOUNDER_PASSWORD:-}
+      # live-LLM lane (T50): with a key present (and LLM_MODE unset) the seed
+      # provisions the anthropic provider + model profiles
+      LLM_MODE: ${LLM_MODE:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CLAUDE_CLI_BRIDGE_URL: ${CLAUDE_CLI_BRIDGE_URL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # D4 (27 §12): per-project egress allowlist include, rendered here and
+      # read by egress-proxy (read-only on its side).
+      EGRESS_INCLUDE_PATH: /var/acos/egress/projects.conf
+    volumes:
+      - "${DATA_DIR:-./data}/egress:/var/acos/egress"
+    ports:
+      # Container always listens on 3000; host side is overridable because dev
+      # machines may already occupy 3000 (SERVER_PORT is only interpolated here,
+      # the container env above pins the internal port).
+      - "${SERVER_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/healthz > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  web:
+    image: acos/web
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.web
+      target: prod
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  agent-worker:
+    image: acos/agent-worker
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP_FILTER: "@acos/agent-worker"
+        APP_MAIN: workers/agent-worker/dist/main.js
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTH_PORT: "3020"
+      DATABASE_URL: postgres://acos:acos@postgres:5432/acos
+      NATS_URL: nats://nats:4222
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: acos
+      # e2e/demo profile: LLM_MODE=scripted swaps in the deterministic fake
+      # ModelRouter (32 §6); empty = live providers from model_providers rows.
+      LLM_MODE: ${LLM_MODE:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CLAUDE_CLI_BRIDGE_URL: ${CLAUDE_CLI_BRIDGE_URL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # use_tool → Tool Gateway internal HTTP (T40, S3)
+      SERVER_INTERNAL_URL: http://server:3000
+      # TASK 6: greenfield bootstrap sandbox'a doğrudan gider
+      SANDBOX_MANAGER_URL: http://sandbox-manager:3010
+      # Dev fallbacks — override via .env in any real install (prod overlay requires them).
+      MASTER_KEY: ${MASTER_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token-change-me}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      # Ollama İSTEĞE BAĞLI bir sağlayıcıdır (_DECISIONS A3: "fully-offline
+      # mode (Ollama-only) is a supported degraded profile, NOT the primary
+      # target"). Birincil yol Anthropic; ollama'ya `service_healthy` ile
+      # bağlanmak, isteğe bağlı bir servisin tökezlemesinde bütün şirketi
+      # durduruyordu. `service_started` yeter: model yönlendirici zaten
+      # sağlayıcı erişilemezse yedeğe düşüyor.
+      ollama:
+        condition: service_started
+      # server healthy ⇒ migrations ran; the worker reads model_providers at boot
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3020/healthz > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  execution-worker:
+    image: acos/execution-worker
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP_FILTER: "@acos/execution-worker"
+        APP_MAIN: workers/execution-worker/dist/main.js
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HEALTH_PORT: "3021"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: acos
+      # agent tool effects go through the gateway (S3, T40); intake SYSTEM
+      # activities (14 §3.1, T42) are the doc-assigned direct sandbox path
+      SERVER_INTERNAL_URL: http://server:3000
+      SANDBOX_MANAGER_URL: http://sandbox-manager:3010
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token-change-me}
+    depends_on:
+      temporal:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3021/healthz > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  sandbox-manager:
+    image: acos/sandbox-manager
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+      args:
+        APP_FILTER: "@acos/sandbox-manager"
+        APP_MAIN: services/sandbox-manager/dist/main.js
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SANDBOX_MANAGER_PORT: "3010"
+      NATS_URL: nats://nats:4222
+      DATA_DIR: /data
+      # workspace containers join THIS project's network (P0-A e2e isolation)
+      WORKSPACE_NETWORK: ${WORKSPACE_NET_NAME:-acos-workspaces}
+      # shared internal bearer — execution-worker authenticates with the same token
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token-change-me}
+    volumes:
+      # S1: the ONLY service that mounts the Docker socket.
+      - "${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"
+      - "${DATA_DIR:-./data}:/data"
+    networks:
+      - default
+      - acos-workspaces
+    depends_on:
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3010/healthz > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - "${DATA_DIR:-./data}/ollama:/root/.ollama"
+    healthcheck:
+      # `ollama list` — imajın KENDİ ikilisi. Önceki sürüm `curl` çağırıyordu
+      # ama ollama/ollama imajında curl YOK: healthcheck her seferinde
+      # "curl: not found" ile 1 dönüyor, konteyner kalıcı olarak unhealthy
+      # kalıyor ve buna service_healthy ile bağlı olan agent-worker HİÇ
+      # başlamıyordu (2026-08-17'de tam olarak bu yaşandı — ajanların çalışma
+      # sebebi olan worker sessizce "Created" durumunda kaldı).
+      test: ["CMD-SHELL", "ollama list > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    # Ollama pulled model başlangıçta indirilecek; "ollama pull mistral" gibi komut çalıştırır
+    # Komut: docker exec acos-ollama ollama pull mistral
+
+  egress-proxy:
+    image: acos/egress-proxy
+    build:
+      context: egress-proxy
+    environment:
+      # O11: the ACL subnet comes from the SAME variable as the network below,
+      # so the two cannot drift apart (they did, and squid then denied every
+      # workspace request without anything looking wrong).
+      WORKSPACE_SUBNET: ${WORKSPACE_SUBNET:-172.30.0.0/16}
+    volumes:
+      # D4 (27 §12): the server renders projects.settings.egressDomains here;
+      # the proxy reads it read-only and reloads on change. The proxy must
+      # never be able to rewrite its own allowlist.
+      - "${DATA_DIR:-./data}/egress:/etc/squid/acos:ro"
+    networks:
+      - default
+      - acos-workspaces
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s

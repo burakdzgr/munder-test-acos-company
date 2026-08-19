@@ -1,0 +1,20 @@
+# packages/llm/testing/scripts/backend-dev.task-implement.yaml
+# Canonical scripted-agent script (32 §6.1 verbatim).
+match: { role: backend-dev, taskFixture: implement-feature }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS }
+  - action: use_tool
+    args: { tool: write_file, path: "src/export/csv.ts", contentRef: fixture:csv-impl-v1 }
+  - action: use_tool
+    args: { tool: run_command, command: "npm test" }
+  - when: { lastToolResult: { exitCode: nonzero } }   # branch on observed state
+    action: use_tool
+    args: { tool: write_file, path: "src/export/csv.ts", contentRef: fixture:csv-impl-v2 }
+  - action: request_review
+    args: { reviewerHint: lead }
+  - onSignal: { reviewVerdict: changes_requested }
+    action: use_tool
+    args: { tool: write_file, path: "src/export/csv.ts", contentRef: fixture:csv-impl-v3 }
+  - action: complete_task
+    args: { summaryRef: fixture:completion-summary }

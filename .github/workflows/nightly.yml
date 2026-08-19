@@ -1,0 +1,95 @@
+# Nightly hardening lane (T50; 29 §8.3, 32 §5): the same master suite on a
+# clean compose boot, PLUS the heavy gates the per-PR lane skips — the 100k
+# retrieval perf budget and (when provider secrets exist) the live-LLM run.
+# Exit criterion 29 §8.3 is operational: three consecutive green nightly
+# live-LLM runs — tracked by this workflow's history.
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  perf-budgets:
+    name: perf budgets (32 §8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Retrieval p95 < 250ms @ 100k memories (12 §7)
+        run: RUN_PERF=1 pnpm --filter @acos/db exec vitest run test/integration/memory-retrieval-perf.int.test.ts
+
+  master-e2e:
+    name: master e2e on a clean boot (scripted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SEED_FOUNDER_PASSWORD: founder-nightly-password
+      LLM_MODE: scripted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright chromium
+        run: pnpm --filter @acos/web exec playwright install --with-deps chromium
+      - name: Build workspace image
+        run: pnpm build:workspace-images
+      - name: Boot full stack (clean)
+        run: docker compose -f infrastructure/docker/compose.yaml up -d --build --wait
+      - name: "Master suite: 25 demo steps + R1 + R2 (scenario files 02–14)"
+        run: SEED_FOUNDER_PASSWORD=$SEED_FOUNDER_PASSWORD pnpm --filter @acos/web e2e
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-playwright-results
+          path: apps/web/test-results
+      - name: Teardown
+        if: always()
+        run: docker compose -f infrastructure/docker/compose.yaml down -v
+
+  live-llm:
+    name: live-LLM lane (29 §8.3 — needs provider secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # the lane only counts when a real provider key is configured; forks and
+    # secretless repos skip instead of failing
+    if: ${{ vars.ENABLE_LIVE_LLM == 'true' }}
+    env:
+      SEED_FOUNDER_PASSWORD: founder-nightly-password
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright chromium
+        run: pnpm --filter @acos/web exec playwright install --with-deps chromium
+      - name: Build workspace image
+        run: pnpm build:workspace-images
+      - name: Boot full stack (LIVE providers — LLM_MODE unset)
+        run: docker compose -f infrastructure/docker/compose.yaml up -d --build --wait
+        env:
+          LLM_MODE: ""
+      - name: Master suite against live models
+        run: SEED_FOUNDER_PASSWORD=$SEED_FOUNDER_PASSWORD pnpm --filter @acos/web e2e
+      - name: Teardown
+        if: always()
+        run: docker compose -f infrastructure/docker/compose.yaml down -v

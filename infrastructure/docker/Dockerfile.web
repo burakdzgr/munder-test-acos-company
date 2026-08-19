@@ -1,0 +1,14 @@
+# apps/web: build stage (node, used directly in dev Mode A) + nginx prod stage
+# serving the SPA and proxying /api + /ws to the server (28 §8).
+FROM node:22-alpine AS build
+WORKDIR /app
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter "@acos/web..." run build
+
+FROM nginx:1.27-alpine AS prod
+COPY infrastructure/docker/nginx-web.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/apps/web/dist /usr/share/nginx/html

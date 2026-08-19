@@ -1,0 +1,21 @@
+# Shared image for the Node services (server, agent-worker, execution-worker,
+# sandbox-manager). Which app it runs is chosen via build args:
+#   APP_FILTER  pnpm filter, e.g. @acos/server
+#   APP_MAIN    entry point relative to /app, e.g. apps/server/dist/main.js
+# bookworm-slim (glibc): @temporalio/core-bridge ships glibc-only natives —
+# alpine/musl cannot load them. wget is installed for the compose healthchecks.
+FROM node:22-bookworm-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates     && rm -rf /var/lib/apt/lists/*
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+
+COPY . .
+RUN pnpm install --frozen-lockfile
+
+ARG APP_FILTER
+RUN pnpm --filter "${APP_FILTER}..." run build
+
+ARG APP_MAIN
+ENV APP_MAIN=${APP_MAIN}
+CMD node ${APP_MAIN}
