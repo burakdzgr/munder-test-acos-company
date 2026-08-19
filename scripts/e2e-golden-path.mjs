@@ -362,9 +362,15 @@ async function main() {
     }, T.long, 3000);
     if (!session) return BREAK(`no agent session row for ${state.workTaskNumber} after ${T.long / 1000}s`, "worker:agentTaskWorkflow");
     state.sessionId = session.id;
-    const terminals = await get(`/api/v1/companies/${state.companyId}/terminals`);
-    const items = list(terminals.body);
-    const pty = Array.isArray(items) ? items.find((t) => t.taskId === state.workTaskId) : null;
+    // POLL for the PTY, do not spot-check it: the session row appears the
+    // moment the workflow starts, but the workspace and its terminal are only
+    // created when the agent reaches its FIRST tool call — seconds in scripted
+    // mode, minutes on a live provider. A single read here reported "no PTY"
+    // while the live run demonstrably had one (A7, 2026-08-19).
+    const pty = await until(async () => {
+      const terminals = await get(`/api/v1/companies/${state.companyId}/terminals`);
+      return list(terminals.body).find((t) => t.taskId === state.workTaskId) ?? null;
+    }, LANE === "scripted" ? T.short : T.long, 5000);
     if (!pty) {
       const detail = `session ${session.status}/${session.currentActivity} but NO PTY terminal bound to the task - worktree work is not live/observable`;
       return LANE === "scripted" ? LANE_LIMIT(detail) : BREAK(detail, "sandbox-manager:terminal");

@@ -3,7 +3,12 @@
 // and the 8 agents extend this in T18/T19.
 import { randomBytes } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { companyContext, CostService, type CompanyContext, type GuardedDb } from "@acos/db";
+import {
+  companyContext,
+  CostService,
+  type CompanyContext,
+  type GuardedDb,
+} from "@acos/db";
 import { pricingDefaultsFor } from "@acos/llm";
 import {
   budgets,
@@ -56,13 +61,19 @@ export async function ensureSeed(db: GuardedDb): Promise<SeedResult> {
     // whole point of calling it "an additive seed upgrade".
     await seedToolGrants(db, companyContext(existingCompany.id));
     await ensureSearchCredential(db, existingCompany.id, existingUser.id);
-    return { created: false, companyId: existingCompany.id, founderUserId: existingUser.id };
+    return {
+      created: false,
+      companyId: existingCompany.id,
+      founderUserId: existingUser.id,
+    };
   }
 
   let founderUserId = existingUser?.id;
   let founderPassword: string | undefined;
   if (!founderUserId) {
-    founderPassword = process.env.SEED_FOUNDER_PASSWORD || randomBytes(12).toString("base64url");
+    founderPassword =
+      process.env.SEED_FOUNDER_PASSWORD ||
+      randomBytes(12).toString("base64url");
     const [user] = await db
       .insert(users)
       .values({
@@ -121,7 +132,10 @@ const DEFAULT_DAILY_BUDGET_CENTS = 50_000;
  * Additive and idempotent: written only when absent, so a Founder-edited
  * limit (or a deliberate deletion) survives every later boot.
  */
-async function ensureCompanyDailyBudget(db: GuardedDb, companyId: string): Promise<void> {
+async function ensureCompanyDailyBudget(
+  db: GuardedDb,
+  companyId: string,
+): Promise<void> {
   const ctx = companyContext(companyId);
   const [existing] = await db
     .select({ id: budgets.id })
@@ -135,7 +149,9 @@ async function ensureCompanyDailyBudget(db: GuardedDb, companyId: string): Promi
     )
     .limit(1);
   if (existing) return;
-  const limitCents = Number(process.env.SEED_DAILY_BUDGET_CENTS ?? DEFAULT_DAILY_BUDGET_CENTS);
+  const limitCents = Number(
+    process.env.SEED_DAILY_BUDGET_CENTS ?? DEFAULT_DAILY_BUDGET_CENTS,
+  );
   if (!Number.isFinite(limitCents) || limitCents <= 0) return; // budgets_limit_check
   // through CostService so the `budget.created` event lands on the timeline
   await new CostService(db).setBudget(ctx, {
@@ -159,7 +175,9 @@ async function ensureCompanyDailyBudget(db: GuardedDb, companyId: string): Promi
  * stores (snake_case, model-keyed). One translation point; `loadProviderPricing`
  * translates back on read.
  */
-function seedPricingDocument(kind: "anthropic" | "openai"): Record<string, unknown> {
+function seedPricingDocument(
+  kind: "anthropic" | "openai",
+): Record<string, unknown> {
   const table = pricingDefaultsFor(kind);
   if (!table) return {};
   const models: Record<string, Record<string, number>> = {};
@@ -170,12 +188,19 @@ function seedPricingDocument(kind: "anthropic" | "openai"): Record<string, unkno
       cached_in_per_mtok_cents: rate.cachedInputPerMTokCents,
     };
   }
-  return { models, updated_at: new Date().toISOString().slice(0, 10), source: "seed" };
+  return {
+    models,
+    updated_at: new Date().toISOString().slice(0, 10),
+    source: "seed",
+  };
 }
 
-async function ensureLiveModelRouting(db: GuardedDb, companyId: string): Promise<void> {
+async function ensureLiveModelRouting(
+  db: GuardedDb,
+  companyId: string,
+): Promise<void> {
   if (process.env.LLM_MODE === "scripted") return;
-  
+
   // OLLAMA_BASE_URL varsa Ollama provider'ını register et
   if (process.env.OLLAMA_BASE_URL) {
     const [existingOllama] = await db
@@ -201,48 +226,66 @@ async function ensureLiveModelRouting(db: GuardedDb, companyId: string): Promise
       ] as const) {
         await db
           .insert(modelProfiles)
-          .values({ companyId, purpose, providerId: ollamaProviderId, model, priority: 10 })
+          .values({
+            companyId,
+            purpose,
+            providerId: ollamaProviderId,
+            model,
+            priority: 10,
+          })
           .onConflictDoNothing();
       }
     }
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) return;
-  const [existingProvider] = await db
-    .select({ id: modelProviders.id })
-    .from(modelProviders)
-    .where(eq(modelProviders.name, "anthropic"));
-  const providerId =
-    existingProvider?.id ??
-    (
-      await db
-        .insert(modelProviders)
-        .values({ kind: "anthropic", name: "anthropic" })
-        .onConflictDoNothing()
-        .returning({ id: modelProviders.id })
-    )[0]?.id;
-  if (!providerId) return; // lost a boot race — the winner seeded it
+  // The Anthropic tier needs an API key; the tiers BELOW it do not. This used
+  // to `return` here, so an install running purely on the Claude-CLI bridge
+  // (subscription, no API key) seeded NO live provider at all and every agent
+  // fell back to Ollama — the bridge path was unreachable exactly for the
+  // setup it was built for. Skip the block, not the rest of the chain.
+  if (process.env.ANTHROPIC_API_KEY) {
+    const [existingProvider] = await db
+      .select({ id: modelProviders.id })
+      .from(modelProviders)
+      .where(eq(modelProviders.name, "anthropic"));
+    const providerId =
+      existingProvider?.id ??
+      (
+        await db
+          .insert(modelProviders)
+          .values({ kind: "anthropic", name: "anthropic" })
+          .onConflictDoNothing()
+          .returning({ id: modelProviders.id })
+      )[0]?.id;
+    if (!providerId) return; // lost a boot race — the winner seeded it
 
-  // A1 (26 §3.1): seed the price list into `model_providers.pricing` in the
-  // document shape so Settings → Providers can edit it at runtime. Only
-  // written while the column still holds its empty default — an operator's
-  // edits are never overwritten on boot.
-  await db
-    .update(modelProviders)
-    .set({ pricing: seedPricingDocument("anthropic") })
-    .where(and(eq(modelProviders.id, providerId), sql`${modelProviders.pricing} = '{}'::jsonb`));
-
-  const LIVE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
-  const FAST_MODEL = process.env.ANTHROPIC_FAST_MODEL ?? "claude-haiku-4-5-20251001";
-  for (const [purpose, model] of [
-    ["reasoning", LIVE_MODEL],
-    ["coding", LIVE_MODEL],
-    ["fast", FAST_MODEL],
-  ] as const) {
+    // A1 (26 §3.1): seed the price list into `model_providers.pricing` in the
+    // document shape so Settings → Providers can edit it at runtime. Only
+    // written while the column still holds its empty default — an operator's
+    // edits are never overwritten on boot.
     await db
-      .insert(modelProfiles)
-      .values({ companyId, purpose, providerId, model, priority: 0 })
-      .onConflictDoNothing();
+      .update(modelProviders)
+      .set({ pricing: seedPricingDocument("anthropic") })
+      .where(
+        and(
+          eq(modelProviders.id, providerId),
+          sql`${modelProviders.pricing} = '{}'::jsonb`,
+        ),
+      );
+
+    const LIVE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+    const FAST_MODEL =
+      process.env.ANTHROPIC_FAST_MODEL ?? "claude-haiku-4-5-20251001";
+    for (const [purpose, model] of [
+      ["reasoning", LIVE_MODEL],
+      ["coding", LIVE_MODEL],
+      ["fast", FAST_MODEL],
+    ] as const) {
+      await db
+        .insert(modelProfiles)
+        .values({ companyId, purpose, providerId, model, priority: 0 })
+        .onConflictDoNothing();
+    }
   }
 
   // Çok sağlayıcılı zincir (Founder kararı, 2026-08-18; REVISION sonrası
@@ -250,7 +293,10 @@ async function ensureLiveModelRouting(db: GuardedDb, companyId: string): Promise
   // düşüş zincirini alır — Anthropic(0) → Claude CLI(1, abonelik) →
   // Gemini(3, ücretsiz) → OpenAI(5) → Ollama(10). Sağlayıcı satırları
   // platformda idempotent, profiller şirket başına.
-  const ensureProvider = async (name: string, kind: string): Promise<string | null> => {
+  const ensureProvider = async (
+    name: string,
+    kind: string,
+  ): Promise<string | null> => {
     const [existing] = await db
       .select({ id: modelProviders.id })
       .from(modelProviders)
@@ -274,7 +320,13 @@ async function ensureLiveModelRouting(db: GuardedDb, companyId: string): Promise
     for (const purpose of ["reasoning", "coding", "fast"] as const) {
       await db
         .insert(modelProfiles)
-        .values({ companyId, purpose, providerId, model: models[purpose], priority })
+        .values({
+          companyId,
+          purpose,
+          providerId,
+          model: models[purpose],
+          priority,
+        })
         .onConflictDoNothing();
     }
   };
@@ -339,7 +391,10 @@ async function ensureLiveModelRouting(db: GuardedDb, companyId: string): Promise
  * 1 QA/Reviewer) with the reports_to forest Dev→Lead→EM→CTO→CEO.
  * Idempotent: skipped when the company already has agents.
  */
-async function seedOrgAndAgents(db: GuardedDb, companyId: string): Promise<void> {
+async function seedOrgAndAgents(
+  db: GuardedDb,
+  companyId: string,
+): Promise<void> {
   const ctx = companyContext(companyId);
   const [{ n }] = (
     await db.execute(
@@ -408,7 +463,9 @@ async function seedOrgAndAgents(db: GuardedDb, companyId: string): Promise<void>
       seniority: input.seniority,
       autonomyLevel: input.autonomyLevel,
       persona: input.persona,
-      ...(input.managerAgentId !== undefined && { managerAgentId: input.managerAgentId }),
+      ...(input.managerAgentId !== undefined && {
+        managerAgentId: input.managerAgentId,
+      }),
       ...(input.leadsUnit !== undefined && { leadsUnit: input.leadsUnit }),
       activate: true,
     });
@@ -419,7 +476,8 @@ async function seedOrgAndAgents(db: GuardedDb, companyId: string): Promise<void>
     unitId: engineering.id,
     seniority: "expert",
     autonomyLevel: 5,
-    persona: "Decisive CEO agent; delegates to executives, never to individual contributors.",
+    persona:
+      "Decisive CEO agent; delegates to executives, never to individual contributors.",
   });
   const cto = await hire({
     name: "Mert Aksoy",
@@ -427,7 +485,8 @@ async function seedOrgAndAgents(db: GuardedDb, companyId: string): Promise<void>
     unitId: engineering.id,
     seniority: "expert",
     autonomyLevel: 5,
-    persona: "Pragmatic CTO agent; owns technical direction and the engineering org.",
+    persona:
+      "Pragmatic CTO agent; owns technical direction and the engineering org.",
     managerAgentId: ceo.id,
   });
   const em = await hire({
@@ -436,7 +495,8 @@ async function seedOrgAndAgents(db: GuardedDb, companyId: string): Promise<void>
     unitId: engineering.id,
     seniority: "lead",
     autonomyLevel: 4,
-    persona: "Engineering manager; decomposes objectives and balances team load.",
+    persona:
+      "Engineering manager; decomposes objectives and balances team load.",
     managerAgentId: cto.id,
   });
   const backendLead = await hire({
@@ -521,7 +581,10 @@ const SEED_GRANT_TOOLS = [
  * budget per call. Idempotent via the active-grant unique index, and safe
  * to re-run on existing installs (additive seed upgrade).
  */
-export async function seedToolGrants(db: GuardedDb, ctx: CompanyContext): Promise<void> {
+export async function seedToolGrants(
+  db: GuardedDb,
+  ctx: CompanyContext,
+): Promise<void> {
   // Walkthrough bulgusu (2026-08-19): grant yalnız BİLİNEN sluglara iniyordu —
   // Founder'ın elle kurduğu "Yönetim" gibi birimlerin ajanları ilk araçta
   // NO_PERMISSION_GRANT duvarına çarpıyordu. Temel araç seti artık ŞİRKETİN
@@ -564,7 +627,9 @@ async function ensureSearchCredential(
   const [existing] = await db
     .select({ id: secrets.id })
     .from(secrets)
-    .where(and(eq(secrets.companyId, companyId), eq(secrets.name, "search.api_key")));
+    .where(
+      and(eq(secrets.companyId, companyId), eq(secrets.name, "search.api_key")),
+    );
   if (existing) return; // already seeded
 
   // Seal and store
@@ -580,7 +645,6 @@ async function ensureSearchCredential(
     })
     .onConflictDoNothing();
 }
-
 
 /**
  * Yeni şirketin çalışır doğması (2026-08-19, sıfırlama bulgusu): şirket
