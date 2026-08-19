@@ -285,6 +285,44 @@ describe.skipIf(!runnable)("gateway → dispatch → real workspace (T40 accepta
     expect(sessions[0]!.status).toBe("closed");
   }, 600_000);
 
+  // Yaşayan ajan terminali (2026-08-19 runtime, Munder davranışı): oturum
+  // bağlamıyla gelen terminal.run komut başına oturum AÇ-KAPA yapmaz —
+  // ajan+workspace başına TEK aktif oturumda birikir, Founder tek akışta
+  // izler; oturum workspace teardown'una (ya da açılış süpürmesine) dek açık.
+  it("terminal.run with an agent session reuses ONE living terminal across commands", async () => {
+    const agentSessionId = "01a01a00-0000-7000-8000-00000000aaaa";
+    const first = await gateway.invoke(ctx, {
+      agentId: DEV,
+      toolName: "terminal.run",
+      input: { command: "echo living-one", timeoutSec: 60 },
+      taskId,
+      agentSessionId,
+    });
+    expect(first.status, `dispatch error: ${first.error ?? first.reason ?? "none"}`).toBe(
+      "succeeded",
+    );
+    const firstOut = first.output as { terminalSessionId: string; stdoutTail: string };
+    expect(firstOut.stdoutTail).toContain("living-one");
+
+    const second = await gateway.invoke(ctx, {
+      agentId: DEV,
+      toolName: "terminal.run",
+      input: { command: "echo living-two", timeoutSec: 60 },
+      taskId,
+      agentSessionId,
+    });
+    expect(second.status).toBe("succeeded");
+    const secondOut = second.output as { terminalSessionId: string };
+    expect(secondOut.terminalSessionId).toBe(firstOut.terminalSessionId);
+
+    const [row] = await db
+      .select()
+      .from(terminalSessions)
+      .where(eq(terminalSessions.id, firstOut.terminalSessionId));
+    expect(row!.status).toBe("active"); // yaşıyor — komut değil, teardown kapatır
+    expect(row!.title).toBe("agent-live");
+  }, 600_000);
+
   // Y3 (B4'): the payload used to travel as a base64 ARGV entry, and Linux
   // caps one argv entry at MAX_ARG_STRLEN = 128 KB. Base64 inflates by a
   // third, so ~96 KB of source was the real ceiling — while fs.write's schema
