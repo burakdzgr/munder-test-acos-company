@@ -120,6 +120,10 @@ services:
       # REVISION TASK 7: tek kullanıcılı kurulumun BİLİNÇLİ production istisnası
       AUTH_AUTOLOGIN_ALLOW_PRODUCTION: ${AUTH_AUTOLOGIN_ALLOW_PRODUCTION:-false}
       SEED_FOUNDER_PASSWORD: ${SEED_FOUNDER_PASSWORD:-}
+      # Without this passthrough main.ts never runs ensureSeed inside compose:
+      # no owner user => autologin returns "unavailable" => every /api/v1 call
+      # is 401 on a fresh stack (found by the golden-path runner, T2).
+      SEED_DEMO: ${SEED_DEMO:-false}
       # live-LLM lane (T50): with a key present (and LLM_MODE unset) the seed
       # provisions the anthropic provider + model profiles
       LLM_MODE: ${LLM_MODE:-}
