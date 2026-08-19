@@ -9,9 +9,15 @@
 # manager-intervention task. The scripted lane could staff a team it could not
 # then run.
 #
-# Shaped like the recorded EM script (em.epic-decompose) but with ONE delivery
-# task and no @-mention owners: a factory team has exactly one member and its
-# name is generated, so a sentinel that names demo agents would not resolve.
+# Shaped like the recorded EM script (em.epic-decompose) but with ONE child and
+# no @-mention owners: a factory team has exactly one member and its name is
+# generated, so a sentinel that names demo agents would not resolve.
+#
+# The child is an EPIC, not a task: 07 §2 forbids level skipping (KIND_PARENT
+# = goal < initiative < epic < task), and a lead is handed the INITIATIVE, so
+# `kind: task` here is rejected with TASK_HIERARCHY_INVALID — which then makes
+# delegate_task fail with NO_UNASSIGNED_CHILD and the whole delivery line stop
+# one level short.
 # delegate_task carries no owner — the worker picks the least-loaded eligible
 # report, and a lead with no reports still reaches a terminal state.
 match: { role: lead, taskFixture: none }
@@ -20,8 +26,8 @@ steps:
     args: { status: IN_PROGRESS, note: Breaking the initiative into delivery work }
   - action: create_task
     args:
-      kind: task
-      title: Implement the delivery task
+      kind: epic
+      title: "Epic: deliver the initiative"
       objective: Implement the change described by the initiative, with unit coverage.
       successCriteria: [change implemented, unit tests pass]
       priority: P1
