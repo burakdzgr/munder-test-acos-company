@@ -8,6 +8,8 @@ coverage/
 data/
 infrastructure/docker/data/
 infrastructure/docker/data-e2e/
+# per-agent isolated e2e stacks (ACOS_E2E_PROJECT) keep their own data dir
+infrastructure/docker/data-acos-e2e*/
 .DS_Store
 dist-types/
 apps/web/test-results/
