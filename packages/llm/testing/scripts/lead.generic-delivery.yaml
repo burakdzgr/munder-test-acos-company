@@ -1,0 +1,35 @@
+# Generic team-lead script — NAME- and org-shape-independent (gate finding,
+# 2026-08-19, integrated main 5fbdb3e).
+#
+# The Agent Factory staffs each approved team with a review-capable LEAD
+# (15 §2.2) plus its members, but no recorded script declared `role: lead`.
+# The moment staffing started working, every factory-built lead died on its
+# first model call with `ScriptLoadError: ... no script declares role=lead at
+# all`; its initiative went BLOCKED and the crash handler filed a
+# manager-intervention task. The scripted lane could staff a team it could not
+# then run.
+#
+# Shaped like the recorded EM script (em.epic-decompose) but with ONE delivery
+# task and no @-mention owners: a factory team has exactly one member and its
+# name is generated, so a sentinel that names demo agents would not resolve.
+# delegate_task carries no owner — the worker picks the least-loaded eligible
+# report, and a lead with no reports still reaches a terminal state.
+match: { role: lead, taskFixture: none }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS, note: Breaking the initiative into delivery work }
+  - action: create_task
+    args:
+      kind: task
+      title: Implement the delivery task
+      objective: Implement the change described by the initiative, with unit coverage.
+      successCriteria: [change implemented, unit tests pass]
+      priority: P1
+      estimatedEffort: 3
+  - action: delegate_task
+    args: { note: Handing the delivery task to the team. }
+  - action: send_message
+    args:
+      body: "Initiative broken into one delivery task and handed to the team; tracking it to review."
+  - action: complete_task
+    args: { summary: Initiative decomposed and delegated to the team }
