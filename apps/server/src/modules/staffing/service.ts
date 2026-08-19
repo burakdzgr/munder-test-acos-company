@@ -15,7 +15,7 @@ import {
   type CompanyContext,
   type GuardedDb,
 } from "@acos/db";
-import { notifications, orgUnits, positions, tasks } from "@acos/db/schema";
+import { approvals as approvalsTable, notifications, orgUnits, positions, tasks } from "@acos/db/schema";
 import { OrgService } from "../org/service.js";
 import { AgentsService } from "../agents/service.js";
 import { seedToolGrants } from "../../seed.js";
@@ -153,12 +153,59 @@ export class StaffingService {
         });
       }
       // birimdeki mevcut aktif sayıya TAMAMLA — retry ikinci kadro kurmaz
+      // (sayım lider işe alınmadan ÖNCE: lider üye kontenjanından düşmez)
       const [{ n: existing }] = (
         await this.db.execute(sql`
           SELECT count(*)::int AS n FROM agents
           WHERE company_id = ${ctx.companyId} AND org_unit_id = ${unit.id} AND status = 'active'
         `)
       ).rows as [{ n: number }];
+
+      // P0-2 (15 §2.2 "…else the lead"): code-review yalnız reviewer/lead/
+      // manager rollerine açık — executive de member da listede değil. Yalnız
+      // member'lardan kurulan takımda request_review İNCELEYECEK KİMSE
+      // bulamıyor ve görev süresiz REVIEW'da asılı kalıyordu. Her kurulan
+      // takım inceleme-yetkin bir liderle doğar; üyeler lidere raporlar
+      // (04 §3: CEO rutin işi doğrudan geliştiriciye atamaz), lider tepe
+      // yöneticiye raporlar.
+      let [unitLead] = (
+        await this.db.execute(sql`
+          SELECT a.id FROM agents a
+          JOIN positions p ON p.id = a.position_id
+          WHERE a.company_id = ${ctx.companyId} AND a.org_unit_id = ${unit.id}
+            AND a.status = 'active' AND p.default_role IN ('lead','manager')
+          LIMIT 1
+        `)
+      ).rows as [{ id: string } | undefined];
+      if (!unitLead) {
+        const leadTitle = `${req.capability.charAt(0).toUpperCase() + req.capability.slice(1)} Lideri`;
+        let [leadPosition] = await this.db
+          .select()
+          .from(positions)
+          .where(and(eq(positions.companyId, ctx.companyId), eq(positions.title, leadTitle)));
+        if (!leadPosition) {
+          leadPosition = await orgService.createPosition(ctx, {
+            title: leadTitle,
+            seniorityTrack: ["senior", "expert"],
+            defaultRole: "lead",
+          });
+        }
+        const lead = await agentsService.hire(ctx, {
+          name: leadTitle,
+          positionId: leadPosition.id,
+          orgUnitId: unit.id,
+          seniority: "senior",
+          autonomyLevel: 4, // 2026-08-18 Founder kararı: lider/yönetici ≥L4
+          persona: `${req.capability} takım lideri: iş dağıtır, kod inceler, kaliteden sorumludur.`,
+          managerAgentId: topExec?.id ?? null,
+          leadsUnit: true,
+          activate: true,
+          ...(opts.projectId && { projectId: opts.projectId }),
+        });
+        hiredAgentIds.push(lead.id);
+        unitLead = { id: lead.id };
+      }
+
       for (let i = Number(existing); i < req.count; i += 1) {
         const agent = await agentsService.hire(ctx, {
           name: `${positionTitle} ${i + 1}`,
@@ -167,7 +214,7 @@ export class StaffingService {
           seniority: "mid",
           autonomyLevel: 3,
           persona: `${req.capability} alanında uzman, üretime dönük çalışan bir ekip üyesi.`,
-          managerAgentId: topExec?.id ?? null,
+          managerAgentId: unitLead?.id ?? topExec?.id ?? null,
           activate: true,
           ...(opts.projectId && { projectId: opts.projectId }),
         });
@@ -217,8 +264,26 @@ export async function continueProjectPlanning(
   };
 
   // gereksinim analizi artefaktı (TASK 8) → yetenek listesi
-  const analysis = await loadRequirementAnalysis(db, ctx, projectId);
-  const capabilities = analysis?.required_capabilities ?? [];
+  let analysis = await loadRequirementAnalysis(db, ctx, projectId);
+  // FAIL-CLOSED (P0-1, canlı kanıt 2026-08-19): analyzeRequirementsActivity
+  // degrade-safe olduğu için artefakt hiç oluşmayabiliyor; boş liste "kadro
+  // tam" sayılınca TEK KİŞİLİK (yalnız CEO) şirket bile doğrudan executing'e
+  // geçiyor ve Agent Factory dalı hiç çalışmıyordu. Dosya başındaki ilke
+  // ("yanlış/eksik kurulmuş takım projeyi ASLA başarısız akışa sokmaz —
+  // bekletir") gereği analiz yok/boşsa kadro TAM DEĞİL varsayılır:
+  // deterministik asgari mühendislik gereksinimi yazılır (degraded artefakt —
+  // karar izlenebilir kalır) ve gap analizi normal yolundan Founder onayı üretir.
+  if (!analysis || (analysis.required_capabilities ?? []).length === 0) {
+    const fallback = {
+      goal: project.objectiveMd.slice(0, 200),
+      required_capabilities: ["fullstack"],
+      degraded: true,
+      degraded_reason: "requirement analyzer produced no capabilities; assuming minimum engineering staffing (fail-closed)",
+    };
+    await projectsService.saveRequirementAnalysis(ctx, projectId, fallback).catch(() => {});
+    analysis = fallback;
+  }
+  const capabilities = analysis.required_capabilities ?? [];
 
   const topExec = await projectsService.topExecutive(ctx).catch(() => null);
   if (!topExec) {
@@ -335,6 +400,23 @@ async function createStaffingApproval(
     gap: StaffingGap;
   },
 ): Promise<string> {
+  // idempotent re-entry: continueProjectPlanning'in her tekrar girişi (intake
+  // retry, Founder düğmesi, verdict hook) buradan geçer — aynı GOAL için
+  // bekleyen hire onayı varsa YENİSİ açılmaz (reddedilmiş onay sayılmaz:
+  // Founder reddettiyse sonraki giriş taze onay üretebilmeli)
+  const [existingPending] = await db
+    .select({ id: approvalsTable.id })
+    .from(approvalsTable)
+    .where(
+      and(
+        eq(approvalsTable.companyId, ctx.companyId),
+        eq(approvalsTable.taskId, input.goalTaskId),
+        eq(approvalsTable.kind, "hire"),
+        eq(approvalsTable.status, "pending"),
+      ),
+    );
+  if (existingPending) return existingPending.id;
+
   // plan GOAL context'inde taşınır (brief 11 alanla sabittir)
   const tasksService = new TasksService(db);
   const goal = await tasksService.get(ctx, input.goalTaskId);

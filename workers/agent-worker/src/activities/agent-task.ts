@@ -309,6 +309,49 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
     } catch (err) {
       if (err instanceof ReviewError &&
           (err.code === "REVIEW_TASK_INVALID" || err.code === "REVIEW_NO_ELIGIBLE_REVIEWER")) {
+        // P0-2: bu null eskiden TAM sessizdi — görev REVIEW'da, inceleyecek
+        // kimse yok, hiçbir yüzeyde iz yok. Escalation olayı + Founder
+        // notification'ı görünür kılar; stuck sweep'in review-yetim kuralı
+        // kadro tamamlanınca incelemeyi yeniden açar.
+        if (err.code === "REVIEW_NO_ELIGIBLE_REVIEWER") {
+          await guardedDb
+            .transaction(async (tx) => {
+              await emitDomainEvent(tx, ctx, {
+                type: "agent.escalated",
+                actor: { kind: "system", id: null },
+                agentId: authorAgentId,
+                taskId,
+                payload: {
+                  toFounder: true,
+                  reason:
+                    "Görev REVIEW'a taşındı ama inceleme-yetkin ajan yok (INV-14: yazar kendini inceleyemez) — reviewer/lead işe alınana kadar bekleyecek",
+                  attempted: [],
+                  recommendation: "hire a lead/reviewer or review manually",
+                },
+              });
+              const founderRow = await tx.execute(sql`
+                SELECT cm.user_id FROM company_members cm
+                WHERE cm.company_id = ${ctx.companyId} AND cm.role = 'founder' AND cm.removed_at IS NULL
+                LIMIT 1
+              `);
+              const founder = founderRow.rows[0] as { user_id: string } | undefined;
+              if (founder) {
+                await tx.insert(notifications).values({
+                  companyId: ctx.companyId,
+                  userId: founder.user_id,
+                  kind: "review_blocked",
+                  title: "İnceleme bekliyor: uygun reviewer yok",
+                  bodyMd:
+                    "Bir görev REVIEW'a taşındı ama şirkette inceleme-yetkin (reviewer/lead/manager) başka ajan yok. " +
+                    "Bir lider işe alın — kadro tamamlanınca inceleme otomatik yeniden açılır.",
+                  refs: { taskId },
+                });
+              }
+            })
+            .catch(() => {
+              /* görünürlük best-effort; REVIEW durumu zaten kalıcı */
+            });
+        }
         return null; // toolless/projectless task or a one-agent org — transition-only
       }
       throw err;

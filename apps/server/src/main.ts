@@ -326,6 +326,31 @@ async function main(): Promise<void> {
           { taskId: finding.taskId, kind: finding.kind, stuckForMs: finding.stuckForMs },
           describeStuckTask(finding),
         );
+        // P0-2: kadro tamamlanınca yeniden açılan inceleme — reviewer'ın
+        // reviewWorkflow'u burada başlar (worker main'deki starter ile aynı
+        // id şeması: review.<reviewId>; duplicate start yutulur)
+        if (finding.kind === "review_reopened" && finding.review && temporalClientRef) {
+          await temporalClientRef.workflow
+            .start("reviewWorkflow", {
+              taskQueue: "agent-tasks",
+              workflowId: `review.${finding.review.reviewId}`,
+              args: [
+                {
+                  companyId: finding.companyId,
+                  reviewId: finding.review.reviewId,
+                  taskId: finding.taskId,
+                  reviewerAgentId: finding.review.reviewerAgentId,
+                  authorAgentId: finding.review.authorAgentId,
+                },
+              ],
+            })
+            .catch((err: unknown) => {
+              if ((err as { name?: string }).name !== "WorkflowExecutionAlreadyStartedError") {
+                app.log.error({ err, taskId: finding.taskId }, "review reopen start failed");
+              }
+            });
+          continue;
+        }
         // the owner's loop is gone → restart it, otherwise the escalation
         // event alone would just tell the Founder about a task nobody works
         if (finding.needsWorkflowRestart && finding.ownerAgentId && app.agentWorkflowStarter) {
