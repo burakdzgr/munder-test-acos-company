@@ -15,7 +15,15 @@ import type { CompanyContext } from "./context.js";
 import type { GuardedDb } from "./tenant.js";
 import { SkillsService } from "./skills.js";
 import { TaskStateService } from "./task-engine.js";
-import { agents, positions, reviews, taskAssignments, tasks, workspaces } from "./schema/index.js";
+import {
+  agents,
+  positions,
+  repositories,
+  reviews,
+  taskAssignments,
+  tasks,
+  workspaces,
+} from "./schema/index.js";
 
 async function emitDomainEvent(tx: Tx, ctx: CompanyContext, input: NewEventInput) {
   const payload = parseEventPayload(input.type, input.version ?? 1, input.payload ?? {});
@@ -154,10 +162,37 @@ export class ReviewsService {
           ),
         )
         .limit(1);
-      if (!workspace?.repositoryId) {
+      // T8 (canlı kanıt 2026-08-19): eski hâlde CANLI WORKSPACE ŞARTTI ve
+      // yoksa REVIEW_TASK_INVALID atılıp çağıran tarafta sessizce yutuluyordu
+      // — görev REVIEW'a geçiyor, `reviews` satırı HİÇ doğmuyor, reviewer
+      // atanmıyor, hiçbir görev REVIEW'dan çıkamıyordu (gate'te goal/
+      // initiative/epic üçü de asılı kaldı). Oysa kendi diff'i OLMAYAN görev
+      // meşrudur ve dokümanda tarif edilmiştir: 07 §12 "epic … then moves
+      // epic to REVIEW" (epic'in diff'i yok, çocuklarınınki var) ve akışın
+      // geri kalanı bunu zaten varsayıyor (review activities `workspace?.
+      // branch ?? ""`, git.merge EMPTY_MERGE → system kapanışı). Workspace
+      // yoksa inceleme PROJENİN deposuna bağlanır, dal boş kalır: reviewer
+      // diff yerine sonucu/çocukları inceler. INV-14 (reviewer ≠ author)
+      // ve 15 §2.2 seçimi aynen korunur.
+      let repositoryId = workspace?.repositoryId ?? null;
+      if (!repositoryId) {
+        const [repo] = await tx
+          .select({ id: repositories.id })
+          .from(repositories)
+          .where(
+            and(
+              eq(repositories.companyId, ctx.companyId),
+              eq(repositories.projectId, task.projectId),
+            ),
+          )
+          .orderBy(asc(repositories.createdAt))
+          .limit(1);
+        repositoryId = repo?.id ?? null;
+      }
+      if (!repositoryId) {
         throw new ReviewError(
           "REVIEW_TASK_INVALID",
-          "reviews need a live task workspace (branch + repository)",
+          "reviews need a repository (the task's project has none)",
         );
       }
 
@@ -217,9 +252,9 @@ export class ReviewsService {
           companyId: ctx.companyId,
           taskId: input.taskId,
           projectId: task.projectId,
-          repositoryId: workspace.repositoryId,
-          workspaceId: workspace.id,
-          branch: workspace.branch ?? "",
+          repositoryId,
+          workspaceId: workspace?.id ?? null,
+          branch: workspace?.branch ?? "",
           kind,
           authorAgentId: input.authorAgentId,
           reviewerAgentId: reviewer.id,
