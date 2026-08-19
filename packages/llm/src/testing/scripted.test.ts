@@ -121,6 +121,50 @@ describe("scripted adapter (port-compatible)", () => {
       }),
     ).rejects.toThrow(/no script matches/);
   });
+
+  // P2-1 (T2 golden-path finding): before the generic executive script existed,
+  // an executive hired under any name but the demo CEO's matched nothing and
+  // its session died on the first call — the scripted lane only ran for the
+  // seeded identities.
+  describe("executive scripts are name-independent", () => {
+    const named = loadScript(
+      readFileSync(join(__dirname, "../../testing/scripts/ceo.objective-decompose.yaml"), "utf8"),
+    );
+    const generic = loadScript(
+      readFileSync(
+        join(__dirname, "../../testing/scripts/executive.generic-objective.yaml"),
+        "utf8",
+      ),
+    );
+    const ask = (adapter: ReturnType<typeof createScriptedAdapter>, agentName: string) =>
+      adapter.complete({
+        model: "scripted",
+        messages: [
+          { role: "system", content: `[role:executive] [taskFixture:none] [agentName:${agentName}]` },
+        ],
+      });
+
+    it("serves an unrecorded executive from the generic script", async () => {
+      const adapter = createScriptedAdapter([named, generic], { taskId: TASK_ID });
+      const result = await ask(adapter, "Someone Not In The Fixtures");
+      expect(AgentActionSchema.parse(JSON.parse(result.text))).toMatchObject({
+        type: "update_task_status",
+        to: "IN_PROGRESS",
+      });
+    });
+
+    it("still prefers the name-scoped script for the recorded cascade", async () => {
+      const adapter = createScriptedAdapter([named, generic], { taskId: TASK_ID });
+      await ask(adapter, "Aylin Vural");
+      const second = await ask(adapter, "Aylin Vural");
+      // step 2 of the CEO script is its own initiative title; the generic one
+      // would answer with a different objective here.
+      expect(JSON.parse(second.text)).toMatchObject({
+        type: "create_task",
+        title: expect.stringContaining("feature X"),
+      });
+    });
+  });
 });
 
 describe("pseudo-embeddings + canned consolidation (32 §6)", () => {

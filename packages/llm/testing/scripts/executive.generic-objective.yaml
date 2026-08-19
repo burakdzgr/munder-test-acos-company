@@ -1,0 +1,38 @@
+# Generic executive script — the NAME-INDEPENDENT fallback (T2/P2-1).
+#
+# The two recorded cascade scripts (ceo.objective-decompose, cto.initiative-
+# design) are keyed to the demo org's agent names, so any executive hired
+# under a different name matched nothing and the session died on its first
+# call with `ScriptLoadError: no script matches role=executive
+# taskFixture=none agentName=<whoever>` — the scripted lane only worked for
+# the seeded fixture identities, which made every new e2e scenario require a
+# new recording.
+#
+# This script has NO agentName, so the adapter picks it only when no
+# name-scoped script matches (name-scoped always wins). The recorded T36
+# cascade is therefore untouched: Aylin Vural and Mert Aksoy keep their own
+# scripts; everyone else gets this one.
+#
+# Deliberately org-shape agnostic: it decomposes and hands the child down, but
+# never assumes a direct report exists — a one-executive company must reach
+# the same terminal state as a fully staffed one, only without the delegation
+# landing on anybody.
+match: { role: executive, taskFixture: none }
+steps:
+  - action: update_task_status
+    args: { status: IN_PROGRESS, note: Reviewing the objective }
+  - action: create_task
+    args:
+      kind: initiative
+      title: "Initiative: plan and deliver the objective"
+      objective: Break the objective into a technical plan and delivery epics.
+      successCriteria: [technical plan exists, delivery tracked]
+      priority: P1
+      estimatedEffort: 8
+  - action: delegate_task
+    args: { note: Delegating the initiative to the technical line. }
+  - action: send_message
+    args:
+      body: "Objective received and decomposed into one initiative; delegated down the reporting line."
+  - action: complete_task
+    args: { summary: Objective decomposed and delegated }

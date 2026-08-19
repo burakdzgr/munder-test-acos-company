@@ -251,8 +251,18 @@ export function createScriptedAdapter(
         candidates.find((s) => s.match.agentName !== undefined && s.match.agentName === agentName) ??
         candidates.find((s) => s.match.agentName === undefined);
       if (!script) {
+        // Name the near-misses: the usual cause is a (role, fixture) that only
+        // has name-scoped scripts, so an agent hired under any other name
+        // matches nothing. The fix is a generic script for that pair, not a
+        // rename of the agent.
+        const sameRole = scripts
+          .filter((s) => s.match.role === role)
+          .map((s) => `${s.match.taskFixture}${s.match.agentName ? `/${s.match.agentName}` : "/*"}`);
         throw new ScriptLoadError(
-          `no script matches role=${role} taskFixture=${fixture} agentName=${agentName}`,
+          `no script matches role=${role} taskFixture=${fixture} agentName=${agentName}` +
+            (sameRole.length > 0
+              ? ` — scripts for role=${role}: ${sameRole.join(", ")} (add a script without agentName to cover every agent)`
+              : ` — no script declares role=${role} at all`),
         );
       }
       // sessions are per (script, agent, task): two agents sharing a generic
