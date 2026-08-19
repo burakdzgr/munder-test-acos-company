@@ -24,6 +24,11 @@ const stackEnv = {
   TEMPORAL_UI_PORT: "18080",
   SERVER_PORT: "13000",
   WEB_PORT: "15173",
+  // Ollama publishes a host port too (compose.yaml §ollama). Without an offset
+  // the e2e stack collides with a running dev stack on 11434 and the WHOLE
+  // `up` aborts ("port is already allocated") — the offset list must cover
+  // EVERY published port in compose.yaml, not just the famous four.
+  OLLAMA_PORT: "21434",
   WORKSPACE_NET_NAME: "acos-e2e-workspaces",
   WORKSPACE_SUBNET: "172.31.0.0/16",
   SEED_FOUNDER_PASSWORD: process.env.SEED_FOUNDER_PASSWORD ?? "founder-dev-password",
