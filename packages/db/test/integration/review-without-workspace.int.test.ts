@@ -178,7 +178,7 @@ describe("requestReview — workspace'siz görev (P0-2)", { timeout: 60_000 }, (
     expect(created).toBe(true);
     expect(review.repositoryId).toBe(repoId); // projenin deposu
     expect(review.workspaceId).toBeNull(); // workspace yok — sütun nullable
-    expect(review.branch).toBe("main"); // deponun varsayılan dalı
+    expect(review.branch).toBe(""); // incelenen bir dal YOK (god kararı 2026-08-19)
     expect(review.status).toBe("pending");
     // INV-14: yazar kendini inceleyemez — bağımsız (lead) seçildi
     expect(review.reviewerAgentId).toBe(LEAD);

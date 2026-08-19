@@ -181,16 +181,19 @@ export class ReviewsService {
        * İnceleme ROW'u iş ürününe değil GÖREVE aittir; deponun kimliği de
        * görevin PROJESİNDEN türetilebilir (workspace yalnız bir kısayoldu).
        * Workspace yoksa projenin deposuna düşülür: `workspace_id` NULL kalır
-       * (sütun zaten nullable), `branch` görevin dalı ya da deponun varsayılan
-       * dalıdır. Şema/ad/INV değişmedi; INV-14 (reviewer≠author) aynı iki
-       * yapısal kapıdan geçer. Merge yolu değişmez — birleştirilecek dal yoksa
-       * QA onayı görevi SYSTEM kapanışıyla bitirir (15 §3.6 boş-merge kaydı).
+       * (sütun zaten nullable) ve `branch` BOŞ kalır: incelenen bir dal
+       * yoktur — deponun varsayılan dalını yazmak "main incelemede" gibi
+       * okunurdu ve akışın geri kalanı zaten `workspace?.branch ?? ""`
+       * varsayıyor (god kararı 2026-08-19). Şema/ad/INV değişmedi; INV-14
+       * (reviewer≠author) aynı iki yapısal kapıdan geçer. Merge yolu değişmez
+       * — birleştirilecek dal yoksa QA onayı görevi SYSTEM kapanışıyla
+       * bitirir (15 §3.6 boş-merge kaydı).
        */
       let repositoryId = workspace?.repositoryId ?? null;
-      let branch = workspace?.branch ?? "";
+      const branch = workspace?.branch ?? "";
       if (!repositoryId) {
         const [repo] = await tx
-          .select({ id: repositories.id, defaultBranch: repositories.defaultBranch })
+          .select({ id: repositories.id })
           .from(repositories)
           .where(
             and(
@@ -207,7 +210,6 @@ export class ReviewsService {
           );
         }
         repositoryId = repo.id;
-        branch = repo.defaultBranch;
       }
 
       const [existing] = await tx
