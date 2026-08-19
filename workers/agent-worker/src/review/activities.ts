@@ -68,6 +68,19 @@ export function createReviewActivities(deps: ReviewActivityDeps) {
     if (!task?.ownerAgentId) {
       return { merged: false, taskStatus: "", detail: "task has no owner" };
     }
+    // T8: bir konteyner (goal/initiative) kendi diff'ini TAŞIMAZ — 07 §2'ye
+    // göre durumu çocuklarından TÜRETİLİR ve roll-up ile kapanır. Konteyner
+    // artık (diff'siz inceleme kaydıyla) QA'ya kadar gelebildiği için burada
+    // fenceleniyor: merge denemesi boş dalda hataya, ardından system DONE
+    // denemesi A5 guard'ının TASK_TRANSITION_INVALID'ine çarpıp reviewWorkflow'u
+    // düşürürdü. Konteyneri roll-up kapatır; burada yapılacak bir şey yok.
+    if (task.kind === "goal" || task.kind === "initiative") {
+      return {
+        merged: false,
+        taskStatus: task.status,
+        detail: "container closes by roll-up (07 §2), not by merge",
+      };
+    }
     const [workspace] = await deps.guardedDb
       .select()
       .from(workspaces)
