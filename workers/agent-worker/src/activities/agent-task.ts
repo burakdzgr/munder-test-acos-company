@@ -310,6 +310,36 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
     }
   }
 
+  /**
+   * 07 §2: `goal` ve `initiative` KONTEYNERDİR — kendi işleri yoktur, "nobody
+   * reviews a goal"; durumları çocuklardan TÜRETİLİR (A5 roll-up, task-engine
+   * `rollUpContainer`). Canlı kanıt (golden path stage 10, 2026-08-19):
+   * complete_task/request_review görev türüne bakmadan REVIEW'a taşıyordu;
+   * konteyner REVIEW'da kilitleniyor, inceleme kaydı da açılamıyordu (iş ürünü
+   * yok) → hem inceleme hem roll-up zinciri ölü. Konteyner artık REVIEW'a
+   * taşınmaz: sahibi sonucu yazar, kapanış çocuklar terminal olunca roll-up ile
+   * gelir.
+   */
+  const CONTAINER_KINDS = new Set(["goal", "initiative"]);
+
+  async function taskKindOf(ctx: CompanyContext, taskId: string): Promise<string | null> {
+    const [row] = await guardedDb
+      .select({ kind: tasks.kind })
+      .from(tasks)
+      .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, taskId)));
+    return row?.kind ?? null;
+  }
+
+  /** Konteynerin açık çocuk sayısı — gözlemde sahibe geri bildirilir. */
+  async function openChildrenOf(ctx: CompanyContext, taskId: string): Promise<number> {
+    const rows = await guardedDb
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.parentId, taskId)));
+    const TERMINAL = new Set(["DONE", "FAILED", "CANCELLED", "REJECTED"]);
+    return rows.filter((r) => !TERMINAL.has(r.status)).length;
+  }
+
   /** request_review / review-shaped complete_task: open (or reset) the code
    *  review row and start the independent reviewer's workflow (T43). Tool-
    *  less tasks (no project/workspace) keep the pre-T43 transition-only path. */
@@ -1207,6 +1237,20 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
           // owner submits: IN_PROGRESS→REVIEW (07 §5) + the code review row
           // with an INDEPENDENT reviewer whose workflow starts now (T43)
           const taskId = selfTask(action.taskId);
+          // 07 §2: konteyner incelenmez — çocuklarından türetilir
+          if (CONTAINER_KINDS.has((await taskKindOf(ctx, taskId)) ?? "")) {
+            const open = await openChildrenOf(ctx, taskId);
+            return {
+              ok: true,
+              container: true,
+              reviewRequested: false,
+              openChildren: open,
+              note:
+                open > 0
+                  ? `Bu bir konteyner görev (07 §2): incelenmez, ${open} açık alt görev bitince kendiliğinden kapanır. Alt görevleri takip et.`
+                  : "Bu bir konteyner görev (07 §2): incelenmez; alt görevler terminal olduğunda roll-up ile kapanır.",
+            };
+          }
           await checkpointBranch(input);
           const updated = await taskState.transition(ctx, taskId, "REVIEW", {
             kind: "agent",
@@ -1828,6 +1872,28 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
             .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
           if (!row) return { ok: false, error: "TASK_NOT_FOUND" };
           const owner = { kind: "agent" as const, agentId: input.agentId };
+          // 07 §2: konteyner (goal/initiative) REVIEW'a taşınmaz — sonucu
+          // yazılır, kapanışı çocuk roll-up'ı getirir (task-engine A5 guard'ı
+          // zaten doğrudan DONE'ı reddediyor; buradaki REVIEW hop'u ise görevi
+          // ölü uçta bırakıyordu: inceleme kaydı açılamaz, roll-up beklenir).
+          if (CONTAINER_KINDS.has((await taskKindOf(ctx, input.taskId)) ?? "")) {
+            await guardedDb
+              .update(tasks)
+              .set({ result: action.result })
+              .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
+            const open = await openChildrenOf(ctx, input.taskId);
+            return {
+              ok: true,
+              completed: false,
+              container: true,
+              reviewRequested: false,
+              openChildren: open,
+              note:
+                open > 0
+                  ? `Konteyner görev (07 §2): sonucun kaydedildi ama kapanış ${open} açık alt görevin bitmesine bağlı — roll-up otomatik kapatır.`
+                  : "Konteyner görev (07 §2): sonucun kaydedildi; alt görevler terminal olduğunda roll-up kapatır.",
+            };
+          }
           if (["ASSIGNED", "IN_PROGRESS", "CHANGES_REQUESTED"].includes(row.status)) {
             try {
               // 07 §10 sonuç sözleşmesi tasks.result'a yazılır (şema zaten

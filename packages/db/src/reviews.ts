@@ -55,7 +55,13 @@ export class ReviewError extends Error {
 const REVIEWER_ROLES: Record<ReviewKind, string[]> = {
   code: ["reviewer", "lead", "manager"],
   architecture: ["lead", "manager", "executive"],
-  qa: ["qa", "reviewer"],
+  // 2026-08-19 canlı bulgu (golden path stage 10): kod incelemesi onaylanınca
+  // açılan QA turu, QA/reviewer ROLÜ olmayan şirketlerde (Agent Factory bir
+  // LEAD işe alıyor) "no eligible qa reviewer" ile patlıyor ve QA ONAYLI
+  // olmayan görev QA'da asılı kalıyordu. 15 §2'nin org tablosunda QA Lead'in
+  // rolü zaten `lead`; küçük kadroda kaliteyi lead/manager devralır (INV-14
+  // bağımsızlığı değişmez — yazar hiçbir zaman aday değildir).
+  qa: ["qa", "reviewer", "lead", "manager"],
   security: ["reviewer", "lead"],
 };
 
@@ -162,19 +168,29 @@ export class ReviewsService {
           ),
         )
         .limit(1);
-      // T8 (canlı kanıt 2026-08-19): eski hâlde CANLI WORKSPACE ŞARTTI ve
-      // yoksa REVIEW_TASK_INVALID atılıp çağıran tarafta sessizce yutuluyordu
-      // — görev REVIEW'a geçiyor, `reviews` satırı HİÇ doğmuyor, reviewer
-      // atanmıyor, hiçbir görev REVIEW'dan çıkamıyordu (gate'te goal/
-      // initiative/epic üçü de asılı kaldı). Oysa kendi diff'i OLMAYAN görev
-      // meşrudur ve dokümanda tarif edilmiştir: 07 §12 "epic … then moves
-      // epic to REVIEW" (epic'in diff'i yok, çocuklarınınki var) ve akışın
-      // geri kalanı bunu zaten varsayıyor (review activities `workspace?.
-      // branch ?? ""`, git.merge EMPTY_MERGE → system kapanışı). Workspace
-      // yoksa inceleme PROJENİN deposuna bağlanır, dal boş kalır: reviewer
-      // diff yerine sonucu/çocukları inceler. INV-14 (reviewer ≠ author)
-      // ve 15 §2.2 seçimi aynen korunur.
+      /**
+       * P0-2 kalanı (2026-08-19, canlı kanıt golden path stage 10): inceleme
+       * KAYDI yalnız canlı bir task workspace'i varsa açılabiliyordu. Kodda
+       * hiçbir şey üretmemiş ama REVIEW'a taşınmış bir görev (planlama/analiz
+       * işi, araçsız fixture, henüz workspace açmamış sahip) bu yüzden
+       * `REVIEW_TASK_INVALID` alıyor, çağıran taraf sessizce "transition-only"
+       * yoluna düşüyordu: görev REVIEW'da, reviews tablosunda SIFIR satır,
+       * atanmış reviewer yok, onaylayacak kimse yok → görev sonsuza dek asılı
+       * (canlıda 3 görev: goal/initiative/epic, reviews=0).
+       *
+       * İnceleme ROW'u iş ürününe değil GÖREVE aittir; deponun kimliği de
+       * görevin PROJESİNDEN türetilebilir (workspace yalnız bir kısayoldu).
+       * Workspace yoksa projenin deposuna düşülür: `workspace_id` NULL kalır
+       * (sütun zaten nullable) ve `branch` BOŞ kalır: incelenen bir dal
+       * yoktur — deponun varsayılan dalını yazmak "main incelemede" gibi
+       * okunurdu ve akışın geri kalanı zaten `workspace?.branch ?? ""`
+       * varsayıyor (god kararı 2026-08-19). Şema/ad/INV değişmedi; INV-14
+       * (reviewer≠author) aynı iki yapısal kapıdan geçer. Merge yolu değişmez
+       * — birleştirilecek dal yoksa QA onayı görevi SYSTEM kapanışıyla
+       * bitirir (15 §3.6 boş-merge kaydı).
+       */
       let repositoryId = workspace?.repositoryId ?? null;
+      const branch = workspace?.branch ?? "";
       if (!repositoryId) {
         const [repo] = await tx
           .select({ id: repositories.id })
@@ -187,13 +203,13 @@ export class ReviewsService {
           )
           .orderBy(asc(repositories.createdAt))
           .limit(1);
-        repositoryId = repo?.id ?? null;
-      }
-      if (!repositoryId) {
-        throw new ReviewError(
-          "REVIEW_TASK_INVALID",
-          "reviews need a repository (the task's project has none)",
-        );
+        if (!repo) {
+          throw new ReviewError(
+            "REVIEW_TASK_INVALID",
+            "reviews need a repository — neither a live task workspace nor a project repository exists",
+          );
+        }
+        repositoryId = repo.id;
       }
 
       const [existing] = await tx
@@ -253,8 +269,8 @@ export class ReviewsService {
           taskId: input.taskId,
           projectId: task.projectId,
           repositoryId,
-          workspaceId: workspace?.id ?? null,
-          branch: workspace?.branch ?? "",
+          ...(workspace && { workspaceId: workspace.id }),
+          branch,
           kind,
           authorAgentId: input.authorAgentId,
           reviewerAgentId: reviewer.id,

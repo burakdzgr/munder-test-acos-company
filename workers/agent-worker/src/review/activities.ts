@@ -11,6 +11,8 @@ import { agents, orgEdges, positions, tasks, workspaces } from "@acos/db/schema"
 
 export interface ReviewActivityDeps {
   guardedDb: GuardedDb;
+  /** görünürlük kancası (QA turu açılamadığında iz bırakır) */
+  log?: ((msg: string, meta?: Record<string, unknown>) => void) | undefined;
   /** Rework re-entry: restart the owner's loop with the verdict pre-seeded. */
   startAgentWorkflow?:
     | ((input: {
@@ -87,6 +89,30 @@ export function createReviewActivities(deps: ReviewActivityDeps) {
       .where(and(eq(workspaces.companyId, ctx.companyId), eq(workspaces.taskId, input.taskId)));
     const lead = await findLead(deps.guardedDb, ctx.companyId, task.ownerAgentId);
     if (!lead) return { merged: false, taskStatus: "", detail: "no lead in the owner's chain" };
+
+    /**
+     * P0-2 kalanı (2026-08-19): birleştirilecek DAL YOKSA git.merge'i hiç
+     * çağırma. Kod üretmemiş bir görevde (planlama/analiz işi, araçsız
+     * fixture) workspace satırı yok; git.merge "no task branch found" ile
+     * başarısız oluyor, QA ONAYLI görev QA'da asılı kalıyordu — kalite zinciri
+     * tamamlandığı hâlde görev hiç kapanmıyor. Boş dal hâli zaten kayıtlı bir
+     * durum (aşağıdaki EMPTY_MERGE dalı, 2026-08-14): kapanışı SYSTEM yapar.
+     * Aynı semantik, bir adım önce — merge çağrısına hiç girmeden.
+     */
+    if (!workspace?.branch) {
+      const closed = await new TaskStateService(deps.guardedDb).transition(
+        ctx,
+        input.taskId,
+        "DONE",
+        { kind: "system" },
+        { note: "QA onaylı; birleştirilecek dal yok (kod üretmeyen görev) — system kapanışı" },
+      );
+      return {
+        merged: false,
+        taskStatus: closed.status,
+        detail: "no branch to merge — closed by system",
+      };
+    }
 
     const result = await deps.invokeTool({
       companyId: input.companyId,
@@ -215,18 +241,43 @@ export function createReviewActivities(deps: ReviewActivityDeps) {
       if (review.kind === "code" && input.verdict === "approved") {
         // REVIEW → QA happened; open the QA round (15 §2 gate chain)
         if (task?.ownerAgentId) {
-          const { review: qaReview, created } = await reviewsService.requestReview(ctx, {
-            taskId: input.taskId,
-            authorAgentId: task.ownerAgentId,
-            kind: "qa",
-          });
-          if (created && deps.startReviewWorkflow && qaReview.reviewerAgentId) {
-            await deps.startReviewWorkflow({
-              companyId: input.companyId,
-              reviewId: qaReview.id,
+          /**
+           * 2026-08-19 canlı bulgu: QA turunun açılamaması (uygun QA
+           * incelemecisi yok / görev geçersiz) BU AKTİVİTEYİ patlatıyordu.
+           * Oysa kod verdict'i o noktada ZATEN commit edilmiştir; atılan hata
+           * yalnız aktiviteyi 3 kez yeniden denetip reviewWorkflow'u
+           * düşürüyor, görev QA'da sessizce asılı kalıyordu. Verdict yolu
+           * artık QA turunun açılamamasına dayanıklı: durum korunur, kusur
+           * görünür kalır (aynı sınıf sorun için openCodeReview'daki kayıtlı
+           * davranış) ve aşağıdaki log kancasıyla iz bırakılır.
+           * DÜZELTME (Oscar T10 verify): stuck-sweep bunu DEVRALMAZ — sweep
+           * yalnız status='REVIEW' tarar, QA'yı taramaz; bu yüzden QA turu hiç
+           * açılamazsa görev QA'da kalır. Kalıcı çözüm (QA-yetimi sweep kuralı)
+           * T11'e ertelendi; bu nadir hâl (uygun QA reviewer yokken) #4'ten
+           * sonra pratikte oluşmuyor.
+           */
+          try {
+            const { review: qaReview, created } = await reviewsService.requestReview(ctx, {
               taskId: input.taskId,
-              reviewerAgentId: qaReview.reviewerAgentId,
               authorAgentId: task.ownerAgentId,
+              kind: "qa",
+            });
+            if (created && deps.startReviewWorkflow && qaReview.reviewerAgentId) {
+              await deps.startReviewWorkflow({
+                companyId: input.companyId,
+                reviewId: qaReview.id,
+                taskId: input.taskId,
+                reviewerAgentId: qaReview.reviewerAgentId,
+                authorAgentId: task.ownerAgentId,
+              });
+            }
+          } catch (err) {
+            const code = (err as { code?: string }).code;
+            if (code !== "REVIEW_NO_ELIGIBLE_REVIEWER" && code !== "REVIEW_TASK_INVALID") throw err;
+            deps.log?.("qa round could not open", {
+              taskId: input.taskId,
+              reviewId: input.reviewId,
+              code,
             });
           }
         }

@@ -312,6 +312,11 @@ export async function sweepStuckTasks(
            ) AS since
       FROM ${tasks} t
      WHERE t.status = 'REVIEW' AND t.owner_agent_id IS NOT NULL
+       -- T10 (Oscar verify): konteynerleri (goal/initiative) inceleme-yetimi
+       -- sweep'ine ASLA sokma. Konteyner 07 §2 gereği roll-up ile kapanır;
+       -- buraya girerse review satırı açılır → QA → mergeIfEligible fence'i
+       -- olmasa system-close → A5 TASK_TRANSITION_INVALID → reviewWorkflow ölür.
+       AND t.kind NOT IN ('goal', 'initiative')
        AND NOT EXISTS (
          SELECT 1 FROM reviews r
           WHERE r.company_id = t.company_id AND r.task_id = t.id

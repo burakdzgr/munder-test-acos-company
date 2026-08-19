@@ -11,3 +11,16 @@ steps:
       body: "Started on the task — plan drafted, working toolless for the M3 gate; implementation lands with the sandbox milestone."
   - action: request_review
     args: { summary: Toolless deliverable ready for review }
+  # 2026-08-19 canlı boşluk (golden path stage 10): incelemeci ilk turda
+  # DAİMA changes_requested veriyor (deterministik MVP politikası) ve rework
+  # yeniden girişi bu ajanın döngüsünü yeniden başlatıyor — ama bu script'in
+  # rework dalı yoktu: "script ... is exhausted" ile ölüyor, görev
+  # CHANGES_REQUESTED'da asılı kalıyor, kalite zinciri hiç kapanmıyordu.
+  # Kanonik script (32 §6.1, backend-dev.task-implement.yaml) tam olarak bu
+  # dala sahip; araçsız akışın karşılığı burada.
+  - onSignal: { reviewVerdict: changes_requested }
+    action: send_message
+    args:
+      body: "Review findings addressed — resubmitting the toolless deliverable."
+  - action: complete_task
+    args: { summary: Rework done, deliverable resubmitted for re-review }
