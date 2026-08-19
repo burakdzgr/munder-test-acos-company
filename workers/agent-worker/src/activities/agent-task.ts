@@ -51,12 +51,35 @@ import type { ModelRouter, RoutingContext, LlmMessage, LlmUsage } from "@acos/ll
 import { CONTEXT_SENTINEL_UUID, type AgentAction } from "@acos/llm/agent-action";
 import { FENCE_PREAMBLE, provenanceFence } from "@acos/tools";
 import type { RuntimeEventType } from "@acos/contracts";
+import { heartbeat } from "@temporalio/activity";
 import { startOperationHeartbeat, type RuntimeEventPort } from "../runtime-events.js";
 import {
   contextBudgetForRole,
   estimateTokens,
   type WorkingSetTelemetry,
 } from "./context-budget.js";
+
+/**
+ * 08 §12 satır 1: LLM sınıfı aktivitenin Temporal heartbeat'i — dokümanda
+ * şart, kodda hiç yazılmamıştı. rt `op.heartbeat` UI içindir; BU heartbeat
+ * Temporal'a canlılık kanıtıdır: workflow tarafındaki llmActivity proxy'si
+ * (heartbeatTimeout 60s) ölü worker'ı hızla yeniden planlarken yavaş-ama-canlı
+ * köprü çağrısını kesmez. Aktivite bağlamı dışında (birim test, doğrudan
+ * çağrı) heartbeat throw eder; sessizce geçilir.
+ */
+export function startTemporalHeartbeat(detail: string, intervalMs = 10_000): () => void {
+  const beat = () => {
+    try {
+      heartbeat(detail);
+    } catch {
+      /* aktivite bağlamı dışında — test/doğrudan çağrı */
+    }
+  };
+  beat();
+  const timer = setInterval(beat, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
 
 async function emitDomainEvent(tx: Tx, ctx: CompanyContext, input: NewEventInput) {
   const payload = parseEventPayload(input.type, input.version ?? 1, input.payload ?? {});
@@ -1028,6 +1051,7 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
         opId: llmCallId,
         operationType: "llm",
       });
+      const stopTemporalBeat = startTemporalHeartbeat(`llm:${llmCallId}`);
       let result: Awaited<ReturnType<typeof deps.router.complete>>;
       try {
         result = await deps.router.complete(
@@ -1042,6 +1066,7 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
         );
       } finally {
         stopHeartbeat();
+        stopTemporalBeat();
       }
       rt(input, "llm.completed", {
         opId: llmCallId,
