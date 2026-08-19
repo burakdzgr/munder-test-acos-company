@@ -373,19 +373,69 @@ async function main() {
     return PASS(`session ${session.status} + PTY ${pty.id}`);
   });
 
-  await stage("10-review-and-close", "manager takes the result -> review -> task DONE", async () => {
-    if (!state.workTaskId) return SKIP("nothing dispatched");
-    const closed = await until(async () => {
-      const task = await get(`/api/v1/companies/${state.companyId}/tasks/${state.workTaskId}`);
-      state.workTaskStatus = task.body?.status;
-      return ["DONE", "FAILED", "REJECTED"].includes(state.workTaskStatus) ? task.body : null;
+  // 07 §2: `goal` and `initiative` are CONTAINERS. They never carry review
+  // rows — they close by ROLL-UP when their children finish. The gate used to
+  // assert `reviews > 0` on the dispatched task, which is the goal, so it
+  // could not pass even when the delivery chain worked end to end. Assert
+  // against the reviewable descendant (epic/task/subtask) and check the goal
+  // for the roll-up instead.
+  await stage("10-review-and-close", "a reviewable descendant is reviewed + DONE, and the goal closes by roll-up", async () => {
+    if (!state.projectId) return SKIP("no project");
+    const REVIEWABLE = ["epic", "task", "subtask"];
+    const reviewsOf = async (taskId) => {
+      const response = await get(`/api/v1/companies/${state.companyId}/tasks/${taskId}/reviews`);
+      return list(response.body);
+    };
+    const descendants = async () => {
+      const tasks = await get(`/api/v1/companies/${state.companyId}/tasks?projectId=${state.projectId}`);
+      return list(tasks.body).filter((task) => REVIEWABLE.includes(task.kind));
+    };
+
+    const delivered = await until(async () => {
+      for (const task of await descendants()) {
+        if (task.status !== "DONE") continue;
+        const reviews = await reviewsOf(task.id);
+        const approved = new Set(reviews.filter((r) => r.status === "approved").map((r) => r.kind));
+        // 15 §2: code review AND QA both sign off before a leaf is done.
+        if (approved.has("code") && approved.has("qa")) return { task, reviews };
+      }
+      return null;
     }, T.long, 3000);
-    const reviews = await get(`/api/v1/companies/${state.companyId}/tasks/${state.workTaskId}/reviews`);
-    state.reviewCount = (list(reviews.body)).length;
-    if (!closed) return BREAK(`${state.workTaskNumber} still ${state.workTaskStatus} after ${T.long / 1000}s (reviews=${state.reviewCount})`, "worker:agentTaskWorkflow/review");
-    if (closed.status !== "DONE") return BREAK(`task terminated as ${closed.status} (reviews=${state.reviewCount})`, "worker:agent execution");
-    if (state.reviewCount === 0) return BREAK("task DONE but zero review rows - INV-14 reviewer!=author path skipped", "worker:review workflow");
-    return PASS(`DONE with ${state.reviewCount} review(s)`);
+
+    if (!delivered) {
+      const seen = await descendants();
+      const detail = await Promise.all(
+        seen.map(async (task) => {
+          const reviews = await reviewsOf(task.id);
+          const kinds = reviews.map((r) => `${r.kind}:${r.status}`).join("/") || "no-reviews";
+          return `${task.displayNumber}(${task.kind}) ${task.status} [${kinds}]`;
+        }),
+      );
+      return BREAK(
+        seen.length === 0
+          ? `no reviewable descendant exists after ${T.long / 1000}s - the chain never reached a leaf`
+          : `no descendant reached DONE with approved code+qa after ${T.long / 1000}s - ${detail.join(" · ")}`,
+        "worker:review workflow",
+      );
+    }
+
+    state.deliveredTaskNumber = delivered.task.displayNumber;
+    state.reviewCount = delivered.reviews.length;
+
+    // Roll-up: the container the Founder actually asked for must close itself.
+    const goal = await until(async () => {
+      const tasks = await get(`/api/v1/companies/${state.companyId}/tasks?projectId=${state.projectId}`);
+      const container = list(tasks.body).find((task) => task.kind === "goal");
+      state.goalStatus = container?.status;
+      return container?.status === "DONE" ? container : null;
+    }, T.medium, 3000);
+    if (!goal) {
+      return BREAK(
+        `${state.deliveredTaskNumber} is DONE with approved code+qa, but the goal is still ${state.goalStatus} after ${T.medium / 1000}s - roll-up did not close the container`,
+        "control-plane:container roll-up",
+      );
+    }
+    return PASS(`${state.deliveredTaskNumber} DONE (${state.reviewCount} reviews, code+qa approved) -> goal DONE by roll-up`);
   });
 
   await stage("11-merge-and-codeindex", "merge moves HEAD and CodeIndex follows incrementally", async () => {
