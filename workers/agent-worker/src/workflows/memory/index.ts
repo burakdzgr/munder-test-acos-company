@@ -18,6 +18,20 @@ const activities = proxyActivities<MemoryActivities>({
   retry: { maximumAttempts: 3 },
 });
 
+/**
+ * LLM sınıfı (08 §12 satır 1) — canlı bulgu (2026-08-19, runtime):
+ * extractCandidatesActivity en kötü durumda İKİ router çağrısı yapar (ilk +
+ * onarım) ve claude-cli-bridge tek çağrıda 180 sn bütçeli/kuyruklu. 2 dk'lık
+ * genel tavan canlıda StartToClose timeout'la memoryConsolidationWorkflow'u
+ * öldürdü. Aktivite 10 sn'de bir Temporal heartbeat basar; ölü worker
+ * heartbeatTimeout'ta yakalanır, yavaş-ama-canlı çağrı kesilmez.
+ */
+const llmActivities = proxyActivities<Pick<MemoryActivities, "extractCandidatesActivity">>({
+  startToCloseTimeout: "10 minutes",
+  heartbeatTimeout: "60s",
+  retry: { maximumAttempts: 3 },
+});
+
 /** 12 §5.0 trigger table. */
 export type MemoryConsolidationTrigger =
   | "task_completed"
@@ -91,7 +105,7 @@ export async function memoryConsolidationWorkflow(
       : null;
   if (!anchor) return report;
 
-  const candidates = await activities.extractCandidatesActivity({
+  const candidates = await llmActivities.extractCandidatesActivity({
     companyId: input.companyId,
     window,
   });

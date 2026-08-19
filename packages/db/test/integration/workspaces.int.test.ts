@@ -448,4 +448,29 @@ describe("terminal session records (T38)", () => {
     // ikinci koşu boşuna iş yapmaz
     expect(await service.closeOrphanedTerminals([ctx.companyId])).toBe(0);
   });
+
+  // Yaşayan ajan terminali teardown'u (2026-08-19 runtime): workspace terminal
+  // duruma geçerken açık oturumları AYNI tx'te kapatır (INV-11). Açılış
+  // süpürmesi artık son savunma; ilk savunma transition'ın kendisi — yaşayan
+  // oturum modeli (komut başına kapanış yok) bu olmadan aktif satır sızdırırdı.
+  it("workspace teardown'u açık terminal oturumlarını transition içinde kapatır", async () => {
+    const [row] = await system
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.taskId, task82.id));
+    const living = await service.openTerminal(ctx, {
+      workspaceId: row!.id,
+      title: "agent-live",
+    });
+    const closedBefore = (await eventsOfType("workspace.terminal.closed")).length;
+
+    await service.transition(ctx, row!.id, "discarded");
+
+    const [after] = await system
+      .select()
+      .from(terminalSessions)
+      .where(eq(terminalSessions.id, living.id));
+    expect(after!.status).toBe("closed");
+    expect((await eventsOfType("workspace.terminal.closed")).length).toBe(closedBefore + 1);
+  });
 });

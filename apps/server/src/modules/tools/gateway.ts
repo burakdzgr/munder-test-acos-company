@@ -115,6 +115,9 @@ export interface ToolDispatchPort {
     input: unknown;
     agentId: string;
     taskId: string | null;
+    /** Yaşayan ajan terminali anahtarı (2026-08-19 runtime): oturum bağlamı
+     *  varsa terminal.run kareleri ajan başına TEK kalıcı oturumda birikir. */
+    agentSessionId?: string | null;
     workspaceId: string | null;
     /** Resolved server-side at dispatch time only — S2. */
     credentials: Record<string, string>;
@@ -671,6 +674,7 @@ export class ToolGateway {
           input,
           agentId: agent.id,
           taskId: req.taskId ?? null,
+          agentSessionId: req.agentSessionId ?? null,
           workspaceId: req.workspaceId ?? null,
           credentials,
         }),

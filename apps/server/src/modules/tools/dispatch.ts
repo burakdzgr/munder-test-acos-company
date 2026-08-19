@@ -555,7 +555,7 @@ export function createSandboxDispatchPort(options: SandboxDispatchOptions): Tool
       );
     },
 
-    async dispatch({ ctx: rawCtx, tool, input, agentId, taskId, credentials }) {
+    async dispatch({ ctx: rawCtx, tool, input, agentId, taskId, agentSessionId, credentials }) {
       const ctx = companyContext(rawCtx.companyId);
       const args = input as Record<string, unknown>;
 
@@ -1111,15 +1111,34 @@ export function createSandboxDispatchPort(options: SandboxDispatchOptions): Tool
       switch (tool.name) {
         case "terminal.run": {
           const timeoutSec = args.timeoutSec as number;
-          // terminal session record (T38) — frames go live with T41's PTY path
-          const session = await workspaces.openTerminal(ctx, {
-            workspaceId: ws.id,
-            agentId,
-            title: String(args.command).slice(0, 120),
-            actor: { kind: "agent", id: agentId },
-          });
+          // YAŞAYAN ajan terminali (2026-08-19 runtime, Munder davranışı):
+          // oturum bağlamı varsa komut başına aç-kapa YOK — ajan+workspace
+          // başına tek kalıcı oturum, bütün komutların kareleri aynı
+          // `term.<id>` akışında/ringinde/logunda birikir ve Founder tek
+          // pencerede canlı izler. 23 saatlik canlı koşuda terminal_sessions
+          // 0 satırdı; komut başına oturum modeli açık kalsa bile izlenecek
+          // tek sürekli akış üretmiyordu. Oturum bağlamı olmayan (doğrudan
+          // HTTP) çağrılar eski komut-başına davranışı korur.
+          const living = agentSessionId != null;
+          const session = living
+            ? await workspaces.ensureAgentTerminal(ctx, {
+                workspaceId: ws.id,
+                agentId,
+                actor: { kind: "agent", id: agentId },
+              })
+            : await workspaces.openTerminal(ctx, {
+                workspaceId: ws.id,
+                agentId,
+                title: String(args.command).slice(0, 120),
+                actor: { kind: "agent", id: agentId },
+              });
+          // yaşayan akışta komutlar arasına kabuk-vari bir ayraç bas — izleyen
+          // Founder hangi çıktının hangi komuta ait olduğunu görebilsin
+          const script = living
+            ? `printf '\\r\\n\\033[1;36m$ %s\\033[0m\\r\\n' ${shq(String(args.command))}; ${String(args.command)}`
+            : String(args.command);
           try {
-            const result = await execScript(ws.id, String(args.command), {
+            const result = await execScript(ws.id, script, {
               timeoutMs: timeoutSec * 1000,
               // live PTY frames on term.<sessionId> while we await (T41)
               sessionId: session.id,
@@ -1163,9 +1182,13 @@ export function createSandboxDispatchPort(options: SandboxDispatchOptions): Tool
               }`,
             };
           } finally {
-            await workspaces
-              .closeTerminal(ctx, session.id, { kind: "agent", id: agentId })
-              .catch(() => {});
+            // yaşayan oturum AÇIK kalır (workspace transition'ı ya da açılış
+            // süpürmesi kapatır); yalnız komut-başına oturum burada kapanır
+            if (!living) {
+              await workspaces
+                .closeTerminal(ctx, session.id, { kind: "agent", id: agentId })
+                .catch(() => {});
+            }
           }
         }
 

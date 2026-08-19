@@ -12,7 +12,7 @@
 // - `base_commit` / `last_activity_at` have no canonical columns; the base
 //   commit is returned to the caller (and lives in git itself), activity
 //   tracking arrives with the reaper (T40+).
-import { and, asc, eq, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ne, notInArray, or, sql } from "drizzle-orm";
 import {
   ISOLATION_LEVELS,
   taskBranchName,
@@ -484,8 +484,43 @@ export class WorkspaceService {
       if (to === "merged" || to === "discarded") {
         await this.releaseLocksInTx(tx, ctx, row, actor);
       }
+      // Yaşayan ajan terminali workspace ile birlikte kapanır (INV-11: durum
+      // + olay aynı tx). Aktif satır kalsaydı Founder panelinde günlerce açık
+      // görünen donmuş terminal hücresi kalırdı (closeOrphanedTerminals'ın
+      // yorumundaki canlı vaka) — artık son savunma o süpürme, ilk savunma bu.
+      if (to === "merged" || to === "discarded" || to === "failed" || to === "destroyed") {
+        await this.closeTerminalsInTx(tx, ctx, row, actor);
+      }
       return updated!;
     });
+  }
+
+  private async closeTerminalsInTx(
+    tx: Tx,
+    ctx: CompanyContext,
+    ws: WorkspaceRow,
+    actor: EventActor,
+  ): Promise<void> {
+    const closed = await tx
+      .update(terminalSessions)
+      .set({ status: "closed", closedAt: new Date() })
+      .where(
+        and(
+          eq(terminalSessions.companyId, ctx.companyId),
+          eq(terminalSessions.workspaceId, ws.id),
+          eq(terminalSessions.status, "active"),
+        ),
+      )
+      .returning({ id: terminalSessions.id });
+    for (const row of closed) {
+      await emitDomainEvent(tx, ctx, {
+        type: "workspace.terminal.closed",
+        actor,
+        taskId: ws.taskId,
+        projectId: ws.projectId,
+        payload: { sessionId: row.id, workspaceId: ws.id },
+      });
+    }
   }
 
   /**
@@ -734,6 +769,41 @@ export class WorkspaceService {
         payload: { sessionId: row!.id, workspaceId: ws.id },
       });
       return withLog!;
+    });
+  }
+
+  /**
+   * Munder-tarzı YAŞAYAN ajan terminali (2026-08-19 runtime; 22 §5.2, 24 §6.9).
+   * Komut başına aç-kapa yerine ajan+workspace başına TEK aktif oturum:
+   * `terminal.run` her çağrıda bu oturumu yeniden kullanır, kareler aynı
+   * `term.<id>` konusunda ve aynı ring/log'da birikir — Founder ajanın bütün
+   * komutlarını TEK canlı akışta izler ve oturum ajan yaşadıkça yaşar.
+   * Oturum, workspace terminal duruma geçerken (transition) ya da açılış
+   * süpürmesinde (closeOrphanedTerminals) kapanır.
+   */
+  async ensureAgentTerminal(
+    ctx: CompanyContext,
+    input: { workspaceId: string; agentId: string; actor?: EventActor | undefined },
+  ): Promise<TerminalSessionRow> {
+    const [existing] = await this.db
+      .select()
+      .from(terminalSessions)
+      .where(
+        and(
+          eq(terminalSessions.companyId, ctx.companyId),
+          eq(terminalSessions.workspaceId, input.workspaceId),
+          eq(terminalSessions.agentId, input.agentId),
+          eq(terminalSessions.status, "active"),
+        ),
+      )
+      .orderBy(desc(terminalSessions.createdAt))
+      .limit(1);
+    if (existing) return existing;
+    return this.openTerminal(ctx, {
+      workspaceId: input.workspaceId,
+      agentId: input.agentId,
+      title: "agent-live",
+      actor: input.actor,
     });
   }
 

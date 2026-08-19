@@ -60,8 +60,18 @@ export const MemoryCandidateListSchema = z.array(MemoryCandidateSchema).max(8);
 export function parseMemoryCandidates(text: string): MemoryCandidate[] {
   const trimmed = text.trim().replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
   const parsed: unknown = JSON.parse(trimmed);
+  // Canlı bulgu (2026-08-19): modeller dört şekil arasında sürükleniyor —
+  // çıplak dizi, {candidates:[...]}, BİR KEZ FAZLA sarılmış dizi ([[{...}]];
+  // memoryConsolidationWorkflow'u "expected object, received array" ile
+  // düşürüyordu) ve çıplak tek aday nesnesi. Şema doğrulaması KATI kalır;
+  // yalnız kabuk soyma toleranslıdır.
+  const obj = parsed as { candidates?: unknown; title?: unknown };
   const list = Array.isArray(parsed)
-    ? parsed
-    : (parsed as { candidates?: unknown[] }).candidates ?? [];
+    ? parsed.flat(1)
+    : Array.isArray(obj.candidates)
+      ? obj.candidates.flat(1)
+      : typeof obj.title === "string"
+        ? [parsed]
+        : [];
   return MemoryCandidateListSchema.parse(list);
 }

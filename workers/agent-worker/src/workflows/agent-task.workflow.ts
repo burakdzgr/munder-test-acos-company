@@ -30,7 +30,26 @@ import {
 } from "./signals.js";
 
 const activities = proxyActivities<ReturnType<typeof createAgentTaskActivities>>({
-  startToCloseTimeout: "120s", // LLM class ceiling; fast DB ops finish well under
+  startToCloseTimeout: "120s", // fast DB ops + working-set build ceiling
+  retry: { maximumAttempts: 3, initialInterval: "2s", maximumInterval: "60s" },
+});
+
+/**
+ * LLM sınıfı (08 §12 satır 1) — canlı bulgu (2026-08-19, runtime):
+ * claude-cli-bridge (Founder kararı) tek başına 180 sn bütçeli ve eşzamanlılık
+ * 2 ile kuyruklu; yük altında tek çağrı 137 sn+ gözlendi. Eski hâlde model
+ * çağrısı 120 sn'lik genel tavana çarpıyor, 3 retry tükeniyor ve TÜM
+ * agentTaskWorkflow FAİL oluyordu (bir görevde art arda 5 ölü oturum). Üstelik
+ * iptal edilen deneme köprüde çalışmaya devam edip ("Activity not found on
+ * completion") 2 slotluk kuyruğu işgal ediyor, retry fırtınasını besliyordu.
+ * Tavan köprünün en kötü zinciri (kuyruk + 180 sn exec + sağlayıcı failover)
+ * kadar geniş; canlılık 08 §12'nin şart koştuğu ama hiç yazılmamış heartbeat
+ * ile korunur — worker ölürse Temporal heartbeatTimeout'ta hemen yeniden
+ * planlar, yavaş-ama-canlı çağrı ise kesilmez.
+ */
+const llmActivity = proxyActivities<ReturnType<typeof createAgentTaskActivities>>({
+  startToCloseTimeout: "8 minutes",
+  heartbeatTimeout: "60s", // aktivite 10 sn'de bir heartbeat basar (08 §12: 30s sınıfı)
   retry: { maximumAttempts: 3, initialInterval: "2s", maximumInterval: "60s" },
 });
 
@@ -350,7 +369,7 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
       const messages: LlmMessage[] = [...workingSet.messages];
       let lastModelText = "";
       for (let repair = 0; repair <= MAX_REPAIRS; repair++) {
-        const result = await activities.callModelActivity({
+        const result = await llmActivity.callModelActivity({
           ...ref,
           stepId,
           repairAttempt: repair,

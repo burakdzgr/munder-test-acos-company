@@ -2,7 +2,7 @@
 // def/class blokları girinti ile, importlar ve sınıf kalıtımı. Tam AST değil
 // ama sembol/kenar grafiği kanonik şemaya oturur; daha derin analiz isteyen
 // kurulum bu adapter'ı gerçek parser'la değiştirebilir.
-import type { ParsedFileIndex, ParsedImport, ParsedSymbol } from "@acos/db";
+import type { ParsedImport, ParsedSymbol } from "@acos/db";
 import type { LanguageIndexer } from "./index.js";
 
 const TEST_PATH = /(?:^|\/)test_[^/]+\.py$|_test\.py$|(?:^|\/)tests?\//;

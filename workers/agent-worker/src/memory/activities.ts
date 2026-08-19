@@ -31,6 +31,7 @@ import {
   type RoutingContext,
 } from "@acos/llm";
 import { cannedConsolidation, pseudoEmbedding } from "@acos/llm/testing";
+import { startTemporalHeartbeat } from "../activities/agent-task.js";
 
 export interface MemoryActivityDeps {
   guardedDb: GuardedDb;
@@ -176,26 +177,34 @@ export function createMemoryActivities(deps: MemoryActivityDeps) {
         `Extract only knowledge with future utility; never invent evidence.\n\n` +
         (languageDirective ? `${languageDirective}\n\n` : "") +
         `Window:\n${renderWindowDigest(window)}`;
-      const first = await deps.router.complete(
-        { purpose: "fast", messages: [{ role: "user", content: prompt }] },
-        routing,
-      );
+      // 08 §12 LLM sınıfı: iki router çağrısı (ilk + onarım) köprüde dakikalar
+      // sürebilir — canlılık Temporal heartbeat'iyle kanıtlanır (workflow
+      // tarafı heartbeatTimeout 60s).
+      const stopBeat = startTemporalHeartbeat("memory:extract-candidates");
       try {
-        return parseMemoryCandidates(first.text);
-      } catch (err) {
-        // one repair retry (12 §5.1), then fail the activity
-        const repair = await deps.router.complete(
-          {
-            purpose: "fast",
-            messages: [
-              { role: "user", content: prompt },
-              { role: "assistant", content: first.text },
-              { role: "user", content: `Response failed validation (${String(err)}). Reply with ONLY the corrected JSON array.` },
-            ],
-          },
+        const first = await deps.router.complete(
+          { purpose: "fast", messages: [{ role: "user", content: prompt }] },
           routing,
         );
-        return parseMemoryCandidates(repair.text);
+        try {
+          return parseMemoryCandidates(first.text);
+        } catch (err) {
+          // one repair retry (12 §5.1), then fail the activity
+          const repair = await deps.router.complete(
+            {
+              purpose: "fast",
+              messages: [
+                { role: "user", content: prompt },
+                { role: "assistant", content: first.text },
+                { role: "user", content: `Response failed validation (${String(err)}). Reply with ONLY the corrected JSON array.` },
+              ],
+            },
+            routing,
+          );
+          return parseMemoryCandidates(repair.text);
+        }
+      } finally {
+        stopBeat();
       }
     },
 
