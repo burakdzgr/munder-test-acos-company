@@ -295,14 +295,14 @@ async function main() {
   await stage("06-staffing-approval-requested", "missing staff becomes ONE batched Founder approval", async () => {
     if (!state.companyId) return SKIP("no company");
     const approval = await until(async () => {
-      const list = await get(`/api/v1/companies/${state.companyId}/approvals?status=pending`);
-      const items = list(list.body);
+      const pending = await get(`/api/v1/companies/${state.companyId}/approvals?status=pending`);
+      const items = list(pending.body);
       return items.find((a) => /staff|hire|team|kadro|ekip|org/i.test(`${a.kind} ${a.title}`)) ?? null;
     }, T.medium, 3000);
     if (!approval) {
       const project = await get(`/api/v1/companies/${state.companyId}/projects/${state.projectId}`);
-      const list = await get(`/api/v1/companies/${state.companyId}/approvals?status=pending`);
-      return BREAK(`no staffing approval after ${T.medium / 1000}s (project=${project.body?.status}, pending=${(list(list.body)).length}) - gap analysis raised none`, "worker:staffing gap analysis");
+      const pending = await get(`/api/v1/companies/${state.companyId}/approvals?status=pending`);
+      return BREAK(`no staffing approval after ${T.medium / 1000}s (project=${project.body?.status}, pending=${(list(pending.body)).length}) - gap analysis raised none`, "worker:staffing gap analysis");
     }
     state.approvalId = approval.id;
     return PASS(`approval ${approval.kind} "${approval.title}"`);
@@ -398,8 +398,8 @@ async function main() {
   await stage("12-memory-outcome", "task outcome consolidates into a memory row", async () => {
     if (!state.companyId) return SKIP("no company");
     const memories = await until(async () => {
-      const list = await get(`/api/v1/companies/${state.companyId}/memories`);
-      const items = list(list.body);
+      const page = await get(`/api/v1/companies/${state.companyId}/memories`);
+      const items = list(page.body);
       return items.length > 0 ? items : null;
     }, T.medium, 3000);
     if (!memories) {
