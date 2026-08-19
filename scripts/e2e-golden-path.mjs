@@ -142,9 +142,10 @@ const SKIP = (observed) => ({ verdict: "SKIP", observed });
 const LANE_LIMIT = (observed) => ({ verdict: "LANE", observed, where: "fixture:toolless (32 §6)" });
 
 /**
- * Minimum viable executive: unit + position + agent. Only used when the
- * company came up empty — the missing bootstrap is itself a finding, this
- * keeps the downstream stages observable in the same run.
+ * The Founder's first hire: unit + position + agent, all through the public
+ * API. A company is born without leadership ON PURPOSE (Founder decision,
+ * 2026-08-19) — staffing the first executive is an explicit human act, so
+ * this is the golden path's real step 02, not a workaround for a gap.
  */
 async function bootstrapCeo() {
   const unit = await post(`/api/v1/companies/${state.companyId}/org/units`, {
@@ -209,24 +210,32 @@ async function main() {
     return PASS(`company ${slug} (${state.companyId})`);
   });
 
-  await stage("02-ceo-exists", "a new company is born with a CEO agent", async () => {
+  // A company is born WITHOUT a CEO by design (Founder decision, 2026-08-19):
+  // hiring the first executive is an explicit Founder action, not an automatic
+  // bootstrap — an org the Founder never staffed should not invent its own
+  // leadership. So this stage probes the Founder ACTION path, not an absence:
+  // it passes when a CEO can actually be created through the public API and
+  // the staffing engine then recognises it as the top executive.
+  await stage("02-ceo-create", "Founder creates the CEO (explicit action, not auto-bootstrap)", async () => {
     if (!state.companyId) return SKIP("no company");
-    const found = await until(async () => {
-      const agents = await get(`/api/v1/companies/${state.companyId}/agents`);
-      const items = list(agents.body);
-      const ceo = items.find((a) => /ceo|chief executive/i.test(`${a.name} ${a.title ?? ""} ${a.positionTitle ?? ""}`));
-      return ceo ? { ceo, count: items.length } : null;
-    }, T.short);
-    if (found) {
-      state.ceoAgentId = found.ceo.id;
-      return PASS(`CEO ${found.ceo.name} (agents=${found.count})`);
+    const existing = await get(`/api/v1/companies/${state.companyId}/agents`);
+    const already = list(existing.body).find((a) =>
+      /ceo|chief executive/i.test(`${a.name} ${a.title ?? ""} ${a.positionTitle ?? ""}`),
+    );
+    if (already) {
+      state.ceoAgentId = already.id;
+      return PASS(`CEO ${already.name} already present`);
     }
-    // No auto-bootstrap. Hire one by hand so the REST of the path stays
-    // probeable in this same run — the missing automation is the finding, a
-    // dead run below it would just hide the next ten.
     const hired = await bootstrapCeo();
-    const detail = `no CEO on a fresh company (staffing halts at "tepe yonetici yok") - manual hire needed; runner ${hired.ok ? `hired one (${hired.detail})` : `could NOT hire either: ${hired.detail}`}`;
-    return BREAK(detail, "server:companies bootstrap");
+    if (!hired.ok) return BREAK(`Founder could not create a CEO: ${hired.detail}`, "server:org/agents");
+    // The point of the CEO is that planning can now find a top executive;
+    // a hire the staffing engine cannot see would be a false pass.
+    const visible = await until(async () => {
+      const agents = await get(`/api/v1/companies/${state.companyId}/agents`);
+      return list(agents.body).find((a) => a.id === state.ceoAgentId && a.status === "active") ?? null;
+    }, T.short);
+    if (!visible) return BREAK(`CEO created (${hired.detail}) but not active/visible on the roster`, "server:agents");
+    return PASS(`Founder hired CEO ${visible.name} (unit+position+agent via API)`);
   });
 
   await stage("03-project-create-index", "greenfield project reaches READY with a SHA-bound CodeIndex", async () => {
