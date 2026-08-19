@@ -25,9 +25,19 @@ const MAX_PARALLEL = 2;
 
 let active = 0;
 const queue = [];
+// Canlı bulgu (2026-08-19): kuyruk SINIRSIZDI ve 180 sn'lik zamanlayıcı ancak
+// slot alındıktan sonra başlıyordu — yoğunlukta istek dakikalarca sessizce
+// bekliyor, worker tarafında callModelActivity zaman aşımına düşüyor, iptal
+// edilen deneme köprüde ÇALIŞMAYA DEVAM edip 2 slotluk kuyruğu işgal ediyordu
+// (retry fırtınası). Dolu kuyrukta HEMEN 503 dön: router bir sonraki
+// sağlayıcıya düşer (provider_unavailable), zincir kilitlenmez.
+const MAX_QUEUE = Number(process.env.BRIDGE_MAX_QUEUE ?? 4);
 function acquire() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (active < MAX_PARALLEL) { active++; resolve(); }
+    else if (queue.length >= MAX_QUEUE) {
+      reject(new Error(`bridge saturated: ${active} active, ${queue.length} queued`));
+    }
     else queue.push(resolve);
   });
 }
@@ -94,7 +104,15 @@ const server = createServer((req, res) => {
   req.on("end", async () => {
     let payload;
     try { payload = JSON.parse(body); } catch { res.writeHead(400); return res.end(); }
-    await acquire();
+    try {
+      await acquire();
+    } catch (err) {
+      // slot ALINMADI — release yok; 503 → router yedeğe düşer
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: String(err.message ?? err), type: "bridge_saturated" } }));
+      console.log(JSON.stringify({ msg: "bridge saturated", active, queued: queue.length }));
+      return;
+    }
     const started = Date.now();
     try {
       const result = await runClaude(flatten(payload.messages), payload.model);
