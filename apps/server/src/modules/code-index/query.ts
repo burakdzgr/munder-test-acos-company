@@ -3,7 +3,7 @@
 // Canonical + task overlay BİRLİKTE okunur (INVARIANT 5): overlay'de dosyanın
 // gölgesi varsa canonical satır elenir. Sorgu deterministiktir; LLM yalnız
 // sonucu görür — kod tamamı asla prompt'a taşınmaz (INVARIANT 14).
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { companyContext, type GuardedDb } from "@acos/db";
 import { projects } from "@acos/db/schema";
 import { updateTaskOverlayIndex, type CodeIndexerDeps } from "./service.js";

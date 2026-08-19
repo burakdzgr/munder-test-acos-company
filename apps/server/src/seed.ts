@@ -2,7 +2,7 @@
 // Founder user and "Acme Technologies" with default settings. Org, positions
 // and the 8 agents extend this in T18/T19.
 import { randomBytes } from "node:crypto";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { companyContext, CostService, type CompanyContext, type GuardedDb } from "@acos/db";
 import { pricingDefaultsFor } from "@acos/llm";
 import {
