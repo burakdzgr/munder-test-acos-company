@@ -220,48 +220,21 @@ export async function projectIntakeWorkflow(
   }
   await lifecycle("ready");
 
-  // TASK 2: import edilen proje READY'de DURUR — otomatik kodlama yok.
-  // Kullanıcı "Bu projede ne yapmak istiyorsun?" akışıyla hedef verir
-  // (TASK 18); planlama o hedefle başlar.
-  if (input.source.kind === "git_url") {
-    return {
-      outcome: "ready",
-      founderApproved: false,
-      reportArtifactId,
-      goalTaskId: null,
-      analyzersOk: analyzers.filter((a) => a.ok).length,
-      analyzersFailed: analyzers.filter((a) => !a.ok).length,
-    };
-  }
-
-  // Greenfield: objective zaten verildi — READY → PLANNING otomatik (TASK 2)
-  await lifecycle("planning");
-
-  // TASK 8: Requirement Analyzer — yapılandırılmış gereksinimler (degrade-safe)
-  await control
-    .analyzeRequirementsActivity({
-      companyId: input.companyId,
-      projectId: input.projectId,
-      projectName: project.name,
-      objective: project.objective,
-      constraints: project.constraints,
-    })
-    .catch(() => null);
-
-  // TASK 9: staffing gap + (gerekirse) Founder onayı + CEO start — sunucu
-  // tarafında tek idempotent devam noktası. Eski "her hedefte Founder'a
-  // danış" adımı kalktı (TASK 8: Founder'ı gereksiz bölme); Founder kapısı
-  // artık yalnız kadro eksiğinde (hire onayı) devreye girer.
-  const continuation = await control
-    .continueProjectPlanningActivity({
-      companyId: input.companyId,
-      projectId: input.projectId,
-    })
-    .catch(() => ({ state: "planning" }));
-
+  // P1-1 (2026-08-19, Founder onaylı): proje KAYNAĞI NE OLURSA OLSUN READY'de
+  // DURUR ve açık bir Founder hedefi bekler. Doküman (PROJECT-LIFECYCLE TASK 2)
+  // greenfield için "READY → PLANNING otomatik ilerleyebilir" diyor — izin,
+  // zorunluluk değil; Founder kararı bu izni daraltıyor: create-time objective
+  // planlamayı BAŞLATMAZ, yalnız hedefin ilk taslağı olarak saklanır.
+  //
+  // Kanıt (golden path 5fbdb3e): otomatik kaskad projeyi READY'den geçirip
+  // planning/executing'e kilitliyordu; dokümanın "READY → Founder hedefi →
+  // PLANNING" adımı ERİŞİLMEZ hale geliyor (stage 04 ancak Oscar'ın
+  // fail-closed'ı projeyi waiting_for_founder'da beklettiği için maskeli
+  // geçiyordu) ve ikinci hedef 409'a çarpıyordu. Planlama artık TEK kapıdan
+  // girer: POST /projects/:id/goal → projectGoalWorkflow.
   return {
-    outcome: "routed",
-    founderApproved: continuation.state === "executing",
+    outcome: "ready",
+    founderApproved: false,
     reportArtifactId,
     goalTaskId: null,
     analyzersOk: analyzers.filter((a) => a.ok).length,

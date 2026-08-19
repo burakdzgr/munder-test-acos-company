@@ -432,8 +432,31 @@ export async function registerProjectRoutes(
       if (role !== "founder") throw new ApiError("forbidden", "hedefi yalnız Founder verir");
       const ctx = companyContext(companyId);
       const project = await service().get(ctx, projectId);
-      if (!["ready", "planning", "staffing_review", "waiting_for_founder"].includes(project.status)) {
-        throw new ApiError("conflict", `proje ${project.status} durumunda — hedef READY'de verilir`);
+      // P1-1 (2026-08-19, Founder onaylı): hedef vermek TEK SEFERLİK bir olay
+      // değil — şirket yaşayan bir şeydir, Founder ilk döngü koşarken de
+      // sonrasında da yeni hedef verir. Eski kapı yalnız planlama-öncesi
+      // durumlara izin veriyordu; ilk hedef projeyi `executing`'e kilitleyince
+      // İKİNCİ hedef 409 alıyordu (golden path stage 14, kanıt 5fbdb3e:
+      // "proje executing durumunda — hedef READY'de verilir"). Artık proje
+      // çalışırken/duraklatılmışken de hedef kabul edilir: yeni GOAL ağacı
+      // açılır, proje durumu OLDUĞU GİBİ kalır (executing→executing; state
+      // machine'e yeni kenar eklenmez). Reddedilenler yalnız gerçekten hedef
+      // alamayacak durumlar: henüz indekslenmemiş (draft/repository_setup/
+      // indexing) ve kapanmış (completed/archived/cancelled/failed) projeler.
+      const GOAL_ACCEPTING = [
+        "ready",
+        "planning",
+        "staffing_review",
+        "waiting_for_founder",
+        "executing",
+        "paused",
+        "active", // miras durum (eski kayıtlar)
+      ];
+      if (!GOAL_ACCEPTING.includes(project.status)) {
+        const why = ["draft", "repository_setup", "indexing"].includes(project.status)
+          ? "proje henüz indekslenmedi — READY olunca hedef verilir"
+          : `proje ${project.status} durumunda — hedef alamaz`;
+        throw new ApiError("conflict", why);
       }
       const db = deps.guardedDb();
       const { projects: projectsTable } = await import("@acos/db/schema");
@@ -442,6 +465,8 @@ export async function registerProjectRoutes(
         .update(projectsTable)
         .set({ objectiveMd: request.body.objective })
         .where(and(eq(projectsTable.companyId, ctx.companyId), eq(projectsTable.id, projectId)));
+      // READY → PLANNING yalnız ilk girişte; koşan bir projede hedef eklemek
+      // durumu geri sarmaz (executing/paused olduğu yerde kalır).
       if (project.status === "ready") {
         await service().transition(ctx, projectId, "planning", { kind: "founder", id: user.id });
       }
@@ -454,7 +479,7 @@ export async function registerProjectRoutes(
           objective: request.body.objective,
           constraints: project.constraintsMd,
         });
-        return { started: true, state: "planning" };
+        return { started: true, state: project.status === "ready" ? "planning" : project.status };
       }
       return { started: false, state: project.status };
     },

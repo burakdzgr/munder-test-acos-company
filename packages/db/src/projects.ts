@@ -381,12 +381,24 @@ export class ProjectsService {
     },
   ): Promise<{ goalTaskId: string; ceoAgentId: string; created: boolean }> {
     const ceo = await this.topExecutive(ctx);
+    // P1-1 (2026-08-19): idempotanlık ANAHTARI (proje) değil, (proje, hedef
+    // metni). Eskiden proje başına TEK goal görevi vardı ve ikinci Founder
+    // hedefi sessizce BİRİNCİYİ geri döndürüyordu — yeni iş hiç doğmuyor,
+    // çağıran taraf "routed" sanıyordu (golden path stage 14'ün ikinci yarısı).
+    // Retry replay'i (INVARIANT 15) korunur: aynı hedef metniyle yeniden giriş
+    // aynı görevi döndürür; GERÇEKTEN yeni bir hedef yeni GOAL ağacı açar.
     const [existingGoal] = await this.db
       .select({ id: tasks.id })
       .from(tasks)
       .where(
-        and(eq(tasks.companyId, ctx.companyId), eq(tasks.projectId, projectId), eq(tasks.kind, "goal")),
+        and(
+          eq(tasks.companyId, ctx.companyId),
+          eq(tasks.projectId, projectId),
+          eq(tasks.kind, "goal"),
+          eq(tasks.objective, input.objective),
+        ),
       )
+      .orderBy(desc(tasks.createdAt))
       .limit(1);
     if (existingGoal) {
       return { goalTaskId: existingGoal.id, ceoAgentId: ceo.id, created: false };
