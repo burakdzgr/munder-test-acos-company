@@ -39,6 +39,7 @@ import {
   environments,
   llmCalls,
   modelProfiles,
+  notifications,
   orgEdges,
   positions,
   projects,
@@ -331,6 +332,49 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
     } catch (err) {
       if (err instanceof ReviewError &&
           (err.code === "REVIEW_TASK_INVALID" || err.code === "REVIEW_NO_ELIGIBLE_REVIEWER")) {
+        // P0-2: bu null eskiden TAM sessizdi — görev REVIEW'da, inceleyecek
+        // kimse yok, hiçbir yüzeyde iz yok. Escalation olayı + Founder
+        // notification'ı görünür kılar; stuck sweep'in review-yetim kuralı
+        // kadro tamamlanınca incelemeyi yeniden açar.
+        if (err.code === "REVIEW_NO_ELIGIBLE_REVIEWER") {
+          await guardedDb
+            .transaction(async (tx) => {
+              await emitDomainEvent(tx, ctx, {
+                type: "agent.escalated",
+                actor: { kind: "system", id: null },
+                agentId: authorAgentId,
+                taskId,
+                payload: {
+                  toFounder: true,
+                  reason:
+                    "Görev REVIEW'a taşındı ama inceleme-yetkin ajan yok (INV-14: yazar kendini inceleyemez) — reviewer/lead işe alınana kadar bekleyecek",
+                  attempted: [],
+                  recommendation: "hire a lead/reviewer or review manually",
+                },
+              });
+              const founderRow = await tx.execute(sql`
+                SELECT cm.user_id FROM company_members cm
+                WHERE cm.company_id = ${ctx.companyId} AND cm.role = 'founder' AND cm.removed_at IS NULL
+                LIMIT 1
+              `);
+              const founder = founderRow.rows[0] as { user_id: string } | undefined;
+              if (founder) {
+                await tx.insert(notifications).values({
+                  companyId: ctx.companyId,
+                  userId: founder.user_id,
+                  kind: "review_blocked",
+                  title: "İnceleme bekliyor: uygun reviewer yok",
+                  bodyMd:
+                    "Bir görev REVIEW'a taşındı ama şirkette inceleme-yetkin (reviewer/lead/manager) başka ajan yok. " +
+                    "Bir lider işe alın — kadro tamamlanınca inceleme otomatik yeniden açılır.",
+                  refs: { taskId },
+                });
+              }
+            })
+            .catch(() => {
+              /* görünürlük best-effort; REVIEW durumu zaten kalıcı */
+            });
+        }
         return null; // toolless/projectless task or a one-agent org — transition-only
       }
       throw err;
@@ -1711,8 +1755,12 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
                     },
                     { kind: "founder" }, // create matrisi founder|agent ister
                   );
+                  // groom da founder aktörüyle: 07 §5 matrisi DRAFT→BACKLOG→
+                  // PLANNED'da system'e izin vermez — system ile bu zincir
+                  // TASK_TRANSITION_INVALID fırlatıyordu ve aşağıdaki catch
+                  // yuttuğu için yönetici uyandırma sessizce hiç çalışmamıştı
                   for (const to of ["BACKLOG", "PLANNED"] as const) {
-                    await taskState.transition(ctx, helpTask.id, to, { kind: "system" });
+                    await taskState.transition(ctx, helpTask.id, to, { kind: "founder" });
                   }
                   // atama founder aktörüyle: sistem aktörü assign matrisinde yok; bu
                   // uyandırma Founder kararının (2026-08-18) mekanik uygulamasıdır
@@ -2095,6 +2143,173 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
       const ctx = companyContext(input.companyId);
       for (const channelId of new Set(input.channelIds)) {
         await channelService.markRead(ctx, channelId, input.agentId);
+      }
+    },
+
+    /**
+     * 33 §2.2 failure handler — a workflow crash (unhandled workflow-code
+     * error) must not be a silent death: the task leaves the crashed loop as
+     * BLOCKED and the manager receives a help-request to reassign or retry.
+     * The workflow's crash path calls this before rethrowing; every step is
+     * best-effort and idempotent per session, so activity retries and sweep
+     * restarts are safe.
+     */
+    async reportWorkflowCrashActivity(input: SessionRef & { reason: string }): Promise<void> {
+      const ctx = companyContext(input.companyId);
+      const reason = input.reason.slice(0, 500);
+
+      // task→BLOCKED. 07 §4 makinesi BLOCKED'a yalnız IN_PROGRESS'ten izin
+      // verir; ASSIGNED/WAITING'de ölen koşu system aktörüyle IN_PROGRESS
+      // üzerinden taşınır (stuck-tasks.ts'in kayıtlı çift-adım deseni) —
+      // makine ve tek yazar (INV-13) aynen korunur. BLOCKED görev stuck
+      // sweep'in WAITING/ASSIGNED tarama kümesinin DIŞINDA kalır: kalıcı bir
+      // hata 30 dakikada bir kör restart döngüsüne girmez, kararı yönetici verir.
+      const [task] = await guardedDb
+        .select({ status: tasks.status })
+        .from(tasks)
+        .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
+      if (!task) return;
+      try {
+        if (task.status === "ASSIGNED" || task.status === "WAITING") {
+          await taskState.transition(ctx, input.taskId, "IN_PROGRESS", { kind: "system" });
+        }
+        if (["ASSIGNED", "WAITING", "IN_PROGRESS"].includes(task.status)) {
+          await taskState.transition(ctx, input.taskId, "BLOCKED", { kind: "system" }, {
+            note: `workflow crash: ${reason.slice(0, 200)}`,
+          });
+        }
+      } catch (err) {
+        // yarış ya da zaten terminal/BLOCKED — bildirim yine de gitsin
+        console.warn("crash handler: task transition skipped", err);
+      }
+
+      let managerId: string | null = null;
+      try {
+        const [edge] = await guardedDb
+          .select({ managerId: orgEdges.toAgentId })
+          .from(orgEdges)
+          .where(
+            and(
+              eq(orgEdges.companyId, ctx.companyId),
+              eq(orgEdges.kind, "reports_to"),
+              eq(orgEdges.fromAgentId, input.agentId),
+              isNull(orgEdges.endedAt),
+            ),
+          );
+        managerId = edge?.managerId && edge.managerId !== input.agentId ? edge.managerId : null;
+      } catch {
+        managerId = null;
+      }
+
+      await guardedDb.transaction(async (tx) => {
+        await emitDomainEvent(tx, ctx, {
+          type: "agent.escalated",
+          actor: { kind: "system", id: null },
+          agentId: input.agentId,
+          taskId: input.taskId,
+          payload: {
+            ...(managerId ? { toAgentId: managerId } : { toFounder: true }),
+            reason: `workflow crash: ${reason}`,
+            attempted: [],
+            recommendation: "manager intervention: reassign or retry",
+          },
+        });
+      });
+
+      // 33 §2.2 "manager notified (help-request message)" — task thread'ine DM
+      try {
+        const thread = await guardedDb.transaction((tx) =>
+          channelService.provisionInTx(tx, ctx, {
+            kind: "task_thread",
+            taskId: input.taskId,
+            memberAgentIds: managerId ? [input.agentId, managerId] : [input.agentId],
+          }),
+        );
+        const plan = await messageService.send(ctx, {
+          channelId: thread.id,
+          senderAgentId: input.agentId,
+          kind: "help_request",
+          body:
+            `[manager] Koşum çöktü; görev BLOCKED durumda bekliyor.\n\n` +
+            `Hata: ${reason}\n\n` +
+            `Görevi yeniden dene (BLOCKED→IN_PROGRESS çekip koşumu başlat) veya başka bir ajana devret.`,
+          refs: [{ kind: "task", id: input.taskId }],
+          ...(managerId && { mentions: [managerId] }),
+          idempotencyKey: uuidv5("crash-help", input.sessionId),
+        });
+        if (deps.signalPort) await deliverMessage(guardedDb, ctx, plan, deps.signalPort);
+      } catch {
+        /* mesaj tavsiyedir; BLOCKED durumu + escalation olayı zaten kalıcı */
+      }
+
+      if (managerId) {
+        // request_help ile aynı mekanik: boştaki yöneticinin koşan oturumu
+        // yoksa P1 müdahale görevi kuyruğuna girer ve döngüsü uyandırılır
+        try {
+          const [liveSession] = await guardedDb
+            .select({ id: agentSessions.id })
+            .from(agentSessions)
+            .where(
+              and(
+                eq(agentSessions.companyId, ctx.companyId),
+                eq(agentSessions.agentId, managerId),
+                inArray(agentSessions.status, ["starting", "running"]),
+              ),
+            )
+            .limit(1);
+          if (!liveSession) {
+            const helpTask = await tasksService.create(
+              ctx,
+              {
+                id: uuidv5("crash-help-task", input.sessionId), // idempotent replay
+                kind: "task",
+                title: "Çöken koşum: yönetici müdahalesi gerekli",
+                objective:
+                  `Bir ajanın koşumu çöktü ve görevi BLOCKED bekliyor. ` +
+                  `İlgili görevi incele; yeniden dene ya da devret.\n\nHata: ${reason}`.slice(0, 4000),
+                priority: "P1",
+              },
+              { kind: "founder" }, // create matrisi founder|agent ister
+            );
+            // founder aktörü: 07 §5 matrisi DRAFT→BACKLOG→PLANNED'da system'e
+            // izin vermez (request_help uyandırmasındaki gizli kırılmanın aynısı)
+            for (const to of ["BACKLOG", "PLANNED"] as const) {
+              await taskState.transition(ctx, helpTask.id, to, { kind: "founder" });
+            }
+            await taskState.assign(ctx, helpTask.id, { agentId: managerId }, { kind: "founder" });
+            await deps.startAgentWorkflow?.({
+              companyId: ctx.companyId,
+              agentId: managerId,
+              taskId: helpTask.id,
+            });
+          }
+        } catch (err) {
+          console.warn("crash handler: manager wake failed", err);
+        }
+      } else {
+        // reports_to zinciri boş (kök ajan) → zincirin sonu Founder'dır
+        try {
+          const result = await guardedDb.execute(sql`
+            SELECT cm.user_id FROM company_members cm
+            WHERE cm.company_id = ${ctx.companyId} AND cm.role = 'founder' AND cm.removed_at IS NULL
+            LIMIT 1
+          `);
+          const founder = result.rows[0] as { user_id: string } | undefined;
+          if (founder) {
+            await guardedDb.insert(notifications).values({
+              companyId: ctx.companyId,
+              userId: founder.user_id,
+              kind: "agent_crash",
+              title: "Bir ajanın koşumu çöktü — görev BLOCKED",
+              bodyMd:
+                `Yöneticisi olmayan bir ajanın koşumu çöktü; görevi BLOCKED durumda bekliyor.\n\n` +
+                `Hata: ${reason}\n\nGörevi yeniden başlatın veya devredin.`,
+              refs: { taskId: input.taskId, agentId: input.agentId, sessionId: input.sessionId },
+            });
+          }
+        } catch (err) {
+          console.warn("crash handler: founder notification failed", err);
+        }
       }
     },
 

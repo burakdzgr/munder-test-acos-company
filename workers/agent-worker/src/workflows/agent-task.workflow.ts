@@ -10,6 +10,7 @@
 import {
   condition,
   continueAsNew,
+  isCancellation,
   proxyActivities,
   setHandler,
   sleep,
@@ -128,6 +129,19 @@ function extractJsonCandidate(text: string): string {
     }
   }
   return source.slice(start);
+}
+
+/** Cause-chain flattener: ActivityFailure's message is generic ("Activity
+ *  task failed"); the real error (LlmError, TaskEngineError…) lives down the
+ *  `cause` chain. Pure + deterministic (workflow-safe). */
+function describeError(err: unknown, depth = 0): string {
+  if (depth > 4) return "…";
+  if (err instanceof Error) {
+    const cause = (err as { cause?: unknown }).cause;
+    const head = err.message || err.name;
+    return cause ? `${head} <- ${describeError(cause, depth + 1)}` : head;
+  }
+  return String(err);
 }
 
 /** guard (d) normalization: lowercase, strip volatile fields (08 §9). */
@@ -609,6 +623,22 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
         });
       }
     }
+  } catch (err) {
+    // 33 §2.2 failure handler — çökme sessiz ölüm değildir: görev BLOCKED'a
+    // alınır, yönetici help-request ile haberdar edilir, hata sonra Temporal'a
+    // aynen düşer. continueAsNew (`continuing`) ve dış iptal çökme sayılmaz.
+    if (!continuing && !isCancellation(err)) {
+      try {
+        await activities.reportWorkflowCrashActivity({
+          ...ref,
+          reason: describeError(err).slice(0, 500),
+        });
+      } catch {
+        // raporlama best-effort: oturum kapanışı finally'de, workflow failure
+        // Temporal'da zaten görünür kalır
+      }
+    }
+    throw err;
   } finally {
     if (!continuing) {
       await activities.closeAgentSessionActivity({

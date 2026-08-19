@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Pool } from "pg";
 import { and, eq } from "drizzle-orm";
 import {
+  DelegationService,
   TasksService,
   TaskStateService,
   companyContext,
@@ -31,8 +32,12 @@ import {
   orgEdges,
   orgUnits,
   positions,
+  projects,
+  repositories,
+  reviews,
   tasks,
   users,
+  workspaces,
 } from "../../src/schema/index.js";
 import { startPostgres, type StartedPostgreSqlContainer } from "./helpers";
 
@@ -44,6 +49,7 @@ let ctx: CompanyContext;
 let service: TasksService;
 let state: TaskStateService;
 let companyId = "";
+let founderUserId = "";
 let OWNER = "";
 let MANAGER = "";
 let counter = 0;
@@ -84,6 +90,7 @@ beforeAll(async () => {
     .insert(users)
     .values({ email: "founder@stuck.local", passwordHash: "x", displayName: "F" })
     .returning();
+  founderUserId = founder!.id;
   const [company] = await db
     .insert(companies)
     .values({ name: "StuckCo", slug: "stuckco", createdByUserId: founder!.id })
@@ -124,6 +131,11 @@ beforeAll(async () => {
   await db
     .insert(orgEdges)
     .values({ companyId, fromAgentId: OWNER, kind: "reports_to", toAgentId: MANAGER });
+  // hire() gerçek akışta çifti birlikte yazar; Scheduler adayları manages
+  // kenarından okur (scoreDelegateCandidates)
+  await db
+    .insert(orgEdges)
+    .values({ companyId, fromAgentId: MANAGER, kind: "manages", toAgentId: OWNER });
 }, 600_000);
 
 afterAll(async () => {
@@ -176,6 +188,120 @@ describe("stuck-task sweep (09 §9, 07 §8)", { timeout: 60_000 }, () => {
     expect(finding!.needsWorkflowRestart).toBe(true);
     // ASSIGNED bir durum değişimi DEĞİL: görev yerinde kalır, yalnız bildirilir
     expect(await statusOf(task.id)).toBe("ASSIGNED");
+  });
+
+  it("yetim çocuğu (decompose edilmiş, delege edilmemiş) Scheduler seçimiyle delege eder (P0-3)", async () => {
+    // ebeveyn YÖNETİCİDE: CEO/lead decompose etti ama döngüsü delege etmeden
+    // kapandı senaryosu — canlı kanıt: initiative DRAFT+sahipsiz kaldı
+    counter += 1;
+    const parent = await service.create(
+      ctx,
+      { kind: "task", title: `Decompose eden iş ${counter}`, objective: "x" },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, parent.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, parent.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, parent.id, { agentId: MANAGER }, { kind: "founder" });
+
+    const delegation = new DelegationService(guardedDb, service, state);
+    // 07 §2 hiyerarşi katı: task'ın çocuğu subtask'tır
+    const child = await delegation.createChildTask(ctx, MANAGER, {
+      parentTaskId: parent.id,
+      kind: "subtask",
+      title: "Yetim alt görev",
+      objective: "backend ucu yaz",
+      requiredCapabilities: ["backend"],
+    });
+    expect(await statusOf(child.id)).toBe("DRAFT");
+
+    // eşik dolmadan sweep dokunmaz
+    const early = await sweepStuckTasks(db, guardedDb);
+    expect(early.findings.filter((f) => f.taskId === child.id)).toHaveLength(0);
+    expect(await statusOf(child.id)).toBe("DRAFT");
+
+    // eşik dolunca: Scheduler'ın deterministik seçicisi (INVARIANT 10) ile
+    // ebeveyn sahibinin uygun raporuna delege edilir, workflow restart istenir
+    const later = new Date(Date.now() + 6 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    const finding = result.findings.find((f) => f.taskId === child.id);
+    expect(finding).toBeDefined();
+    expect(finding!.kind).toBe("orphan_child_assigned");
+    expect(finding!.ownerAgentId).toBe(OWNER); // MANAGER'ın tek raporu
+    expect(finding!.needsWorkflowRestart).toBe(true);
+    expect(await statusOf(child.id)).toBe("ASSIGNED");
+
+    // ikinci sweep aynı çocuğu bir daha almaz (artık sahipli)
+    const again = await sweepStuckTasks(db, guardedDb, { now: later });
+    expect(again.findings.filter((f) => f.taskId === child.id && f.kind === "orphan_child_assigned")).toHaveLength(0);
+  });
+
+  it("reviewersız REVIEW görevini kadro uygunsa yeniden açar (P0-2)", async () => {
+    // reviews proje + canlı workspace şart koşar (15 §2)
+    const [project] = await db
+      .insert(projects)
+      .values({
+        companyId,
+        slug: "reviewproj",
+        name: "reviewproj",
+        objectiveMd: "x",
+        status: "executing",
+        createdByUserId: founderUserId,
+      })
+      .returning();
+    const [repo] = await db
+      .insert(repositories)
+      .values({
+        companyId,
+        projectId: project!.id,
+        name: "reviewproj",
+        barePath: `/data/repos/${project!.id}.git`,
+      })
+      .returning();
+    counter += 1;
+    const task = await service.create(
+      ctx,
+      { kind: "task", title: `İncelenecek iş ${counter}`, objective: "x", projectId: project!.id },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, task.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, task.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, task.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, task.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+    await db.insert(workspaces).values({
+      companyId,
+      projectId: project!.id,
+      taskId: task.id,
+      repositoryId: repo!.id,
+      agentId: OWNER,
+      isolationLevel: "coding",
+      image: "acos/workspace-node",
+      branch: `task/${counter}-review`,
+      status: "in_use",
+    });
+    // request_review'un REVIEW'a taşıyıp review satırı AÇAMADIĞI an (P0-2):
+    await state.transition(ctx, task.id, "REVIEW", { kind: "agent", agentId: OWNER });
+
+    // eşik dolmadan dokunmaz
+    const early = await sweepStuckTasks(db, guardedDb);
+    expect(early.findings.filter((f) => f.taskId === task.id)).toHaveLength(0);
+
+    const later = new Date(Date.now() + 6 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    const finding = result.findings.find((f) => f.taskId === task.id);
+    expect(finding).toBeDefined();
+    expect(finding!.kind).toBe("review_reopened");
+    // INV-14: yazar değil — inceleme-yetkin MANAGER seçildi
+    expect(finding!.review?.reviewerAgentId).toBe(MANAGER);
+    const rows = await db
+      .select({ status: reviews.status, reviewerAgentId: reviews.reviewerAgentId })
+      .from(reviews)
+      .where(and(eq(reviews.companyId, companyId), eq(reviews.taskId, task.id)));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe("pending");
+
+    // açık review satırı varken ikinci sweep aynı görevi bir daha almaz
+    const again = await sweepStuckTasks(db, guardedDb, { now: later });
+    expect(again.findings.filter((f) => f.taskId === task.id)).toHaveLength(0);
   });
 
   it("canlı oturumu olan görev için yeniden başlatma istenmez", async () => {
