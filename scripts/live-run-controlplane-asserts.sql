@@ -1,7 +1,7 @@
 -- VENDORED COPY — do not edit here.
 --   source : hive/agents/oscar-mt0b6hjy/E4-LIVE-RUN-CONTROLPLANE-ASSERTS.sql (Oscar)
---   vendored: 2026-08-20
---   sha256  : fc72741830be9158 (of everything below this header)
+--   vendored: 2026-08-22 (claim 5 — the autonomous leaf arc, T54)
+--   sha256  : 83f309800e108c00 (of everything below this header)
 --
 -- Why a copy at all: the harness must be versioned WITH the code it
 -- checks, so "which assert set proved this run" has an answer. Why the
@@ -338,6 +338,85 @@ SELECT '4d2' AS id,
        END AS detail
 FROM per_session;
 
+-- ==================================================== İDDİA 5 — T54 KABULÜ
+-- T54 (god, 2026-08-21) kabul kriteri OTONOM LEAF YAYINA daraltıldı: inceleme
+-- turu ÜRÜN tarafından başlar + inceleme `pending`den çıkar + en az bir leaf
+-- OTONOM olarak DONE (task.completed + merge). Konteyner ilerlemesi T55'in
+-- AYRI kanıtı — burada aramıyoruz (aramak, düşmesi beklenen bir şartı yeşile
+-- zorlamak olurdu).
+--
+-- Run #2'de bu yayın tamamı KIRIKTI: 2 inceleme `pending` doğdu ve orada kaldı,
+-- 0 DONE. T53 sonrası bu üç satır YEŞİL olmalı — olmuyorsa fix çalışmıyordur.
+
+-- 5a — İnceleme turu GERÇEKTEN başladı: en az bir inceleme `pending`den çıktı.
+-- Neden bu kolon: `startReviewActivity` incelemeyi `pending -> in_review` yapan
+-- İLK adımdır; yani "pending değil" demek "reviewWorkflow koştu" demektir.
+-- Vakumluluk: hiç inceleme yoksa PASS DEĞİL — taranacak yüzey yok demektir.
+SELECT '5a' AS id,
+       'at least one review left `pending` (the reviewer''s turn actually ran)' AS claim,
+       CASE WHEN count(*) = 0 THEN 'FAIL'
+            WHEN count(*) FILTER (WHERE r.status <> 'pending') > 0 THEN 'PASS'
+            ELSE 'FAIL' END AS verdict,
+       CASE WHEN count(*) = 0
+            THEN 'NOTHING TO SCAN: the run opened no review at all — 5a cannot pass for the right reason'
+            ELSE format('%s review(s): %s', count(*),
+                        string_agg(format('TASK-%s %s/%s', t.number, r.kind, r.status), '; ' ORDER BY t.number))
+       END AS detail
+FROM reviews r JOIN tasks t ON t.id = r.task_id
+WHERE r.company_id = :company;
+
+-- 5b — En az bir LEAF gerçekten teslim edildi: DONE + `task.completed` + merge
+-- kanıtı. Üçünü BİRLİKTE arıyoruz: yalnız `status='DONE'` bir SYSTEM kısayoluyla
+-- da yazılabilirdi; `task.completed` olayı ve merge izi teslimatın MADDİ
+-- olduğunu söyler.
+SELECT '5b' AS id,
+       'at least one leaf reached DONE with task.completed AND merge evidence' AS claim,
+       CASE WHEN count(*) FILTER (WHERE leaves.done_ok) > 0 THEN 'PASS' ELSE 'FAIL' END AS verdict,
+       CASE WHEN count(*) = 0
+            THEN 'NOTHING TO SCAN: the run produced no leaf task at all'
+            ELSE format('%s leaf task(s); delivered: %s', count(*),
+                        coalesce(string_agg(format('TASK-%s', leaves.number), ', ')
+                                 FILTER (WHERE leaves.done_ok), 'NONE'))
+       END AS detail
+FROM (
+  SELECT t.id, t.number,
+         (t.status = 'DONE'
+          AND EXISTS (SELECT 1 FROM events e
+                       WHERE e.company_id = t.company_id AND e.task_id = t.id
+                         AND e.type = 'task.completed')
+          AND (EXISTS (SELECT 1 FROM reviews r
+                        WHERE r.company_id = t.company_id AND r.task_id = t.id
+                          AND r.merged_commit IS NOT NULL)
+               OR EXISTS (SELECT 1 FROM workspaces w
+                           WHERE w.company_id = t.company_id AND w.task_id = t.id
+                             AND w.status = 'merged'))) AS done_ok
+  FROM tasks t
+  WHERE t.company_id = :company
+    AND t.kind IN ('task', 'subtask')
+    AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.company_id = t.company_id AND c.parent_id = t.id)
+) AS leaves;
+
+-- 5c — BİLGİ (verdict DEĞİL): `review.requested`dan incelemenin başlamasına
+-- kadar geçen süre. SQL, turu ÜRÜNÜN mü yoksa bir insanın mı başlattığını
+-- GÖREMEZ — o yüzden burada PASS/FAIL üretmiyorum (run #2'de turları ELLE ben
+-- başlatmıştım; aynı satırlar o koşuda da "başladı" derdi). Otoriter kanıt
+-- Temporal'daki `reviewWorkflow` execution sayısıdır → aşağıdaki "SQL OLMAYAN"
+-- bölümde. Bu satır yalnız gecikmeyi gösterir: ürün başlatınca saniyeler,
+-- elle/sweep ile başlayınca dakikalar.
+SELECT '5c' AS id,
+       format('TASK-%s review start latency', t.number) AS claim,
+       'INFO' AS verdict,
+       format('requested=%s first_started=%s', e.occurred_at,
+              coalesce((SELECT min(e2.occurred_at)::text FROM events e2
+                         WHERE e2.company_id = r.company_id AND e2.task_id = r.task_id
+                           AND e2.type = 'review.started'), 'never')) AS detail
+FROM reviews r
+JOIN tasks t ON t.id = r.task_id
+JOIN events e ON e.company_id = r.company_id AND e.task_id = r.task_id
+             AND e.type = 'review.requested'
+WHERE r.company_id = :company
+ORDER BY t.number;
+
 -- ============================================================ İŞ DURUMU ÖZETİ
 -- Zorunlu (plan §3.3): "hata yok" ile "iş ilerledi" aynı şey değildir.
 -- Bu bir PASS/FAIL değil, koşunun DÜRÜST resmidir — DRAFT/WAITING'de kalan
@@ -361,6 +440,12 @@ ORDER BY t.number;
 --     `delegate pool: no candidate matched requiredCapabilities` satırı, 1c'deki
 --     görevle AYNI taskId ile. (Jim: worker log grep'i.) 1c "eşleşme yoktu" der;
 --     1d "kod gerçekten fallback dalından geçti" der. İkisi FARKLI iddialardır.
+--
+-- 5-Temporal  T54'ün "inceleme turunu ÜRÜN başlattı" ayağı: `temporal workflow
+--     list` içinde `reviewWorkflow` execution sayısı > 0 VE bu koşuda hiç ELLE
+--     başlatma yapılmadı. DB bunu göremez (5c yalnız gecikme gösterir); run
+--     #2'de turları elle ben başlatmıştım ve DB açısından fark yoktu. Otoriter
+--     ölçüm Jim'in `e2e-live-verify.mjs`'inde ya da doğrudan Temporal'dadır.
 --
 -- 4b  INV-3 bypass nöbetçisi: CLI oturumunun PTY/broker log'undaki kabuk+dosya
 --     eylem sayısı ile `tool_invocations` satır sayısının tutarlılığı.

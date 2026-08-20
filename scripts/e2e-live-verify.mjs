@@ -107,6 +107,15 @@ function runControlPlaneAsserts() {
       summary.push({ claim, verdict, detail });
       continue;
     }
+    // INFO is not a verdict. 5c measures review-start LATENCY and emits one row
+    // per review, because SQL cannot see WHO started the turn (run #2's turns
+    // were started by hand and these rows would have said "started" there too).
+    // Counting it as a failed claim would fail an honest run — the exact way a
+    // rotting assert set does damage.
+    if (verdict === "INFO") {
+      console.log(`  [INFO] ${id} ${claim} — ${detail}`);
+      continue;
+    }
     record(verdict === "PASS" ? "PASS" : "FAIL", `${id} ${claim}`, detail);
   }
   return summary;
