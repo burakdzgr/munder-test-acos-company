@@ -58,6 +58,18 @@ function assertImageIdentity() {
   } catch {
     head = "unknown";
   }
+  // The concurrency ceiling must be the one INSIDE the container. It is easy to
+  // export a value in the firing shell, have the harness and the gate both echo
+  // it back, and never notice the server is running on its default — the run
+  // then "proves" a ceiling that was never in force.
+  const capInside = sh("docker", [...COMPOSE, "exec", "-T", "server", "printenv", "MAX_LIVE_SESSIONS_PER_COMPANY"]).trim();
+  const capExpected = (process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "2").trim();
+  record(
+    capInside === capExpected ? "PASS" : "FAIL",
+    "the session ceiling in force is the one we set",
+    capInside === capExpected ? `server sees ${capInside}` : `server sees ${capInside || "nothing (default)"} but the run assumed ${capExpected}`,
+  );
+
   for (const service of ["server", "agent-worker"]) {
     const baked = sh("docker", [...COMPOSE, "exec", "-T", service, "printenv", "ACOS_BUILD_SHA"]).trim();
     if (!baked) {

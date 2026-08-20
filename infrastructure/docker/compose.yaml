@@ -111,6 +111,9 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: acos
       SANDBOX_MANAGER_URL: http://sandbox-manager:3010
+      # E4 live run: the SERVER enforces the per-company session ceiling, so it
+      # needs the value too — the worker copy below is not enough.
+      MAX_LIVE_SESSIONS_PER_COMPANY: ${MAX_LIVE_SESSIONS_PER_COMPANY-3}
       # Dev fallbacks — override via .env in any real install (prod overlay requires them).
       MASTER_KEY: ${MASTER_KEY:-MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=}
       SESSION_SECRET: ${SESSION_SECRET:-dev-session-secret-change-me}
@@ -213,6 +216,12 @@ services:
       # E4/T31 (ADR-022): agent turn as a live claude CLI session. The identity
       # broker runs on the HOST (it holds the subscription credential) — the
       # worker reaches it via host.docker.internal; the container never sees it.
+      # E4 live run: the concurrency ceiling is read from the environment by
+      # @acos/config, but it was never PASSED THROUGH here — so exporting it in
+      # the firing shell left the container on the default 3 while the harness
+      # and the precondition gate both reported the value they were told. A cap
+      # that only exists outside the container proves nothing inside it.
+      MAX_LIVE_SESSIONS_PER_COMPANY: ${MAX_LIVE_SESSIONS_PER_COMPANY-3}
       ACOS_AGENT_RUNTIME: ${ACOS_AGENT_RUNTIME:-steps}
       IDENTITY_BROKER_URL: ${IDENTITY_BROKER_URL:-}
       ACOS_BROKER_SECRET: ${ACOS_BROKER_SECRET:-}
