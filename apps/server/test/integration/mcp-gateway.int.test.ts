@@ -467,6 +467,100 @@ describe("MCP tool-gateway (E4/A)", { timeout: 300_000 }, () => {
     expect(anonymous.statusCode).toBe(401);
   });
 
+
+  // ---- Family B: şirket fiilleri (T35) --------------------------------
+  it("şirket fiilleri ilan edilir ve GÖVDE worker ile aynı koddur", async () => {
+    const dev = await mint({ agentId: DEV, taskId: openTaskId });
+    const names = ((await rpc(dev.sessionToken, "tools/list")).json().result.tools as Array<{
+      name: string;
+      inputSchema: { properties?: Record<string, unknown> };
+    }>).map((t) => t.name);
+    for (const verb of [
+      "create_task",
+      "delegate_task",
+      "update_task_status",
+      "complete_task",
+      "request_review",
+      "request_help",
+      "escalate",
+      "record_decision",
+      "send_message",
+    ]) {
+      expect(names).toContain(verb);
+    }
+
+    // create_task GERÇEKTEN görev açar — tek yazar zinciri işler
+    const created = await rpc(dev.sessionToken, "tools/call", {
+      name: "create_task",
+      arguments: {
+        kind: "subtask",
+        title: "MCP'den açılan alt görev",
+        objective: "kontrol düzlemi baypas edilmiyor",
+        successCriteria: ["satır tasks tablosunda"],
+      },
+    });
+    const env = created.json().result.structuredContent;
+    expect(created.json().result.isError, JSON.stringify(env)).toBe(false);
+    expect(env.status).toBe("succeeded");
+    const childId = (env.result as { taskId?: string }).taskId;
+    expect(childId).toBeTruthy();
+    const [child] = await db
+      .select({ parentId: tasks.parentId, creatorAgentId: tasks.creatorAgentId, kind: tasks.kind })
+      .from(tasks)
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, childId!)));
+    // ebeveyn = oturumun KENDİ görevi (sentinel), yazar = jetonun ajanı
+    expect(child!.parentId).toBe(openTaskId);
+    expect(child!.creatorAgentId).toBe(DEV);
+    expect(child!.kind).toBe("subtask");
+  });
+
+  it("delegate_task somut ajan adı KABUL ETMEZ (INV-10) — yalnız scheduler|self", async () => {
+    const dev = await mint({ agentId: DEV, taskId: openTaskId });
+    const tools = (await rpc(dev.sessionToken, "tools/list")).json().result.tools as Array<{
+      name: string;
+      inputSchema: { properties?: Record<string, { enum?: string[] }> };
+    }>;
+    const spec = tools.find((t) => t.name === "delegate_task")!;
+    // sözleşme şemada da görünür: model somut id yazmayı DENEYEMEZ
+    expect(spec.inputSchema.properties?.toAgentId?.enum).toEqual(["scheduler", "self"]);
+
+    // somut uuid gönderilse bile kimseye dayatılamaz: şema dışı değer
+    // "scheduler"a düşer ve kararı Scheduler verir
+    const forced = await rpc(dev.sessionToken, "tools/call", {
+      name: "delegate_task",
+      arguments: { toAgentId: CEO, note: "bunu Cem yapsın" },
+    });
+    const env = forced.json().result.structuredContent;
+    // DEV'in raporu yok → Scheduler uygun aday bulamaz; asıl mesele CEO'ya
+    // DAYATILMAMIŞ olması
+    expect(env.result).toMatchObject({ ok: false });
+    expect(JSON.stringify(env.result)).not.toContain(CEO);
+  });
+
+  it("görev bağlamı olmayan oturum şirket fiili işleyemez", async () => {
+    const floating = await mint({ agentId: DEV, taskId: null });
+    const response = await rpc(floating.sessionToken, "tools/call", {
+      name: "record_decision",
+      arguments: { title: "x", decision: "y" },
+    });
+    expect(response.json().result.isError).toBe(true);
+    expect(response.json().result.structuredContent.reason).toBe("NO_TASK_CONTEXT");
+  });
+
+  it("teslim fiili turu bitirdiğini SÖYLER (broker oturumu kapatabilsin)", async () => {
+    const dev = await mint({ agentId: DEV, taskId: openTaskId });
+    const response = await rpc(dev.sessionToken, "tools/call", {
+      name: "complete_task",
+      arguments: {
+        summary: "MCP üzerinden teslim",
+        criteria: [{ criterion: "iş bitti", met: true, evidence: "test" }],
+      },
+    });
+    const env = response.json().result.structuredContent;
+    expect(response.json().result.isError, JSON.stringify(env)).toBe(false);
+    expect(env.turnEnded).toBe(true);
+  });
+
   it("initialize + ping MCP el sıkışmasını tamamlar, bildirim 202 döner", async () => {
     const dev = await mint({ agentId: DEV, taskId: openTaskId });
     const init = await rpc(dev.sessionToken, "initialize", {

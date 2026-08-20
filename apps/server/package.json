@@ -23,6 +23,7 @@
     "seed": "tsx src/seed-cli.ts"
   },
   "dependencies": {
+    "@acos/agent-actions": "workspace:*",
     "@acos/config": "workspace:*",
     "@acos/contracts": "workspace:*",
     "@acos/db": "workspace:*",

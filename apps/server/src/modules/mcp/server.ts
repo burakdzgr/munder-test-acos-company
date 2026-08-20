@@ -18,6 +18,7 @@ import { companyContext, type GuardedDb } from "@acos/db";
 import { agents, environments, positions, tasks } from "@acos/db/schema";
 import { listTools, type ToolDefinition } from "@acos/tools";
 import type { ToolGateway } from "../tools/gateway.js";
+import { ACTION_TOOL_NAMES, callActionTool, listActionTools, type ActionToolDeps } from "./actions.js";
 import type { McpIdentity } from "./sessions.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -96,7 +97,12 @@ export async function listMcpTools(
     }
   }
 
-  return listTools()
+  // Family B (şirket fiilleri) HER oturumda ilan edilir: CLI'ın yerleşik
+  // araçlarında karşılığı yoktur ve olmamalıdır — görev açmak, iş devretmek,
+  // inceleme istemek yalnız buradan geçer.
+  const actionTools = listActionTools();
+  return actionTools.concat(
+    listTools()
     .filter((tool) => {
       if (tool.name === "db.inspect") return hasProjectDatabase;
       if (ORG_TOOLS.has(tool.name)) return ORG_TOOL_ROLES.has(role);
@@ -106,7 +112,8 @@ export async function listMcpTools(
       name: toMcpToolName(tool.name),
       description: tool.description,
       inputSchema: jsonSchemaOf(tool),
-    }));
+    })),
+  );
 }
 
 /** Sözleşmedeki tekdüze zarf — Kevin `structuredContent`'i okur, metni değil. */
@@ -152,7 +159,7 @@ function describe(envelope: McpEnvelope, toolName: string): string {
   }
 }
 
-export interface McpServerDeps {
+export interface McpServerDeps extends ActionToolDeps {
   db: () => GuardedDb;
   gateway: () => ToolGateway;
 }
@@ -164,6 +171,10 @@ export async function callMcpTool(
   mcpToolName: string,
   args: unknown,
 ): Promise<McpCallResult> {
+  // Family B: gövde @acos/agent-actions'ta — worker ile AYNI kod, tek yazar.
+  if (ACTION_TOOL_NAMES.includes(mcpToolName)) {
+    return callActionTool(deps, identity, mcpToolName, (args ?? {}) as Record<string, unknown>);
+  }
   const tool = listTools().find((t) => toMcpToolName(t.name) === mcpToolName);
   if (!tool) {
     const envelope: McpEnvelope = {

@@ -29,6 +29,8 @@ export interface McpRoutesDeps {
   publicMcpUrl: () => string;
   /** E4/A: şirket başına eşzamanlı canlı oturum tavanı (broker admission). */
   maxLiveSessionsPerCompany: () => number;
+  /** Family B: ORTAK eylem dağıtıcısı (@acos/agent-actions). */
+  dispatcher: () => import("@acos/agent-actions").ActionDispatcher;
 }
 
 function bearerOk(header: string | undefined, token: string): boolean {
@@ -217,7 +219,7 @@ export async function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDep
       });
     }
     const response = await handleMcpRpc(
-      { db: deps.guardedDb, gateway: deps.gateway },
+      { db: deps.guardedDb, gateway: deps.gateway, dispatcher: deps.dispatcher },
       auth.identity,
       parsed.data as JsonRpcRequest,
     );
