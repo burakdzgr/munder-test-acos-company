@@ -9,6 +9,10 @@
 //        henüz inmemişken: türetilmiş takımlar + yerel taslak öneri yolu.
 //   ... --draft-then-ready → GET önce 200 'draft' (CEO çalışıyor, teams:[])
 //        döner: sihirbaz BEKLEMELİ, boş listeyle düzenlemeye atlamamalı.
+//   ... --draft-hold → GET hep 'draft' döner (CEO bitirmiyor): kullanıcı
+//        beklemeyi keser ve SUNUCUDAKİ taslak satırını düzenler (yerel taslak
+//        UYDURULMAZ; Oscar'ın "source human'a dönünce LLM üzerine yazmaz"
+//        garantisi yalnız o satır için geçerli).
 //   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
 //        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
 //   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
@@ -19,6 +23,8 @@ const SHOTS = process.argv[2] ?? ".";
 const ENDPOINTS = !process.argv.includes("--no-endpoints");
 const STATE_MODE = process.argv.includes("--draft-then-ready")
   ? "draft"
+  : process.argv.includes("--draft-hold")
+    ? "draft-hold"
   : process.argv.includes("--cancelled")
     ? "cancelled"
     : "none";
@@ -150,6 +156,7 @@ await page.route("**/api/v1/**", async (route) => {
     proposalGets += 1;
     // 'draft' iki tur sürer, sonra öneri hazırlanır (canlı sağlayıcıdaki
     // iki LLM turunun taklidi).
+    if (STATE_MODE === "draft-hold") return json(route, proposal ?? draftRow());
     if (STATE_MODE === "draft" && proposalGets <= 2) return json(route, draftRow());
     if (STATE_MODE === "draft") proposal = mkProposal();
     return proposal ? json(route, proposal) : notFound(route);
@@ -193,7 +200,7 @@ await page.route("**/api/v1/**", async (route) => {
     // hedef = CEO'nun öneri adımını tetikler (W4)
     if (ENDPOINTS) {
       proposal =
-        STATE_MODE === "draft"
+        STATE_MODE === "draft" || STATE_MODE === "draft-hold"
           ? draftRow()
           : STATE_MODE === "cancelled"
             ? { ...mkProposal(), status: "cancelled", teams: [], rationaleMd: "" }
@@ -319,6 +326,40 @@ if (STATE_MODE === "draft") {
     !jumped && (await page.getByTestId("project-wizard-thinking").isVisible()),
   );
   await page.screenshot({ path: `${SHOTS}/w6-01b-draft-bekliyor.png` });
+}
+if (STATE_MODE === "draft-hold") {
+  await page.getByTestId("proposal-skip-wait").click({ timeout: 20_000 });
+  // sunucu taslağı henüz BOŞ (CEO bitirmedi) — liste elemanı yok, o yüzden
+  // düzenleme ekranının açıldığını sunucu-taslak notundan doğruluyoruz.
+  await page.getByTestId("proposal-draft-server-note").waitFor({ timeout: 20_000 });
+  check(
+    "boş sunucu taslağında 'takım ekle' açık, onay kapalı",
+    (await page.getByTestId("proposal-add-team").isVisible()) &&
+      (await page.getByTestId("proposal-confirm").isDisabled()),
+  );
+  check(
+    "beklemeyi kesince SUNUCU taslağı düzenleniyor (yerel taslak uydurulmadı)",
+    (await page.getByTestId("proposal-draft-server-note").isVisible()) &&
+      (await page.getByTestId("proposal-draft-note").count()) === 0,
+  );
+  await page.fill('input[name="newTeamName"]', "Veri");
+  await page.getByTestId("proposal-add-team").click();
+  await page.waitForTimeout(700);
+  check(
+    "düzenleme SUNUCUDAKİ satıra PATCH edildi (aynı id korunuyor)",
+    posts.some((c) => c.startsWith("PATCH ") && c.includes(`/staffing-proposals/${PROPOSAL}`)),
+    posts.filter((c) => c.startsWith("PATCH")).slice(-1)[0]?.slice(0, 100) ?? "PATCH YOK",
+  );
+  await page.screenshot({ path: `${SHOTS}/w6-02d-sunucu-taslagi.png` });
+  await page.getByTestId("proposal-confirm").click();
+  await page.getByTestId("project-wizard-done").waitFor({ timeout: 20_000 });
+  check(
+    "insan planı onaylandı (POST .../confirm)",
+    posts.some((c) => c.includes(`/staffing-proposals/${PROPOSAL}/confirm`)),
+  );
+  console.log(results.join(String.fromCharCode(10)));
+  await browser.close();
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
 }
 if (STATE_MODE === "cancelled") {
   await page.getByTestId("project-wizard-noproposal").waitFor({ timeout: 25_000 });
