@@ -13,6 +13,7 @@ import proto from "@temporalio/proto";
 const { temporal } = proto;
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { startTemporal } from "../test/integration/helpers";
+import { buildStubActivities } from "../test/support/stub-activities";
 
 const require = createRequire(import.meta.url);
 const workflowsPath = require.resolve("../src/workflows/index.ts");
@@ -23,25 +24,10 @@ const AGENT = "22222222-2222-4222-8222-222222222222";
 const TASK = "33333333-3333-4333-8333-333333333333";
 const APPROVAL = "44444444-4444-4444-8444-444444444444";
 
-/** Canned activity set — pure data, deterministic per call order. */
+/** Canned activity set — the shared base + the golden script; pure data, deterministic per call order. */
 function stubActivities(actions: object[]) {
   let call = 0;
-  return {
-    // E4/T31: the workflow asks the runtime first (patched "t31-cli-runtime");
-    // canned stubs answer "steps" like the base activity set does.
-    async resolveAgentRuntimeActivity() {
-      return { kind: "steps" as const, reason: "stub" };
-    },
-    async startAgentSessionActivity() {},
-    async getGuardSnapshotActivity() {
-      return {
-        budgetCents: null,
-        spentCents: 0,
-        remainingCents: null,
-        estimatedNextStepCents: 0,
-        deadline: null,
-      };
-    },
+  return buildStubActivities({
     async buildWorkingSetActivity() {
       return { messages: [{ role: "system", content: "golden" }], digest: "golden" };
     },
@@ -67,16 +53,7 @@ function stubActivities(actions: object[]) {
       }
       return { ok: true, exitCode: 0 };
     },
-    async persistStepActivity() {
-      return { inserted: true };
-    },
-    async resumeFromWaitActivity() {},
-    async expireApprovalActivity() {
-      return { status: "expired" };
-    },
-    async guardEscalateActivity() {},
-    async closeAgentSessionActivity() {},
-  };
+  });
 }
 
 const TOOLLESS_REVIEW = [

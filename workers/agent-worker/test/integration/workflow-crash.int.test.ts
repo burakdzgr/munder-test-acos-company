@@ -21,11 +21,9 @@ import { ApplicationFailure } from "@temporalio/common";
 import { uuidv7 } from "@acos/domain";
 import { TASK_QUEUES } from "@acos/config";
 import {
-  companyContext,
   createDb,
   createGuardedDb,
   runMigrations,
-  type CompanyContext,
   type Db,
   type GuardedDb,
 } from "@acos/db";
@@ -45,6 +43,7 @@ import {
 import type { ModelRouter } from "@acos/llm";
 import { createAgentTaskActivities } from "../../src/activities/agent-task.js";
 import { startPostgres } from "./helpers";
+import { buildStubActivities } from "../support/stub-activities.js";
 
 const require = createRequire(import.meta.url);
 const workflowsPath = require.resolve("../../src/workflows/index.ts");
@@ -62,26 +61,7 @@ function makeCrashingStub() {
     crashReports: [] as Array<{ taskId: string; reason: string }>,
     sessionClosed: [] as string[],
   };
-  const activities = {
-    // E4/T31: the workflow asks the runtime first (patched "t31-cli-runtime");
-    // this stub models the full Worker surface, so it answers "steps" like the
-    // base set does — otherwise "not registered" masks the crash under test.
-    async resolveAgentRuntimeActivity() {
-      return { kind: "steps" as const, reason: "stub" };
-    },
-    async startAgentSessionActivity() {},
-    async getGuardSnapshotActivity() {
-      return {
-        budgetCents: null,
-        spentCents: 0,
-        remainingCents: null,
-        estimatedNextStepCents: 0,
-        deadline: null,
-      };
-    },
-    async buildWorkingSetActivity() {
-      return { messages: [{ role: "user", content: "step" }], digest: "d" };
-    },
+  const activities = buildStubActivities({
     async callModelActivity(): Promise<never> {
       // terminal LLM hatası (probe kanıtındaki ScriptLoadError sınıfı)
       throw ApplicationFailure.nonRetryable(
@@ -89,25 +69,13 @@ function makeCrashingStub() {
         "LlmError",
       );
     },
-    async persistStepActivity() {
-      return { inserted: true };
-    },
-    async executeActionActivity() {
-      return { ok: true };
-    },
-    async resumeFromWaitActivity() {},
-    async guardEscalateActivity() {},
-    async triageInboxActivity() {
-      return { verdict: "ignore" as const };
-    },
-    async markInboxReadActivity() {},
     async reportWorkflowCrashActivity(input: { taskId: string; reason: string }) {
       calls.crashReports.push({ taskId: input.taskId, reason: input.reason });
     },
     async closeAgentSessionActivity(input: { status: string }) {
       calls.sessionClosed.push(input.status);
     },
-  };
+  });
   return { activities, calls };
 }
 
@@ -159,7 +127,6 @@ describe("reportWorkflowCrashActivity (33 §2.2, DB)", { timeout: 300_000 }, () 
   let pool: Pool;
   let db: Db;
   let guardedDb: GuardedDb;
-  let ctx: CompanyContext;
   let activities: ReturnType<typeof createAgentTaskActivities>;
   const started: Array<{ agentId: string; taskId: string }> = [];
 
@@ -191,7 +158,6 @@ describe("reportWorkflowCrashActivity (33 §2.2, DB)", { timeout: 300_000 }, () 
       .values({ name: "CrashCo", slug: "crashco", createdByUserId: founderUserId })
       .returning();
     companyId = company!.id;
-    ctx = companyContext(companyId);
     await db
       .insert(companyMembers)
       .values({ companyId, userId: founderUserId, role: "founder" });
