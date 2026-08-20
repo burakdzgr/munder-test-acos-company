@@ -25,6 +25,8 @@
 //   ... --office-remount → T26: proje seçici + sihirbaz hızlıca açılıp kapanır,
 //        ofis sahnesi defalarca yeniden monte edilir; hiçbir yakalanmamış Pixi
 //        hatası (app.stage null → addChild) çıkmamalı.
+//   ... --office-shot → FAZ 2B: WS mock'uyla gerçek bir kadro düşürülür,
+//        sabit kat + koltuk dağıtımı ekran görüntüsüne alınır.
 //   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
 //        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
 //   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
@@ -40,6 +42,8 @@ const SELECT_PROOF = process.argv.includes("--select-proof");
 // T26: proje degisimi + sihirbaz acilip kapaninca Pixi sahnesi yikilip yeniden
 // kuruluyor; ucusta kalan varlik yuklemesi yok edilmis app.stage'e dokunuyordu.
 const OFFICE_REMOUNT = process.argv.includes("--office-remount");
+// FAZ 2B: sabit Munder-duzeni kat + koltuk dagitimi gorsel kaniti
+const OFFICE_SHOT = process.argv.includes("--office-shot");
 // yarış durumu: proje READY görünüyor ama ilk /goal yine de 409 yiyor
 const GOAL_409_ONCE = process.argv.includes("--goal-409-once");
 const STATE_MODE = process.argv.includes("--draft-then-ready")
@@ -163,9 +167,84 @@ const mkProposal = () => ({
   updatedAt: new Date(0).toISOString(),
 });
 
+// --- FAZ 2B görsel kanıt fikstürleri ---
+const ROLES = [
+  ["CEO", "Aylin Vural"],
+  ["Takım Lideri", "Emre Kaya"],
+  ["Ürün Yöneticisi", "Deniz Ak"],
+  ["Backend Engineer", "Selin Yıldız"],
+  ["Frontend Engineer", "Kaan Demir"],
+  ["Veri Mühendisi", "Ece Toprak"],
+  ["Proje Yöneticisi", "Mert Şahin"],
+  ["Yazılım Mühendisi", "Buse Arslan"],
+  ["Yazılım Mühendisi", "Onur Çelik"],
+  ["QA Mühendisi", "Zeynep Ay"],
+];
+const shotId = (i) => `aaaaaaaa-aaaa-4aaa-8aaa-bbbbbbbb${String(i).padStart(4, "0")}`;
+const posId = (i) => `cccccccc-cccc-4ccc-8ccc-dddddddd${String(i).padStart(4, "0")}`;
+const SHOT_POSITIONS = ROLES.map(([title], i) => ({
+  id: posId(i),
+  title,
+  seniorityTrack: ["expert"],
+  defaultRole: i === 0 ? "executive" : "worker",
+  description: title,
+  orgUnitId: U1,
+}));
+const SHOT_AGENTS = ROLES.map(([title, name], i) => ({
+  id: shotId(i),
+  employeeNumber: i + 1,
+  displayNumber: `EMP-${String(i + 1).padStart(3, "0")}`,
+  name,
+  avatarUrl: null,
+  status: "active",
+  positionId: posId(i),
+  orgUnitId: U1,
+  seniority: "expert",
+  autonomyLevel: 3,
+  persona: title,
+  createdAt: new Date(0).toISOString(),
+}));
+const PRESENCE = {
+  layoutVersion: 1,
+  snapshotEpoch: 1,
+  agents: SHOT_AGENTS.map((a, i) => ({
+    agentId: a.id,
+    name: a.name,
+    // SUNUCU ızgarasındaki hücreler — yansıtıcı bunları kata oturtacak
+    cell: { x: 3 + (i % 5) * 2, y: 3 + Math.floor(i / 5) * 2 },
+    badge: ["WORKING", "THINKING", "REVIEWING", "IDLE", "COMMUNICATING"][i % 5],
+    deskId: `desk-${i}`,
+    sessionId: null,
+  })),
+  interactions: [],
+};
+
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 const pageErrors = [];
+if (OFFICE_SHOT) {
+  await page.routeWebSocket("**/ws", (ws) => {
+    ws.onMessage((raw) => {
+      let frame;
+      try {
+        frame = JSON.parse(String(raw));
+      } catch {
+        return;
+      }
+      if (frame.op === "subscribe") {
+        for (const topic of frame.topics ?? []) {
+          ws.send(JSON.stringify({ op: "sub_ok", topic, mode: "live" }));
+          if (String(topic).startsWith("presence:")) {
+            ws.send(JSON.stringify({ op: "snapshot", topic, seq: 1, state: PRESENCE }));
+          }
+        }
+      }
+    });
+    ws.send(
+      JSON.stringify({ op: "hello", connectionId: "c_shot", heartbeatSec: 20, maxTopics: 32, version: 1 }),
+    );
+  });
+}
 page.on("pageerror", (e) => {
   pageErrors.push(e.message);
   console.log("PAGEERROR:", e.message);
@@ -298,7 +377,8 @@ await page.route("**/api/v1/**", async (route) => {
       task("99999999-9999-4999-8999-999999999991", P1, U1, A1, "Anasayfa"),
       task("99999999-9999-4999-8999-999999999992", P2, U2, A2, "Ekranlar"),
     ]);
-  if (p.endsWith("/agents")) return json(route, []);
+  if (p.endsWith("/agents")) return json(route, OFFICE_SHOT ? SHOT_AGENTS : []);
+  if (p.endsWith("/org/positions")) return json(route, OFFICE_SHOT ? SHOT_POSITIONS : []);
   if (p.includes("/approvals")) return json(route, []);
   if (p.includes("/costs") || p.includes("/reports")) return json(route, { items: [] });
   return json(route, {});
@@ -309,7 +389,10 @@ const check = (name, ok, extra = "") =>
   results.push(`${ok ? "PASS" : "FAIL"} — ${name}${extra ? ` (${extra})` : ""}`);
 
 const mode = ENDPOINTS ? "sözleşme uçları VAR" : "uçlar YOK (yedek yol)";
-await page.goto(`http://localhost:5199/c/${CID}`, { waitUntil: "networkidle" });
+// WS mock'u acikken baglanti hic bosa dusmez: o modda domcontentloaded yeter
+await page.goto(`http://localhost:5199/c/${CID}`, {
+  waitUntil: OFFICE_SHOT ? "domcontentloaded" : "networkidle",
+});
 await page.waitForTimeout(1200);
 
 // --- W7 ---
@@ -403,6 +486,23 @@ if (SELECT_PROOF) {
   // seçicilerin çevresine kırp: satırlar okunacak kadar büyük görünsün
   await page.screenshot({ path: `${SHOTS}/t27-acik-liste.png`, clip: { x: 0, y: 0, width: 620, height: 120 } });
   check("açık seçenek listesi ekran görüntüsüne alındı", true, "t27-acik-liste.png");
+  console.log(results.join(String.fromCharCode(10)));
+  await browser.close();
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
+}
+
+if (OFFICE_SHOT) {
+  await page.waitForTimeout(2500); // sahne + varlıklar
+  const seatCount = await page.evaluate(() => window.__acosOffice?.agentCount ?? -1);
+  check("kadro sahneye indi (WS anlık görüntüsü)", seatCount > 0, `avatar: ${seatCount}`);
+  const box = await page.getByTestId("office-canvas").boundingBox();
+  if (box) {
+    await page.screenshot({
+      path: `${SHOTS}/2b-kat.png`,
+      clip: { x: box.x, y: box.y, width: box.width, height: box.height },
+    });
+  }
+  check("kat ekran görüntüsüne alındı", !!box, "2b-kat.png");
   console.log(results.join(String.fromCharCode(10)));
   await browser.close();
   process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);

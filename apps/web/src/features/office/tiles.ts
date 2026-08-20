@@ -438,6 +438,52 @@ export function woodPlankArt(): PixelArt {
   };
 }
 
+/**
+ * Toplantı masası (FAZ 2B): 5 hücre × 2 hücre, tepeden görünüm.
+ *
+ * Munder'ın boardroom'unda büyük bir masa var; onun KOMPOZİSYONUNU alıyoruz
+ * ama pikselleri kendimizin (LimeZu varlıkları ticari kullanıma kapalı).
+ * Prosedürel üretiliyor çünkü 80×32 piksellik bir harf haritasını elle
+ * yazmak okunur değil — zemin/duvar döşemeleri de aynı şekilde üretiliyor.
+ */
+export function meetingTableArt(): PixelArt {
+  const w = 80; // 5 hücre × 16 sanat pikseli
+  const h = 32; // 2 hücre
+  const rows: string[] = [];
+  for (let y = 0; y < h; y += 1) {
+    let row = "";
+    for (let x = 0; x < w; x += 1) {
+      const edge = x < 2 || x >= w - 2 || y < 4 || y >= h - 4;
+      const chairTop = y < 4 && x % 16 >= 4 && x % 16 < 12;
+      const chairBottom = y >= h - 4 && x % 16 >= 4 && x % 16 < 12;
+      if (chairTop || chairBottom) row += "c";
+      else if (y < 4 || y >= h - 4) row += ".";
+      else if (edge) row += "e";
+      else if (y === 5) row += "l"; // üst kenar ışığı
+      else if (y === h - 6) row += "d"; // alt kenar gölgesi
+      else if (noise(x, y, 17) > 0.94) row += "g"; // ahşap damarı
+      else row += "t";
+    }
+    rows.push(row);
+  }
+  return {
+    rows,
+    palette: {
+      t: 0x5a4331, // masa yüzeyi
+      g: 0x6a5140, // damar
+      l: 0x74583f, // üst kenar ışığı
+      d: 0x3f2f22, // alt kenar gölgesi
+      e: 0x4a3728, // kenar profili
+      c: 0x2b3440, // sandalye sırtı
+    },
+  };
+}
+
+/** Kafeterya zemini: sıcak tonlu karo. */
+export function cafeTileArt(): PixelArt {
+  return floorTileArt(0x9a8570, 7);
+}
+
 /** #rrggbb tamsayısını kanal başına kaydırır (döşeme tonlaması). */
 export function shiftColor(color: number, delta: number): number {
   const clamp = (v: number) => Math.max(0, Math.min(255, v));
