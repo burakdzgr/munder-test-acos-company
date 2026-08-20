@@ -35,6 +35,7 @@ import {
   confirmProposal,
   editProposal,
   getOpenProposal,
+  openDraftProposal,
   ProposalError,
   upsertProposal,
 } from "../../src/modules/staffing/proposal.js";
@@ -235,6 +236,73 @@ describe("staffing proposal (E2/W3)", { timeout: 180_000 }, () => {
       `)
     ).rows as [{ n: number }];
     expect(Number(after.n)).toBe(Number(before.n));
+  });
+
+  // ------------------------------------------------------------------
+  // T20 geri bildirimi (2026-08-20): GET'in 404'ü İKİ ayrı şeyi anlatıyordu —
+  // "uç/proje yok" ve "CEO hâlâ düşünüyor". Satır artık akışın BAŞINDA açılır.
+  // Sözleşme değişmedi: `draft` zaten ilan edilmiş bir durumdu.
+  // ------------------------------------------------------------------
+
+  it("boş taslak açılır ('CEO düşünüyor') ve GET onu AÇIK öneri sayar", async () => {
+    const other = await mkProject("taslak");
+    const draft = await openDraftProposal(guardedDb, ctx, {
+      projectId: other,
+      workflowId: "goal.taslak.1",
+    });
+    expect(draft.status).toBe("draft");
+    expect(draft.teams).toHaveLength(0);
+    const seen = await getOpenProposal(guardedDb, ctx, other);
+    expect(seen?.id).toBe(draft.id); // 404 DEĞİL — arayüz ilerleme gösterebilir
+    // ikinci açış aynı satırı döner
+    expect((await openDraftProposal(guardedDb, ctx, { projectId: other })).id).toBe(draft.id);
+  });
+
+  it("öneri gelince taslak DOLDURULUR — ikinci satır açılmaz", async () => {
+    const other = await mkProject("taslak-dolar");
+    const draft = await openDraftProposal(guardedDb, ctx, { projectId: other });
+    const filled = await upsertProposal(guardedDb, ctx, {
+      projectId: other,
+      source: "llm",
+      rationaleMd: "Küçük ekip yeter.",
+      teams: [{ capability: "devops", headcount: 1 }],
+    });
+    expect(filled.id).toBe(draft.id); // AYNI satır
+    expect(filled.status).toBe("awaiting_human");
+    expect(filled.source).toBe("llm");
+    expect(filled.teams.map((t) => t.capability)).toEqual(["devops"]);
+  });
+
+  it("önerilecek bir şey çıkmazsa taslak KAPANIR (sonsuz 'düşünüyor' yok)", async () => {
+    const other = await mkProject("onerisiz");
+    const draft = await openDraftProposal(guardedDb, ctx, { projectId: other });
+    const closed = await upsertProposal(guardedDb, ctx, {
+      projectId: other,
+      source: "deterministic",
+      teams: [], // LLM de yedeği de boş döndü
+    });
+    expect(closed.id).toBe(draft.id);
+    expect(closed.status).toBe("cancelled");
+    // kapandı → artık AÇIK öneri değil
+    expect(await getOpenProposal(guardedDb, ctx, other)).toBeNull();
+  });
+
+  it("insanın dokunduğu taslak LLM tarafından EZİLMEZ", async () => {
+    const other = await mkProject("insan-taslagi");
+    const draft = await openDraftProposal(guardedDb, ctx, { projectId: other });
+    const mine = await editProposal(guardedDb, ctx, {
+      proposalId: draft.id,
+      version: draft.version,
+      teams: [{ capability: "security", headcount: 2 }],
+    });
+    expect(mine.source).toBe("human");
+    const late = await upsertProposal(guardedDb, ctx, {
+      projectId: other,
+      source: "llm",
+      teams: [{ capability: "marketing", headcount: 4 }],
+    });
+    expect(late.teams.map((t) => t.capability)).toEqual(["security"]);
+    expect(late.source).toBe("human");
   });
 
   it("boş plan onaylanamaz", async () => {

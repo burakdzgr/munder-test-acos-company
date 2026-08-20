@@ -64,6 +64,14 @@ export interface IntakeControlActivityDeps {
         teams: Array<{ capability: string; teamName?: string; headcount: number; rationale?: string }>;
       }) => Promise<{ id: string; status: string; teams: unknown[] }>)
     | undefined;
+  /** E2/W4: akışın başında boş taslak ("CEO düşünüyor") açar. */
+  openStaffingProposal?:
+    | ((input: {
+        companyId: string;
+        projectId: string;
+        workflowId: string | null;
+      }) => Promise<{ id: string; status: string }>)
+    | undefined;
   /** E2/W5: onaylanan öneriyi Agent Factory'ye uygular. */
   applyStaffingProposal?:
     | ((input: { companyId: string; proposalId: string }) => Promise<{ hired: number }>)
@@ -368,6 +376,24 @@ export function createIntakeControlActivities(deps: IntakeControlActivityDeps) {
       } catch {
         return null; // degrade — planlama analizsiz sürer
       }
+    },
+
+    /**
+     * E2/W4 — "CEO düşünüyor" satırını AÇAR.
+     *
+     * Öneri, akışın sonunda (iki LLM turundan sonra) yazılıyordu; o ana kadar
+     * arayüzün GET'i 404 alıyor ve 404 iki ayrı şeyi anlatıyordu ("uç yok" /
+     * "CEO çalışıyor"). Taslak artık burada açılır. Uç yoksa akış değişmez —
+     * yalnız sihirbaz ilerlemesi kaybolur.
+     */
+    async openStaffingProposalActivity(input: {
+      companyId: string;
+      projectId: string;
+      workflowId: string | null;
+    }): Promise<{ proposalId: string } | null> {
+      if (!deps.openStaffingProposal) return null;
+      const row = await deps.openStaffingProposal(input);
+      return { proposalId: row.id };
     },
 
     /**
