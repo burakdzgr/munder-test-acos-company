@@ -6,6 +6,12 @@
 // Sözleşme Oscar tarafından donduruldu (E2-faz2a-contracts.md §2) ve akış
 // birebir onu izler:
 //   1. POST /projects           → proje açılır (intake READY'de durur, P1-1)
+//   1b. GET /projects/:id       → durum READY olana kadar BEKLENİR. Yeni bir
+//      projede sunucu önce depoyu kurup indeksler (gerçek bir stack'te ~40 sn)
+//      ve o sırada /goal'u 409 ile REDDEDER ("proje henüz indekslenmedi").
+//      Beklemeden hedef verilirse planlama hiç başlamaz, kadro önerisi hiç
+//      doğmaz ve sihirbaz sonsuza kadar öneri bekler. (Jim'in canlı E2E'si,
+//      T24 — mock'lar anında yanıtladığı için smoke'ta görünmüyordu.)
 //   2. POST /projects/:id/goal  → Founder hedefi; CEO (LLM) kadroyu önerir
 //   3. GET  .../staffing-proposal → status 'awaiting_human' olana kadar beklenir;
 //      planlama iş akışı bu noktada Temporal sinyalinde DURUYOR
@@ -39,11 +45,31 @@ import {
   type StaffingProposal,
 } from "./staffingProposal.js";
 
-type Step = "brief" | "thinking" | "proposal" | "done" | "noproposal";
+type Step = "brief" | "indexing" | "thinking" | "proposal" | "done" | "noproposal";
 
 /** CEO önerisi için bekleme: sözleşmede status 'awaiting_human' olduğunda hazır. */
 const POLL_MS = 2000;
 const POLL_TIMEOUT_MS = 60_000;
+/** indeksleme beklemesi: gerçek bir depoda dakikalara çıkabilir */
+const INDEX_POLL_MS = 2000;
+const INDEX_TIMEOUT_MS = 8 * 60_000;
+/** sunucunun hedef kabul ettiği durumlar (projects/routes.ts GOAL_ACCEPTING) */
+const GOAL_ACCEPTING = [
+  "ready",
+  "planning",
+  "staffing_review",
+  "waiting_for_founder",
+  "executing",
+  "paused",
+  "active",
+];
+/** hedef ALAMAYACAK bitmiş durumlar — beklemenin anlamı yok */
+const GOAL_CLOSED = ["failed", "completed", "archived", "cancelled"];
+const INDEXING_LABEL: Record<string, string> = {
+  draft: "Proje kaydı oluşturuldu",
+  repository_setup: "Depo hazırlanıyor",
+  indexing: "Kod tabanı indeksleniyor",
+};
 
 export function ProjectWizard({
   companyId,
@@ -64,6 +90,8 @@ export function ProjectWizard({
   const [error, setError] = useState<string | null>(null);
   const [newTeamName, setNewTeamName] = useState("");
   const [noProposal, setNoProposal] = useState<"cancelled" | "applied" | null>(null);
+  const [indexStatus, setIndexStatus] = useState<string>("draft");
+  const [indexSeconds, setIndexSeconds] = useState(0);
   const cancelled = useRef(false);
   // kullanıcı beklemeyi kesip taslakla devam edebilir (uç yoksa ya da
   // CEO adımı uzarsa ekranda çakılı kalmasın)
@@ -81,6 +109,8 @@ export function ProjectWizard({
       setError(null);
       setNewTeamName("");
       setNoProposal(null);
+      setIndexStatus("draft");
+      setIndexSeconds(0);
     } else {
       cancelled.current = false;
     }
@@ -95,10 +125,47 @@ export function ProjectWizard({
         objective: requirements.trim(),
       });
       setProjectId(project.id);
-      setStep("thinking");
       void queryClient.invalidateQueries({ queryKey: [companyId, "projects", "list"] });
+
+      // 1b. Depo kurulumu + indeksleme bitene kadar BEKLE. Sunucu bu sırada
+      // /goal'u 409 ile reddeder; beklemezsek planlama hiç başlamaz.
+      setIndexStatus(project.status);
+      setStep("indexing");
+      const indexDeadline = Date.now() + INDEX_TIMEOUT_MS;
+      let status = project.status;
+      const startedAt = Date.now();
+      while (!GOAL_ACCEPTING.includes(status)) {
+        if (cancelled.current) throw new Error("iptal");
+        if (GOAL_CLOSED.includes(status)) {
+          throw new Error(
+            `Proje ${status} durumunda açıldı ve hedef alamıyor. Proje ekranından yeniden deneyin.`,
+          );
+        }
+        if (Date.now() > indexDeadline) {
+          throw new Error(
+            "İndeksleme beklenenden uzun sürdü. Proje OLUŞTURULDU — hedefi birazdan proje ekranından verebilirsiniz.",
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, INDEX_POLL_MS));
+        const fresh = await api.projects.get(companyId, project.id);
+        status = fresh.status;
+        setIndexStatus(status);
+        setIndexSeconds(Math.round((Date.now() - startedAt) / 1000));
+      }
+
+      setStep("thinking");
       // hedef = CEO'nun kadro önerisini tetikleyen adım (W4)
-      await api.projects.setGoal(companyId, project.id, requirements.trim());
+      // 409 hâlâ mümkün (durum okumakla /goal arasındaki yarış) — kısa süre yeniden dene.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await api.projects.setGoal(companyId, project.id, requirements.trim());
+          break;
+        } catch (err) {
+          const conflict = err instanceof AcosApiError && err.problem.status === 409;
+          if (!conflict || attempt >= 5 || cancelled.current) throw err;
+          await new Promise((resolve) => setTimeout(resolve, INDEX_POLL_MS));
+        }
+      }
 
       const deadline = Date.now() + POLL_TIMEOUT_MS;
       // Uç açık ama CEO henüz bitirmediyse elimizde GERÇEK bir satır olur
@@ -258,6 +325,24 @@ export function ProjectWizard({
               </Button>
             </div>
           </>
+        )}
+
+        {step === "indexing" && (
+          <div
+            className="rounded-md border border-acos-line bg-acos-bg2 p-4 text-xs text-acos-fg1"
+            data-testid="project-wizard-indexing"
+          >
+            <p className="font-medium text-acos-fg0">Proje hazırlanıyor…</p>
+            <p className="mt-1 text-acos-fg2" data-testid="project-wizard-index-status">
+              {INDEXING_LABEL[indexStatus] ?? `Durum: ${indexStatus}`}
+              {indexSeconds > 0 && ` · ${indexSeconds} sn`}
+            </p>
+            <p className="mt-2 text-acos-fg2">
+              Hedef ancak kod tabanı indekslendikten sonra verilebilir; bitince CEO kadroyu
+              önermeye başlayacak. Pencereyi kapatırsanız proje kayıtlı kalır — hedefi daha
+              sonra proje ekranından verebilirsiniz.
+            </p>
+          </div>
         )}
 
         {step === "thinking" && (
