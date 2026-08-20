@@ -14,7 +14,7 @@
 // Stack: `node scripts/e2e-stack.mjs up` (ephemeral, LLM_MODE=scripted, server
 // on :13000). NEVER point this at a live-LLM stack unless you mean to pay for
 // it — the runner refuses the dev port unless `--allow-live` is passed.
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const BASE = process.env.ACOS_SERVER_URL ?? "http://localhost:13000";
 const ALLOW_LIVE = process.argv.includes("--allow-live");
@@ -456,6 +456,54 @@ async function main() {
       );
     }
     return PASS(`${state.deliveredTaskNumber} DONE (${state.reviewCount} reviews, code+qa approved) -> goal DONE by roll-up`);
+  });
+
+  // T29 (Founder, 2026-08-20): a manager must be able to KEEP a slice of the
+  // work instead of pushing every child down. The permission layer always
+  // allowed it (delegation.ts `managerAgentId === toAgentId` -> ok) but the
+  // candidate pool was direct-reports-only and the prompt forbade naming a
+  // concrete agent, so it was unreachable — and nothing asserted it, which is
+  // why the gap survived for months. Oscar's contract: assert a task whose
+  // owner equals its PARENT's owner and that reached DONE.
+  //
+  // TIMING (Oscar): the self-taken child does NOT start immediately. The
+  // one-live-session-per-agent gate holds it at ASSIGNED until the manager's
+  // own turn ends and `agent.session.ended` drains it. So this stage polls
+  // rather than spot-checking, and runs late in the map on purpose.
+  await stage("10b-manager-self-took", "a manager keeps a slice: self-assigned child reaches DONE", async () => {
+    if (!state.projectId) return SKIP("no project");
+    // Capability probe: without T29 the sentinel does not exist, and a plain
+    // "no self-assigned task found" would be indistinguishable from "the model
+    // chose not to". Say WHICH it is.
+    let hasT29 = false;
+    try {
+      hasT29 = readFileSync("packages/llm/src/agent-action.ts", "utf8").includes("SELF_SENTINEL_UUID");
+    } catch {
+      /* running outside the repo root — fall through to the behavioural check */
+    }
+    const selfTaken = await until(async () => {
+      const tasks = await get(`/api/v1/companies/${state.companyId}/tasks?projectId=${state.projectId}`);
+      const all = list(tasks.body);
+      const byId = new Map(all.map((task) => [task.id, task]));
+      return (
+        all.find((task) => {
+          const parent = task.parentId ? byId.get(task.parentId) : null;
+          return (
+            parent &&
+            task.ownerAgentId &&
+            parent.ownerAgentId === task.ownerAgentId &&
+            task.status === "DONE"
+          );
+        }) ?? null
+      );
+    }, LANE === "scripted" ? T.short : T.long, 5000);
+    if (!selfTaken) {
+      const detail = "no task reached DONE under the same owner as its parent - every manager pushed all work down";
+      return hasT29 ? BREAK(detail, "control-plane:delegation self-assignment") : SKIP(`${detail} (T29 not in this build)`);
+    }
+    return PASS(
+      `TASK-${selfTaken.number}(${selfTaken.kind}) self-taken by its parent's owner and closed`,
+    );
   });
 
   await stage("11-merge-and-codeindex", "merge moves HEAD and CodeIndex follows incrementally", async () => {
