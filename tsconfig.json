@@ -14,6 +14,7 @@
     { "path": "apps/desktop" },
     { "path": "workers/agent-worker" },
     { "path": "workers/execution-worker" },
-    { "path": "services/sandbox-manager" }
+    { "path": "services/sandbox-manager" },
+    { "path": "services/identity-broker" }
   ]
 }
