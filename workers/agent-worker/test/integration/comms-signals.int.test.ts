@@ -367,4 +367,90 @@ describe("comms + signals (T33)", () => {
     const members = await channelService.members(ctx, thread!.id);
     expect(members.map((m) => m.agentId)).toContain(ACTIVE);
   });
+
+  it("T38: a reply on the task thread restarts a WAITING owner that has NO live workflow", async () => {
+    // request_help sonrasi gorunen sekil: gorev WAITING'e park etti ve
+    // (CLI runtimeinda) oturum KAPANDI. Yoneticinin cevabi yalnizca kosan bir
+    // workflow'a sinyal tasidigi icin, uyandirmasi gereken mesaj hicbir seyi
+    // uyandirmiyordu — gorev 30 dakikalik sweep'e kadar oyle kaliyordu.
+    const { TasksService } = await import("@acos/db");
+    const tasksService = new TasksService(guardedDb);
+    const parked = await tasksService.create(
+      ctx,
+      { kind: "task", title: "Parked on help", objective: "x" },
+      { kind: "agent", agentId: IDLE },
+    );
+    // IDLE'in KOSAN workflow'u yok; gorevi WAITING'e ve sahibine sabitle
+    await db
+      .update(tasks)
+      .set({ status: "WAITING", ownerAgentId: IDLE })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, parked.id)));
+    const [thread] = await db
+      .select()
+      .from(channels)
+      .where(
+        and(
+          eq(channels.companyId, companyId),
+          eq(channels.kind, "task_thread"),
+          eq(channels.taskId, parked.id),
+        ),
+      );
+
+    const woken: Array<{ agentId: string; taskId: string }> = [];
+    const spyPort = {
+      ...signalPort(),
+      async startAgentTurn({ agentId, taskId: t }: { companyId: string; agentId: string; taskId: string }) {
+        woken.push({ agentId, taskId: t });
+      },
+    };
+
+    const plan = await messageService.send(ctx, {
+      channelId: thread!.id,
+      senderAgentId: null,
+      kind: "text",
+      body: "Yoneticinin cevabi: su sekilde ilerle",
+      idempotencyKey: uuidv7(),
+    });
+    await deliverMessage(guardedDb, ctx, plan, spyPort);
+
+    // BEKLENEN SEY GELDI: gorevin KENDI thread'ine dustu, alici gorevin
+    // SAHIBI, gorev WAITING ve canli oturum yok ⇒ tur yeniden baslatilir.
+    expect(woken).toEqual([{ agentId: IDLE, taskId: parked.id }]);
+  });
+
+  it("T38: an UNRESOLVED wait is NOT woken — no blanket WAITING restart", async () => {
+    // Kartin yuk tasiyan kisitlamasi: WAITING tek bir durum degil. Bekleyisi
+    // cozmeyen bir mesaj turu yeniden baslatirsa ajan uyanir, hicbir sey
+    // gelmedigini gorur, yine bekler ve esszamanlilik tavaninda kosulabilir isi
+    // acliga iter. Burada mesaj gorev thread'ine DEGIL, bir DM'e dusuyor.
+    const { TasksService } = await import("@acos/db");
+    const tasksService = new TasksService(guardedDb);
+    const parked = await tasksService.create(
+      ctx,
+      { kind: "task", title: "Still waiting", objective: "x" },
+      { kind: "agent", agentId: IDLE },
+    );
+    await db
+      .update(tasks)
+      .set({ status: "WAITING", ownerAgentId: IDLE })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, parked.id)));
+
+    const woken: Array<{ agentId: string; taskId: string }> = [];
+    const spyPort = {
+      ...signalPort(),
+      async startAgentTurn({ agentId, taskId: t }: { companyId: string; agentId: string; taskId: string }) {
+        woken.push({ agentId, taskId: t });
+      },
+    };
+    const dm = await channelService.getOrCreateDm(ctx, null, IDLE);
+    const plan = await messageService.send(ctx, {
+      channelId: dm.id,
+      senderAgentId: null,
+      kind: "text",
+      body: "ilgisiz bir DM",
+      idempotencyKey: uuidv7(),
+    });
+    await deliverMessage(guardedDb, ctx, plan, spyPort);
+    expect(woken).toEqual([]);
+  });
 });

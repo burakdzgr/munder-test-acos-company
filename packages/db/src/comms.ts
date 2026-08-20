@@ -418,6 +418,12 @@ export interface SignalPort {
     item: InboxItem;
   }): Promise<boolean>;
   signalInbox(input: { companyId: string; agentId: string; item: InboxItem }): Promise<void>;
+  /**
+   * T38: bir bekleyis COZULDUGUNDE, sahibinin turunu CANLI WORKFLOW YOKKEN de
+   * yeniden baslatabilmek icin. Opsiyonel — taşımayan cagirici icin davranis
+   * degismez (mesaj yine dayanikli inbox'a duser).
+   */
+  startAgentTurn?(input: { companyId: string; agentId: string; taskId: string }): Promise<void>;
 }
 
 export interface InboxItem {
@@ -477,7 +483,54 @@ export async function deliverMessage(
       await port
         .signalInbox({ companyId: ctx.companyId, agentId: recipient.agentId, item })
         .catch(() => {});
+      await wakeResolvedWait(db, ctx, plan, recipient.agentId, port);
     }
   }
 }
 
+/**
+ * T38 — "cozulen bir bekleyis, canli workflow YOKKEN de sahibinin turunu
+ * yeniden baslatmali."
+ *
+ * request_help sonrasi gorev WAITING'e park ediyor ve (CLI runtimeinda) oturum
+ * KAPANIYOR. Yoneticinin cevabi yalnizca KOSAN bir workflow'a sinyal
+ * tasidigindan, uyandirmasi gereken mesaj hicbir seyi uyandirmiyordu: gorev
+ * 30 dakikalik sweep'e kadar oyle kaliyordu (T14 ile ayni sinif, farkli
+ * tetikleyici).
+ *
+ * KASITLI OLARAK dar: `pickNextQueuedTaskId`'ye WAITING'i toptan EKLEMIYORUZ.
+ * WAITING tek bir durum degil (timer / reply / review / approval / dependency);
+ * toptan dahil etmek, bekleyisi HALA COZULMEMIS gorevleri de yeniden
+ * baslatirdi — ajan uyanir, hicbir sey gelmedigini gorur, yine bekler, bir
+ * oturum + LLM turu yakar ve esszamanlilik tavaninda kosulabilir isi ACLIGA
+ * iter (log'da dongu gibi gorunur). Burada tetikleyici bir DURUM TARAMASI
+ * degil, BEKLENEN SEYIN GELMESI: mesaj gorevin KENDI thread'ine dustu, alici o
+ * gorevin SAHIBI, gorev WAITING ve sahibinin canli oturumu yok. Bu dort kosul
+ * birlikte "bekleyis cozuldu"nun ta kendisidir.
+ *
+ * Esszamanlilik guvenligi cagiranin: starter tek-canli-oturum kapisini ve
+ * sirket tavanini uyguluyor; kapi reddederse gorev ASSIGNED kuyrugunda bekler.
+ * 30 dakikalik sweep artik BIRINCIL yol degil, BACKSTOP.
+ */
+async function wakeResolvedWait(
+  db: GuardedDb,
+  ctx: CompanyContext,
+  plan: DeliveryPlan,
+  recipientAgentId: string,
+  port: SignalPort,
+): Promise<void> {
+  if (!port.startAgentTurn) return;
+  const threadTaskId = plan.channel.taskId;
+  if (!threadTaskId) return; // gorev thread'i degilse ortada cozulen bir bekleyis yok
+  const { tasks } = await import("./schema/index.js");
+  const [task] = await db
+    .select({ id: tasks.id, status: tasks.status, ownerAgentId: tasks.ownerAgentId })
+    .from(tasks)
+    .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, threadTaskId)));
+  if (!task || task.status !== "WAITING" || task.ownerAgentId !== recipientAgentId) return;
+  await port
+    .startAgentTurn({ companyId: ctx.companyId, agentId: recipientAgentId, taskId: task.id })
+    .catch(() => {
+      // uyandirma best-effort: 30 dakikalik sweep backstop olarak duruyor
+    });
+}
