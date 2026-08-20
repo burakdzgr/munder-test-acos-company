@@ -550,7 +550,22 @@ async function main() {
       );
     }, LANE === "scripted" ? T.short : T.long, 5000);
     if (!selfTaken) {
-      const detail = "no task reached DONE under the same owner as its parent - every manager pushed all work down";
+      // Self-assignment is a MODEL choice (the action catalog offers the SELF
+      // sentinel; the manager decides). So "nobody self-took" only indicts the
+      // system when a manager actually had a slice to keep - two or more
+      // children under one parent. A single-leaf goal gives the manager nothing
+      // to split, and BREAKing there would make this gate flaky by construction.
+      const tasks = await get(`/api/v1/companies/${state.companyId}/tasks?projectId=${state.projectId}`);
+      const all = list(tasks.body);
+      const children = new Map();
+      for (const task of all) {
+        if (task.parentId) children.set(task.parentId, (children.get(task.parentId) ?? 0) + 1);
+      }
+      const widest = Math.max(0, ...children.values());
+      if (widest < 2) {
+        return SKIP(`no manager had a slice to keep (widest decomposition = ${widest} child) - this goal cannot exercise the choice`);
+      }
+      const detail = `no task reached DONE under the same owner as its parent, though one manager split ${widest} children - every manager pushed all work down`;
       return hasT29 ? BREAK(detail, "control-plane:delegation self-assignment") : SKIP(`${detail} (T29 not in this build)`);
     }
     return PASS(
