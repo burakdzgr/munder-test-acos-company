@@ -19,6 +19,7 @@ import { approvals as approvalsTable, notifications, orgUnits, positions, tasks 
 import { OrgService } from "../org/service.js";
 import { AgentsService } from "../agents/service.js";
 import { seedToolGrants } from "../../seed.js";
+import { linkProjectTeam } from "../projects/team-links.js";
 
 export interface StaffingRequirement {
   capability: string;
@@ -139,6 +140,18 @@ export class StaffingService {
           kind: "team",
         });
         createdUnits.push(unitSlug);
+      }
+      // E2/W1 (T17): Agent Factory bir PROJE için kadro kuruyorsa takım o
+      // projeye BAĞLANIR. Öncesinde bağ yalnız işten türüyordu, yani sihirbazın
+      // kurduğu ekip ilk görev dağıtılana kadar projede görünmüyordu.
+      if (opts.projectId) {
+        await linkProjectTeam(this.db, ctx, {
+          projectId: opts.projectId,
+          orgUnitId: unit.id,
+          addedBy: "system",
+        }).catch(() => {
+          /* bağ kozmetik değil ama kadro kurulumunu ASLA düşürmez */
+        });
       }
       const positionTitle = `${req.capability.charAt(0).toUpperCase() + req.capability.slice(1)} Uzmanı`;
       let [position] = await this.db

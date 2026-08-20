@@ -162,3 +162,43 @@ export const deployments = pgTable(
     ),
   ],
 );
+
+/**
+ * E2/W1 (T17) — proje ↔ takım GERÇEK bağı, migration 0026.
+ *
+ * Bugüne kadar bu ilişki yalnız İŞTEN türüyordu (tasks.project_id ×
+ * tasks.org_unit_id): iş almamış projenin takımı yoktu, yani sihirbazın
+ * kurduğu ekip ilk görev dağıtılana kadar görünmüyordu. Bağ artık kalıcı.
+ *
+ * Neden JOIN tablosu, neden `orgUnits.projectId` DEĞİL: bir takım aynı anda
+ * birden çok projede çalışabilir (09 §2) ve ajan kalıcı bir ŞİRKET varlığıdır
+ * — `agents.orgUnitId`'yi projeye taşımak ajanı projeye hapsederdi. Proje↔ajan
+ * bağı `projectMembers`'ta kalır; burası yalnız proje↔BİRİM.
+ */
+export const projectTeamMemberships = pgTable(
+  "project_team_memberships",
+  {
+    id: id(),
+    companyId: companyId(),
+    createdAt: createdAt(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    orgUnitId: uuid("org_unit_id").notNull(),
+    /** kim bağladı: sihirbaz/Agent Factory (system), Founder, ajan, ya da göç */
+    addedBy: text("added_by").notNull().default("system"),
+    addedAt: timestamp("added_at", { withTimezone: true }).notNull().defaultNow(),
+    removedAt: timestamp("removed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("project_team_memberships_active_uq")
+      .on(t.projectId, t.orgUnitId)
+      .where(sql`${t.removedAt} IS NULL`),
+    index("project_team_memberships_company_project_idx").on(t.companyId, t.projectId),
+    index("project_team_memberships_unit_idx").on(t.companyId, t.orgUnitId),
+    check(
+      "project_team_memberships_added_by_check",
+      sql`${t.addedBy} IN ('system','founder','agent','backfill')`,
+    ),
+  ],
+);

@@ -22,6 +22,7 @@ import {
 } from "@acos/db";
 import { ApiError } from "../../app.js";
 import type { CompanyService } from "../companies/service.js";
+import { linkProjectTeam, listProjectTeams, unlinkProjectTeam } from "./team-links.js";
 
 export type IntakeStarter = (input: {
   companyId: string;
@@ -541,6 +542,70 @@ export async function registerProjectRoutes(
         createdAt: artifact.createdAt.toISOString(),
         meta: artifact.meta,
       });
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // E2/W1 (T17): proje ↔ takım bağı. Arayüzün üç ayrı liste ucunu birleştirip
+  // türettiği ilişki artık TEK uçtan ve GERÇEK bağdan geliyor; bağı olmayan
+  // proje için türev yedeği korunuyor (grup başına `source`).
+  // ---------------------------------------------------------------------
+  typed.get(
+    "/api/v1/companies/:companyId/project-teams",
+    { schema: { params: ParamsSchema, tags: ["projects"] } },
+    async (request) => {
+      const user = request.requireUser();
+      const { companyId } = request.params;
+      await requireMember(user.id, companyId);
+      return listProjectTeams(deps.guardedDb(), companyContext(companyId));
+    },
+  );
+
+  typed.post(
+    "/api/v1/companies/:companyId/projects/:projectId/teams",
+    {
+      schema: {
+        params: ProjectParamsSchema,
+        body: z.object({ orgUnitId: z.uuid() }),
+        tags: ["projects"],
+      },
+    },
+    async (request) => {
+      const user = request.requireUser();
+      const { companyId, projectId } = request.params;
+      const role = await deps.companiesSvc().membership(user.id, companyId);
+      if (!role) throw new ApiError("not_found", "company not found");
+      if (role !== "founder") throw new ApiError("forbidden", "takım bağını yalnız Founder kurar");
+      const ctx = companyContext(companyId);
+      await service().get(ctx, projectId); // 404 üretir
+      const result = await linkProjectTeam(deps.guardedDb(), ctx, {
+        projectId,
+        orgUnitId: request.body.orgUnitId,
+        addedBy: "founder",
+      });
+      // idempotent: zaten bağlıysa da 200 — arayüz iki kez tıklamayı dert etmesin
+      return { ok: true, ...result };
+    },
+  );
+
+  typed.delete(
+    "/api/v1/companies/:companyId/projects/:projectId/teams/:orgUnitId",
+    {
+      schema: {
+        params: ProjectParamsSchema.extend({ orgUnitId: z.uuid() }),
+        tags: ["projects"],
+      },
+    },
+    async (request) => {
+      const user = request.requireUser();
+      const { companyId, projectId, orgUnitId } = request.params;
+      const role = await deps.companiesSvc().membership(user.id, companyId);
+      if (!role) throw new ApiError("not_found", "company not found");
+      if (role !== "founder") throw new ApiError("forbidden", "takım bağını yalnız Founder kaldırır");
+      const ctx = companyContext(companyId);
+      await service().get(ctx, projectId);
+      const result = await unlinkProjectTeam(deps.guardedDb(), ctx, { projectId, orgUnitId });
+      return { ok: true, ...result };
     },
   );
 }
