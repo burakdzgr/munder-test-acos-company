@@ -18,6 +18,18 @@ import { readFileSync, writeFileSync } from "node:fs";
 
 const BASE = process.env.ACOS_SERVER_URL ?? "http://localhost:13000";
 const ALLOW_LIVE = process.argv.includes("--allow-live");
+// The live workload run drives this same script but must produce the SHAPE the
+// live assert set expects (Oscar's plan §1): a goal that splits into 2+ leaves
+// and carries ONE genuine decision gap, so `request_help` fires because the
+// agent lacks a fact — not because a brief told it to. Overridable, so the
+// scenario lives with the run that needs it instead of being hard-coded here.
+const PROJECT_OBJECTIVE =
+  process.env.ACOS_E2E_PROJECT_OBJECTIVE ??
+  "Bir HTTP saglik ucu ve birim testi olan kucuk bir Node servisi kur.";
+const FOUNDER_GOAL =
+  process.env.ACOS_E2E_GOAL ??
+  "Saglik ucunu /health olarak ekle, 200 ve status ok dondur, birim testini yaz.";
+
 const JSON_OUT = (() => {
   const i = process.argv.indexOf("--json");
   return i >= 0 ? process.argv[i + 1] : null;
@@ -242,7 +254,7 @@ async function main() {
     if (!state.companyId) return SKIP("no company");
     const created = await post(`/api/v1/companies/${state.companyId}/projects`, {
       name: "Golden Path App",
-      objective: "Bir HTTP saglik ucu ve birim testi olan kucuk bir Node servisi kur.",
+      objective: PROJECT_OBJECTIVE,
     });
     if (!created.ok) return BREAK(`POST /projects -> ${created.status} ${brief(created.body)}`, "server:projects");
     state.projectId = created.body.id;
@@ -269,7 +281,7 @@ async function main() {
   await stage("04-founder-goal", "Founder gives the goal -> project enters PLANNING", async () => {
     if (!state.projectId) return SKIP("no project");
     const goal = await post(`/api/v1/companies/${state.companyId}/projects/${state.projectId}/goal`, {
-      objective: "Saglik ucunu /health olarak ekle, 200 ve status ok dondur, birim testini yaz.",
+      objective: FOUNDER_GOAL,
     });
     if (goal.status === 409) {
       // The create-time objective already started the cascade, so the
