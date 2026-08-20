@@ -462,6 +462,26 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
           payload: { sessionId: input.sessionId, from: "IDLE", to: "WORKING" },
         });
       });
+      // 07 §5: ASSIGNED→IN_PROGRESS = "sahibi işi eline aldı". Oturum
+      // açılırken bu adım HİÇ atılmıyordu; görev, ajan on bir adım boyunca
+      // çalışırken bile ASSIGNED kalıyordu (A7 canlı koşumu, 2026-08-19).
+      // Sonuç kozmetik değil: wait_for parkı (08 §6), onay parkı ve guard
+      // parkı üçü de `status === "IN_PROGRESS"` koşuluna bağlı, yani TÜM
+      // oturum boyunca sessizce hiçbir şey yapmıyorlardı — ve makinede
+      // olmayan ASSIGNED→WAITING geçişi talep edilebilir hale geliyordu.
+      const [taskRow] = await guardedDb
+        .select({ status: tasks.status, ownerAgentId: tasks.ownerAgentId })
+        .from(tasks)
+        .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
+      // yalnız SAHİBİNİN oturumu ilerletir: inceleme/QA oturumları görevi
+      // REVIEW'dan çekip almaz (matris zaten owner|system diyor)
+      if (taskRow?.status === "ASSIGNED" && taskRow.ownerAgentId === input.agentId) {
+        await taskState
+          .transition(ctx, input.taskId, "IN_PROGRESS", { kind: "agent", agentId: input.agentId })
+          .catch(() => {
+            /* yarışta başkası taşımış olabilir; durum zaten ilerlemiştir */
+          });
+      }
       rt(input, "agent.status", { payload: { status: "running", activity: "WORKING" } });
     },
 
@@ -1229,6 +1249,23 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
               if (current?.status === action.to) {
                 return { ok: true, status: current.status, replayed: true };
               }
+              // Modelin YANLIŞ hedef durum seçmesi bir altyapı arızası
+              // DEĞİLDİR. create_task/delegate_task'ta olduğu gibi (guard f)
+              // yapılandırılmış gözlem döner ve ajan bir sonraki Working
+              // Set'te düzeltir. A7 canlı koşumu (2026-08-19): CEO görev
+              // ASSIGNED'ken WAITING istedi, TaskEngineError buradan yeniden
+              // fırlatıldı, aktivite düştü, iş akışı çöktü ve hedef GOAL
+              // görevi BLOCKED'a park etti — tek bir kötü aksiyon seçimi
+              // yüzünden şirketin en üst konteyneri kilitlendi.
+              return {
+                ok: false,
+                error: err.code,
+                detail: err.message,
+                currentStatus: current?.status ?? null,
+              };
+            }
+            if (err instanceof TaskEngineError) {
+              return { ok: false, error: err.code, detail: err.message };
             }
             throw err;
           }
