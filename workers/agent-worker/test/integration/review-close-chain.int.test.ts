@@ -35,6 +35,7 @@ import {
   projects,
   repositories,
   reviews,
+  taskDependencies,
   tasks,
   users,
   workspaces,
@@ -381,5 +382,101 @@ describe("request_review → reviewWorkflow başlatıcısı (T53)", { timeout: 1
     expect(started[0]!.reviewId).toBe(observation.reviewId);
     // INV-14: yazarın kendisi değil
     expect(started[0]!.reviewerAgentId).not.toBe(OWNER);
+  });
+});
+
+// T55(a) — `wait_for dependency` bekleyişi KAYDETMİYORDU (07 §12).
+//
+// §12: "wait_for dependency TASK-41..43 → epic WAITING; resumes on
+// dependencyResolved signals, then moves epic to REVIEW". Çözme tarafı
+// (`resolveDependents`: DONE ⇒ edge çözülür + `task.dependency.resolved`)
+// hep vardı — ama bu dal HİÇ edge yazmıyordu; `refId` okunmuyordu bile.
+// Canlı sonuç (run #2): `task_dependencies` 0 satır, epic'ler WAITING'de
+// dondu, 0 DONE. Çözülecek bir bekleyiş hiç doğmamıştı.
+//
+// Bu test YALNIZ kayıt tarafını kilitler. Sinyalin sahibine ULAŞMASI ayrı
+// bir eksiktir (köprü yalnız canlı oturuma sinyal atıyor, CLI şeridinde tur
+// zaten bitmiş oluyor) ve ayrı commit'te ele alınır — burada "kaydedildi"
+// ile "teslim edildi"yi karıştırmıyoruz.
+describe("wait_for dependency bekleyişi kaydeder (T55a)", { timeout: 120_000 }, () => {
+  async function parentWithChildren(childCount: number) {
+    counter += 1;
+    const parent = await tasksService.create(
+      ctx,
+      { kind: "task", title: `Bölünen iş ${counter}`, objective: "x", projectId },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, parent.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, parent.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, parent.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, parent.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+    const children = [];
+    for (let i = 0; i < childCount; i += 1) {
+      counter += 1;
+      children.push(
+        await tasksService.create(
+          ctx,
+          { kind: "subtask", title: `Alt iş ${counter}`, objective: "x", projectId, parentId: parent.id },
+          { kind: "founder" },
+        ),
+      );
+    }
+    return { parent, children };
+  }
+
+  const edgesOf = async (taskId: string) =>
+    db
+      .select({ dependsOn: taskDependencies.dependsOnTaskId, resolvedAt: taskDependencies.resolvedAt })
+      .from(taskDependencies)
+      .where(and(eq(taskDependencies.companyId, companyId), eq(taskDependencies.taskId, taskId)));
+
+  const waitForDependency = async (taskId: string) => {
+    const { createActionDispatcher } = await import("@acos/agent-actions");
+    return createActionDispatcher({ guardedDb }).dispatch({
+      companyId,
+      agentId: OWNER,
+      taskId,
+      sessionId: crypto.randomUUID(),
+      stepId: crypto.randomUUID(),
+      action: { type: "wait_for", what: "dependency", timeoutMinutes: 120 },
+    });
+  };
+
+  it("refId verilmezse AÇIK ÇOCUKLARI bekler ve edge'leri yazar", async () => {
+    const { parent, children } = await parentWithChildren(2);
+
+    const observation = await waitForDependency(parent.id);
+
+    expect(observation.ok).toBe(true);
+    expect(await statusOf(parent.id)).toBe("WAITING");
+    // ÖNCEDEN: burada 0 satır olurdu — çözülecek bekleyiş hiç doğmazdı
+    const edges = await edgesOf(parent.id);
+    expect(edges.map((e) => e.dependsOn).sort()).toEqual(children.map((c) => c.id).sort());
+    expect(observation.waitingOnCount).toBe(2);
+  });
+
+  it("yazılan edge ÇÖZÜLMEMİŞ doğar — çözme tarafının bekleyeceği şey tam olarak budur", async () => {
+    // Burada ÇÖZÜLMEYİ yeniden kanıtlamıyorum: `resolveDependents` (DONE ⇒
+    // `resolved_at` + `task.dependency.resolved`) zaten vardı ve çalışıyordu;
+    // eksik olan onu BESLEYEN kayıttı. Bir çocuğu DONE'a taşımak için tam
+    // REVIEW→QA→merge zincirini kurmak, değiştirmediğim bir davranışı tekrar
+    // ölçmek olurdu. Ölçtüğüm şey çözmenin ÖN KOŞULU: edge var ve açık.
+    const { parent, children } = await parentWithChildren(1);
+
+    await waitForDependency(parent.id);
+
+    const edges = await edgesOf(parent.id);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.dependsOn).toBe(children[0]!.id);
+    expect(edges[0]!.resolvedAt).toBeNull();
+  });
+
+  it("aynı wait_for iki kez çağrılırsa edge ÇOĞALMAZ (unique çifti yutulur)", async () => {
+    const { parent } = await parentWithChildren(2);
+
+    await waitForDependency(parent.id);
+    await waitForDependency(parent.id); // WAITING'den tekrar — idempotent olmalı
+
+    expect(await edgesOf(parent.id)).toHaveLength(2);
   });
 });

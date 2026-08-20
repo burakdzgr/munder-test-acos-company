@@ -302,6 +302,20 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
     return row?.kind ?? null;
   }
 
+  /** T55(a): `wait_for dependency` KAYIT tarafı — beklenen görevlerin id'leri.
+   *  Model tek bir `refId` verebiliyor (şema: `refId?: uuid`, DİZİ değil), ama
+   *  07 §12'nin tarif ettiği asıl kullanım "çocuklarımı bekliyorum"dur —
+   *  canlı koşuda sahipler zaten hiçbir şey isimlendirmedi. refId yoksa açık
+   *  çocuklar beklenen kümedir. */
+  async function openChildIdsOf(ctx: CompanyContext, taskId: string): Promise<string[]> {
+    const rows = await guardedDb
+      .select({ id: tasks.id, status: tasks.status })
+      .from(tasks)
+      .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.parentId, taskId)));
+    const TERMINAL = new Set(["DONE", "FAILED", "CANCELLED", "REJECTED"]);
+    return rows.filter((r) => !TERMINAL.has(r.status)).map((r) => r.id);
+  }
+
   /** Konteynerin açık çocuk sayısı — gözlemde sahibe geri bildirilir. */
   async function openChildrenOf(ctx: CompanyContext, taskId: string): Promise<number> {
     const rows = await guardedDb
@@ -702,6 +716,35 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
               };
             }
           }
+          // T55(a) — 07 §12'yi RESTORE eder: "wait_for dependency TASK-41..43 →
+          // epic WAITING; resumes on dependencyResolved". `resolveDependents`
+          // (DONE ⇒ edge çözülür + `task.dependency.resolved`) ZATEN çalışıyor,
+          // ama bu dal hiçbir zaman EDGE YAZMIYORDU: `refId` okunmuyordu bile.
+          // Yani ortada çözülecek bir bekleyiş yoktu ve çocuklar bitince
+          // sahibini hiçbir şey uyandırmıyordu (canlı: task_dependencies 0 satır,
+          // epic'ler WAITING'de kaldı, 0 DONE).
+          //
+          // NOT (dürüstlük): bu YALNIZ kayıt tarafıdır. Sinyalin sahibine
+          // ULAŞMASI ayrı bir eksik — köprü yalnız CANLI oturuma sinyal atıyor
+          // ve CLI şeridinde tur zaten bitmiş oluyor. Teslim tarafı ayrı commit.
+          let waitingOn: string[] = [];
+          if (action.what === "dependency") {
+            const targets = action.refId ? [action.refId] : await openChildIdsOf(ctx, input.taskId);
+            for (const dependsOn of targets) {
+              if (dependsOn === input.taskId) continue;
+              try {
+                await tasksService.addDependency(ctx, input.taskId, dependsOn);
+                waitingOn.push(dependsOn);
+              } catch (err) {
+                // Aynı çift zaten kayıtlı (unique index) ya da döngü olurdu:
+                // ikisi de "bu bekleyiş zaten ifade edilmiş" demektir, turu
+                // düşürmez. Beklenen küme yine de gözlemde görünür.
+                const code = (err as { code?: string }).code;
+                if (code === "TASK_DEPENDENCY_CYCLE") continue;
+                waitingOn.push(dependsOn);
+              }
+            }
+          }
           // status move only — the workflow owns the Temporal condition (08 §6)
           const [current] = await guardedDb
             .select({ status: tasks.status })
@@ -723,7 +766,13 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
             payload: { what: action.what, timeoutMinutes: Math.min(action.timeoutMinutes, 15) },
           });
           rt(input, "agent.status", { payload: { activity: "WAITING" } });
-          return { ok: true, waiting: action.what };
+          // Beklenen küme gözlemde GÖRÜNÜR: boşsa sahibi "hiçbir şeyi
+          // beklemiyorum" bilgisini alır — sessizce sonsuz WAITING yerine.
+          return {
+            ok: true,
+            waiting: action.what,
+            ...(action.what === "dependency" && { waitingOn, waitingOnCount: waitingOn.length }),
+          };
         }
         case "create_task": {
           // depth ≤ 5 enforced inside (07 §2); the structured error appears
