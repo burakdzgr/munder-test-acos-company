@@ -116,3 +116,21 @@ Four parts:
   the `CONTEXT_SENTINEL_UUID` path still resolves to a report.
 - Golden path (Jim, T29 companion assert): "a manager self-took **and closed** at least one
   subtask" — a task whose `owner_agent_id` equals its parent's `owner_agent_id`, reaching `DONE`.
+
+## Notes folded in from the E4 ADR draft (Jim, 2026-08-20)
+
+- **INV-14 is deliberately NOT relaxed.** A manager who does the work still may not review it.
+  Self-assignment must never become self-approval; reviewer independence is unaffected by this ADR.
+- **Why it survived unnoticed.** The permission layer always allowed self-assignment
+  (`managerAgentId === toAgentId` → ok); only the candidate pool and the prompt blocked it. Nothing
+  in the gate asserted that a manager ever kept a slice, so every run was green while every manager
+  pushed 100% of the work down. The assertion now exists (golden path `10b-manager-self-took`);
+  the missing assert, not the missing code, is why this took months to surface.
+- **Timing, for anyone writing tests against this.** A self-taken child does not start immediately:
+  the one-live-session-per-agent gate holds it at ASSIGNED until the manager's own turn ends and
+  `agent.session.ended` drains it (30-minute `sweepStuckTasks` as backstop). Assertions must poll
+  past the manager's session end rather than spot-check right after the delegation step.
+- **Invariant numbering discrepancy (flagged, not "fixed").** Code comments cite "INVARIANT 10" for
+  Scheduler assignment determinism, while `35-CLAUDE-CODE-HANDOFF.md` §12 numbers INV-10 as "domain
+  core owns all state" (scheduler determinism lives in 07 §5/§6). The mismatch predates this work
+  and is recorded rather than renumbered — renumbering invariants mid-change rots every citation.
