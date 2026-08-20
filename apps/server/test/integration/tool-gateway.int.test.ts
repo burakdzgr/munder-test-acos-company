@@ -108,6 +108,11 @@ const fakePort: ToolDispatchPort = {
         return {
           output: {
             exitCode: 0,
+            // T22: terminal.run çıktısına `timedOut` SONRADAN eklendi (ajan
+            // "öldürüldü" ile "test kırıldı"yı ayırabilsin diye). Sahte port
+            // alanı üretmediği için çıktı şema doğrulaması düşüyor ve A2/A3
+            // ölçmek istedikleri şeye (defter/bütçe) hiç varamıyordu.
+            timedOut: false,
             stdoutTail: "ok",
             stderrTail: "",
             durationMs: 10,

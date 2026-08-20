@@ -442,7 +442,18 @@ describe.skipIf(!runnable)("engineering review flow (T43, demo steps 17–19)", 
     expect(code.reviewerAgentId).not.toBe(code.authorAgentId);
     expect(code.mergedCommit).toMatch(/^[0-9a-f]{40}$/);
     expect(qa.status).toBe("approved");
-    expect(qa.reviewerAgentId).toBe(agentId["Baran Çelik"]);
+    // T22: QA turunu artık BARAN değil KEREM alıyor ve bu DOĞRU. 2026-08-19
+    // canlı bulgusundan sonra QA'ya uygun roller genişletildi (qa|reviewer|
+    // lead|manager): küçük kadrolarda Agent Factory bir LEAD işe alıyordu ve
+    // QA turu "no eligible qa reviewer" ile patlayıp görevi QA'da asılı
+    // bırakıyordu. Seçim kuralı "önce aynı takım, sonra en az yüklü" olduğu
+    // için görevin takımındaki lead (Kerem) QA'yı devralıyor; Baran başka
+    // birimde. Testin ESKİ beklentisi, rol kümesi dar olduğu dönemin
+    // fotoğrafıydı.
+    expect(qa.reviewerAgentId).toBe(agentId["Kerem Yıldız"]);
+    // Değişmeyen ve asıl korunması gereken şey: INV-14 — yazar kendi işini
+    // onaylayamaz.
+    expect(qa.reviewerAgentId).not.toBe(qa.authorAgentId);
 
     // the REVIEW→CHANGES_REQUESTED loop was exercised at least once, driven
     // by the reviewer's identity (M4 DoD)

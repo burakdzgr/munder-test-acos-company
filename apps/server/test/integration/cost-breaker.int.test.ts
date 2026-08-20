@@ -262,17 +262,33 @@ beforeAll(async () => {
     .returning();
   const providerId = provider!.id;
 
+  // T22: adımları birbirinden ayırmak için SAYI kullanmak artık YETMİYOR.
+  // `normalizedActionHash` gövdedeki her sayıyı `<n>`e indiriyor (satır
+  // numarası/bayt sayısı gibi anlamsız farklar döngüyü gizlemesin diye —
+  // doğru davranış). Sonuç: "#1/#2/#3" biçiminde ayrışan düşünceler aynı
+  // hash'e düşüyor, guard (d) 3. adımda tetikleniyor ve bu test bütçe
+  // guard'ı yerine döngü guard'ını ölçüyordu (canlı kanıt: guards:["loop"],
+  // 4 adım, 160¢). Ayrım artık SÖZCÜKLE yapılıyor; normalizasyon sözcüğe
+  // dokunmuyor, yani test yine ölçmek istediği şeyi ölçüyor.
+  const THOUGHT_WORDS = [
+    "birinci",
+    "ikinci",
+    "ucuncu",
+    "dorduncu",
+    "besinci",
+    "altinci",
+    "yedinci",
+    "sekizinci",
+  ];
   const adapter: ProviderAdapter = {
     providerId,
-    // Her çağrı geçerli bir AgentAction döndürür; `thought` her adımda FARKLI
-    // olmalı, aksi halde guard (d) (loop detector) 3. tekrarda önce tetiklenir
-    // ve bu test bütçe guard'ını değil döngü guard'ını ölçerdi.
     async complete() {
       modelCalls += 1;
+      const word = THOUGHT_WORDS[(modelCalls - 1) % THOUGHT_WORDS.length];
       return {
         text: JSON.stringify({
           type: "think",
-          thought: `pahalı düşünme adımı #${modelCalls} — ${TOKENS_PER_CALL} token`,
+          thought: `pahali dusunme adimi ${word} tur — token yakan bir adim`,
         }),
         usage: { inputTokens: TOKENS_PER_CALL, outputTokens: 0, cachedInputTokens: 0 },
         finishReason: "stop" as const,
