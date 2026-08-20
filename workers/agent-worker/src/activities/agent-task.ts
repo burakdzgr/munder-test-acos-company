@@ -220,6 +220,22 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
 
 
   return {
+    /**
+     * E4/T31 (ADR-022): which runtime this turn takes. The BASE activity set
+     * answers "steps" for every turn; the production worker overrides this
+     * (main.ts spreads the CLI-session activities AFTER this set) with the
+     * config-aware resolver. It lives HERE because the workflow calls it
+     * unconditionally under patched("t31-cli-runtime") — a Worker registering
+     * only createAgentTaskActivities (every integration test, any embedded
+     * worker) must still be able to run a turn. 2026-08-21 regression: the
+     * resolver was registered only in main.ts and five integration suites
+     * died with "Activity function resolveAgentRuntimeActivity is not
+     * registered on this Worker" → "Workflow execution failed".
+     */
+    async resolveAgentRuntimeActivity(): Promise<{ kind: "steps" | "cli"; reason: string }> {
+      return { kind: "steps", reason: "cli runtime not wired on this worker" };
+    },
+
     /** 08 §1: mark the pre-created session running; task started + presence. */
     async startAgentSessionActivity(input: SessionRef & {
       workflowId: string;
