@@ -89,23 +89,52 @@ async function main() {
     process.exit(3);
   }
 
-  // ---- pick the session under test ----------------------------------------
-  let companyId = COMPANY;
-  if (!companyId) {
+  // A stack usually holds several companies (seed demo + whatever the run
+  // created), and "the first one the API returns" is not the one under test.
+  // Picking blind made this verifier report RED for "no terminal session" when
+  // the session existed one company over - a false negative on a passing run,
+  // the second-worst thing a test can do. Scan every company and take the
+  // newest session; --company still forces one explicitly.
+  const candidates = [];
+  if (COMPANY) {
+    candidates.push(COMPANY);
+  } else {
     const companies = await get(baseUrl, "/api/v1/companies");
-    companyId = list(companies.body)[0]?.id ?? null;
+    candidates.push(...list(companies.body).map((company) => company.id).filter(Boolean));
   }
-  if (!companyId) {
-    console.log("FAIL — no company on this stack to inspect");
+  if (candidates.length === 0) {
+    console.log("FAIL - no company on this stack to inspect");
     process.exit(2);
   }
-  const terminals = await get(baseUrl, `/api/v1/companies/${companyId}/terminals`);
-  const session = list(terminals.body).find((t) => t.taskId) ?? list(terminals.body)[0];
+  const stamp = (t) => Date.parse(t.startedAt ?? t.createdAt ?? t.openedAt ?? 0) || 0;
+  let companyId = null;
+  let session = null;
+  for (const candidate of candidates) {
+    const terminals = await get(baseUrl, `/api/v1/companies/${candidate}/terminals`);
+    const items = list(terminals.body);
+    // A session bound to a task is the one an agent turn ran in; an unbound one
+    // is a Founder shell. Prefer bound, newest first, but keep an unbound
+    // session as a last resort so "a PTY exists but no turn used it" still
+    // reports as a failed claim rather than as nothing to look at.
+    const best =
+      [...items].filter((t) => t.taskId).sort((a, b) => stamp(b) - stamp(a))[0] ??
+      [...items].sort((a, b) => stamp(b) - stamp(a))[0];
+    if (best && (!session || stamp(best) > stamp(session))) {
+      session = best;
+      companyId = candidate;
+    }
+  }
   if (!session) {
-    console.log(`FAIL — company ${companyId} has no terminal session; no agent turn ever ran`);
+    console.log(
+      `FAIL - none of the ${candidates.length} company/companies on this stack has a terminal session; no agent turn ever ran`,
+    );
     process.exit(2);
   }
-  console.log(`session ${session.id}${session.taskId ? ` (task ${session.taskId})` : ""}\n`);
+  console.log(
+    `company ${companyId}
+session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task bound)"}
+`,
+  );
 
   // ---- 1. it RAN as a CLI --------------------------------------------------
   const logPath = join(DATA_DIR, "terminals", `${session.id}.log`);
