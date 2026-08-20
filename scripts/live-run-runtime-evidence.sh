@@ -50,11 +50,15 @@ snapshot_session() { # snapshot_session <session_id> <agent_id> <task_id>
   sid=$1; ws=$(workspace_for "$2" "$3"); [ -z "$ws" ] && return 0
   c="acos-ws-$ws"
   docker inspect --format '{{json .Config.Env}}' "$c" > "$OUT/$sid.configenv.tmp" 2>/dev/null && keep_nonempty "$OUT/$sid.configenv.tmp" "$OUT/$sid.configenv.json" || rm -f "$OUT/$sid.configenv.tmp"
-  # 4e — the exec'd session process environ (pid file written by run-session.sh); redact the capability token
-  docker exec "$c" sh -c 'tr "\0" "\n" < /proc/$(cat /home/node/.acos/session.pid)/environ' 2>/dev/null \
+  # 4e — the exec'd session process environ; redact the capability token.
+  # T52: a CLI turn is one short-lived `claude` process, so by a 20s snapshot
+  # tick the session.pid process is often already reaped (environ 0 lines). Prefer
+  # the pid file, but fall back to any live `claude` proc in the container so a
+  # still-running turn is captured instead of silently SKIP'd.
+  docker exec "$c" sh -c 'p=$(cat /home/node/.acos/session.pid 2>/dev/null); case "$(cat /proc/$p/comm 2>/dev/null)" in claude|node) ;; *) p="";; esac; [ -n "$p" ] || for d in /proc/[0-9]*; do case "$(cat "$d/comm" 2>/dev/null)" in claude) p=${d#/proc/}; break;; esac; done; [ -n "$p" ] && tr "\0" "\n" < /proc/$p/environ' 2>/dev/null \
     | sed -E 's/=(acos-sess-)[A-Za-z0-9_-]+/=\1<redacted>/' > "$OUT/$sid.environ.tmp"; keep_nonempty "$OUT/$sid.environ.tmp" "$OUT/$sid.environ.txt"
-  # INV-2 prompt side — the CLI brief travels as ACOS_PROMPT; capture it whole (NUL-delimited, single value) for the scan
-  docker exec "$c" sh -c 'awk -v RS="\0" -F= "/^ACOS_PROMPT=/{print substr(\$0,13)}" /proc/$(cat /home/node/.acos/session.pid)/environ' 2>/dev/null > "$OUT/$sid.prompt.tmp"; keep_nonempty "$OUT/$sid.prompt.tmp" "$OUT/$sid.prompt.txt"
+  # INV-2 prompt side — the CLI brief travels as ACOS_PROMPT; capture it whole (NUL-delimited, single value) for the scan. Same pid fallback as 4e.
+  docker exec "$c" sh -c 'p=$(cat /home/node/.acos/session.pid 2>/dev/null); case "$(cat /proc/$p/comm 2>/dev/null)" in claude|node) ;; *) p="";; esac; [ -n "$p" ] || for d in /proc/[0-9]*; do case "$(cat "$d/comm" 2>/dev/null)" in claude) p=${d#/proc/}; break;; esac; done; [ -n "$p" ] && awk -v RS="\0" -F= "/^ACOS_PROMPT=/{print substr(\$0,13)}" /proc/$p/environ' 2>/dev/null > "$OUT/$sid.prompt.tmp"; keep_nonempty "$OUT/$sid.prompt.tmp" "$OUT/$sid.prompt.txt"
   # 4b — the CLI's own transcript: every tool_use by name (tmpfs — take it while the container lives)
   docker exec "$c" sh -c 'cat /home/node/.claude/projects/*/*.jsonl 2>/dev/null' \
     | grep -o '"type":"tool_use","id":"[^"]*","name":"[A-Za-z_]*"' | sed 's/.*"name":"//; s/"$//' | sort | uniq -c > "$OUT/$sid.tooluse.tmp"; keep_nonempty "$OUT/$sid.tooluse.tmp" "$OUT/$sid.tooluse.txt"
@@ -139,13 +143,20 @@ while IFS='|' read -r sid aid tid status ended; do
 done < "$OUT/s0.sessions.txt"
 
 say "== 4d metering"
-d1=$(sql "select count(*) || '|' || count(*) filter (where agent_session_id is null) || '|' || sum(tokens_in) || '|' || sum(tokens_out) from llm_calls where company_id = :'company' and created_at >= :'run_start' and context_telemetry->>'runtime'='cli'")
+# T52: coalesce the sums so a 0-row window yields "0|0|0|0" (not "0|0||"), and
+# guard on the row count — an empty window is a coverage GAP (NOTHING-TO-SCAN),
+# never a vacuous PASS on "0 orphans" / "0 inconsistent" over an empty set.
+d1=$(sql "select count(*) || '|' || count(*) filter (where agent_session_id is null) || '|' || coalesce(sum(tokens_in),0) || '|' || coalesce(sum(tokens_out),0) from llm_calls where company_id = :'company' and created_at >= :'run_start' and context_telemetry->>'runtime'='cli'")
 say "  llm_calls(cli): rows|orphan|tokens_in|tokens_out = $d1"
-[ "$(printf '%s' "$d1" | cut -d'|' -f2)" = "0" ] && verdict PASS "every CLI llm_calls row is bound to an agent session" "$d1" || verdict FAIL "orphan CLI llm_calls rows" "$d1"
-incons=$(sql "select count(*) from (select s.id, (s.steps_count = count(l.*) and s.tokens_in = coalesce(sum(l.tokens_in),0) and s.tokens_out = coalesce(sum(l.tokens_out),0)) as ok \
-   from agent_sessions s join llm_calls l on l.agent_session_id = s.id and l.context_telemetry->>'runtime'='cli' \
-  where s.company_id = :'company' and s.started_at >= :'run_start' group by s.id) x where not ok")
-[ "$incons" = "0" ] && verdict PASS "agent_sessions roll-up == Σ llm_calls and steps_count == request count" "0 inconsistent" || verdict FAIL "session roll-up inconsistent" "$incons session(s)"
+if [ "$(printf '%s' "$d1" | cut -d'|' -f1)" = "0" ]; then
+  verdict SKIP "4d metering" "NOTHING TO SCAN: no CLI llm_calls rows in window (no session produced metered traffic)"
+else
+  [ "$(printf '%s' "$d1" | cut -d'|' -f2)" = "0" ] && verdict PASS "every CLI llm_calls row is bound to an agent session" "$d1" || verdict FAIL "orphan CLI llm_calls rows" "$d1"
+  incons=$(sql "select count(*) from (select s.id, (s.steps_count = count(l.*) and s.tokens_in = coalesce(sum(l.tokens_in),0) and s.tokens_out = coalesce(sum(l.tokens_out),0)) as ok \
+     from agent_sessions s join llm_calls l on l.agent_session_id = s.id and l.context_telemetry->>'runtime'='cli' \
+    where s.company_id = :'company' and s.started_at >= :'run_start' group by s.id) x where not ok")
+  [ "$incons" = "0" ] && verdict PASS "agent_sessions roll-up == Σ llm_calls and steps_count == request count" "0 inconsistent" || verdict FAIL "session roll-up inconsistent" "$incons session(s)"
+fi
 say "  note: cost_cents is 0 for CLI rows BY DESIGN (claude-cli pricing = T5 open card); metering is token-based"
 if [ -n "${ACOS_BROKER_SECRET:-}" ]; then
   curl -s -m 5 -H "authorization: Bearer $ACOS_BROKER_SECRET" "$BROKER_URL/internal/v1/sessions" > "$OUT/broker.sessions.json" \
