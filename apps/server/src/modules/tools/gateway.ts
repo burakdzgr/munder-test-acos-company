@@ -14,7 +14,7 @@
 //   machinery (19 §7, wired in T40); the gateway returns approver + records
 //   `awaiting_approval`.
 import { createHash } from "node:crypto";
-import { and, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   authorize,
   type Decision,
@@ -675,6 +675,9 @@ export class ToolGateway {
         // 19 §7: verdict YALNIZ `workflowId` doluysa sinyale dönüşür
         // (`approvals.ts`: `signal: row.workflowId ? … : null`). Boş bırakmak
         // kaydı açıp kararı hiçbir yere ULAŞTIRMAMAK olurdu.
+        // Jim'in notu: bugün ajan başına tek canlı oturum kapısı var, ama kapı
+        // ileride gevşerse `limit(1)` sessizce YANLIŞ workflow'a sinyal atardı.
+        // Bu çağrının GÖREVİNE kapsıyor ve en yenisini deterministik seçiyoruz.
         const [liveSession] = await tx
           .select({ workflowId: agentSessions.workflowId })
           .from(agentSessions)
@@ -683,8 +686,10 @@ export class ToolGateway {
               eq(agentSessions.companyId, ctx.companyId),
               eq(agentSessions.agentId, agent.id),
               isNull(agentSessions.endedAt),
+              ...(req.taskId ? [eq(agentSessions.taskId, req.taskId)] : []),
             ),
           )
+          .orderBy(desc(agentSessions.startedAt))
           .limit(1);
         const { row: approval } = await this.approvals.createInTx(tx, ctx, {
           // Aynı çağrı yeniden denenirse aynı kayıt: invocation başına bir onay.

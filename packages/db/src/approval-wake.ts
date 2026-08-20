@@ -14,9 +14,24 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { CompanyContext } from "./context.js";
 import type { GuardedDb } from "./tenant.js";
+import { taskMachine } from "@acos/domain";
 import { agentSessions, tasks } from "./schema/index.js";
 
-const TERMINAL = new Set(["DONE", "FAILED", "CANCELLED"]);
+/**
+ * F1 (Jim review) — kavram tek yerden gelsin. Jim `REJECTED`'in de buraya
+ * eklenmesini onerdi; ÖLÇTÜM ve eklemedim, çünkü REJECTED TERMİNAL DEĞİL:
+ * `taskMachine` tablosunda `REJECTED: ["IN_PROGRESS", "FAILED"]` — çıkışı olan
+ * bir DÜZELTME durumu (CHANGES_REQUESTED / QA_FAILED gibi). Eklemek, meşru bir
+ * uyandırmayı SUSTURURDU.
+ *
+ * Ama bulgunun asıl yarısı doğruydu: aynı kelime iki dosyada iki farklı şeyi
+ * anlatıyordu. `dispatch.ts`'teki küme "bu çocuk hâlâ AÇIK MI (bekleyeceğim
+ * bir şey mi)" sorusunu yanıtlar ve REJECTED'i doğru şekilde dışlar; buradaki
+ * ise "görev BİTTİ Mİ" sorusudur. İkisi farklı kavram, aynı ad. Artık elle
+ * liste tutmuyoruz: terminallik zaten "çıkış kenarı yok" demek ve durum
+ * makinesi bunu KENDİSİ türetiyor (`terminalStates`), yani kayamaz.
+ */
+const TERMINAL: ReadonlySet<string> = new Set(taskMachine.terminalStates);
 
 export interface ApprovalWakePort {
   startAgentTurn(input: { companyId: string; agentId: string; taskId: string }): Promise<void>;

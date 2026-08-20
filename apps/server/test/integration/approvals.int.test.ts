@@ -352,6 +352,64 @@ describe("approvals engine (T35)", () => {
     expect(woke).toEqual([{ companyId, agentId: DEV, taskId: task!.id }]);
   });
 
+  it("T57/F1: REJECTED bir görev TERMİNAL DEĞİLDİR — karar yine sahibini uyandırır", async () => {
+    // Review'da `REJECTED`in de terminal sayılması önerildi; ölçüm aksini
+    // söylüyor: `taskMachine` tablosunda `REJECTED: ["IN_PROGRESS","FAILED"]`,
+    // yani çıkışı olan bir DÜZELTME durumu. Terminal saymak, düzeltme turunu
+    // bekleyen meşru bir uyandırmayı SUSTURURDU. Bu test o semantiği kilitler.
+    const woke: string[] = [];
+    app.agentWorkflowStarter = async (input) => {
+      woke.push(input.taskId);
+      return true;
+    };
+    const [task] = await db
+      .insert(tasks)
+      .values({
+        companyId,
+        number: 403,
+        kind: "task",
+        title: "rejected but reworkable",
+        objective: "x",
+        status: "REJECTED",
+        ownerAgentId: DEV,
+        successCriteria: [],
+      })
+      .returning();
+    const { row } = await service.create(ctx, {
+      kind: "tool_execution",
+      brief: validBrief(),
+      requestedByAgentId: DEV,
+      risk: "high",
+      taskId: task!.id,
+    });
+
+    const approve = await app.inject({
+      method: "POST",
+      url: `/api/v1/companies/${companyId}/approvals/${row.id}/verdict`,
+      headers: authHeaders(),
+      payload: { verdict: "approved", note: "ok" },
+    });
+
+    expect(approve.statusCode).toBe(200);
+    expect(woke).toEqual([task!.id]);
+  });
+
+  it("T57/F2: createInTx `create` ile AYNI kapıları uygular (urgency dahil)", async () => {
+    // Gövde paylaşılmıştı ama KAPILAR kopyalanmıştı ve `createInTx`
+    // `urgency`'yi hiç doğrulamıyordu — "tek üretim yolu" iddiasındaki delik.
+    await expect(
+      db.transaction((tx) =>
+        service.createInTx(tx, ctx, {
+          kind: "tool_execution",
+          brief: validBrief(),
+          requestedByAgentId: DEV,
+          risk: "high",
+          urgency: "yesterday",
+        }),
+      ),
+    ).rejects.toThrow(/urgency/);
+  });
+
   it("T57 link-3: a CANLI oturum varsa ikinci tur AÇILMAZ (çift yazar olmaz)", async () => {
     const woke: Array<{ taskId: string }> = [];
     app.agentWorkflowStarter = async (input) => {

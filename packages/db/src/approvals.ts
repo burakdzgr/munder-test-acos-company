@@ -86,6 +86,39 @@ export interface ApprovalVerdictResult {
 
 const OPEN_STATUSES: ApprovalStatus[] = ["pending", "needs_review"];
 
+/**
+ * 19 §3'ün DÖRT kapısı tek yerde: kind, brief (11 alan), risk, urgency.
+ * `create` ve `createInTx` ikisi de buradan geçer — biri gevşerse diğeri de
+ * gevşemesin diye. (F2: eskiden ikisi ayrı ayrı sayıyordu ve `createInTx`
+ * `urgency`'yi hiç doğrulamıyordu; `CreateApprovalInput.urgency` düz `string`
+ * olduğu için tip de yakalamıyordu.)
+ */
+function validateApprovalInput(input: CreateApprovalInput): {
+  brief: ApprovalBrief;
+  urgency: string;
+} {
+  if (!isApprovalKind(input.kind)) {
+    throw new ApprovalError("APPROVAL_KIND_INVALID", `unknown approval kind "${input.kind}"`);
+  }
+  const parsed = ApprovalBriefSchema.safeParse(input.brief);
+  if (!parsed.success) {
+    throw new ApprovalError(
+      "APPROVAL_BRIEF_INVALID",
+      `brief violates the 11-field contract (19 §3): ${parsed.error.issues
+        .map((i) => `${i.path.join(".")}: ${i.message}`)
+        .join("; ")}`,
+    );
+  }
+  if (!isTaskRisk(input.risk)) {
+    throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown risk "${input.risk}"`);
+  }
+  const urgency = input.urgency ?? "normal";
+  if (!(URGENCIES as readonly string[]).includes(urgency)) {
+    throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown urgency "${urgency}"`);
+  }
+  return { brief: parsed.data, urgency };
+}
+
 export class ApprovalsService {
   private readonly taskState: TaskStateService;
 
@@ -107,26 +140,7 @@ export class ApprovalsService {
     ctx: CompanyContext,
     input: CreateApprovalInput,
   ): Promise<{ row: ApprovalRow; created: boolean }> {
-    if (!isApprovalKind(input.kind)) {
-      throw new ApprovalError("APPROVAL_KIND_INVALID", `unknown approval kind "${input.kind}"`);
-    }
-    const parsed = ApprovalBriefSchema.safeParse(input.brief);
-    if (!parsed.success) {
-      throw new ApprovalError(
-        "APPROVAL_BRIEF_INVALID",
-        `brief violates the 11-field contract (19 §3): ${parsed.error.issues
-          .map((i) => `${i.path.join(".")}: ${i.message}`)
-          .join("; ")}`,
-      );
-    }
-    const brief: ApprovalBrief = parsed.data;
-    if (!isTaskRisk(input.risk)) {
-      throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown risk "${input.risk}"`);
-    }
-    const urgency = input.urgency ?? "normal";
-    if (!(URGENCIES as readonly string[]).includes(urgency)) {
-      throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown urgency "${urgency}"`);
-    }
+    const { brief, urgency } = validateApprovalInput(input);
 
     return this.db.transaction((tx) => this.insertApproval(tx, ctx, input, brief, urgency));
   }
@@ -142,22 +156,11 @@ export class ApprovalsService {
     ctx: CompanyContext,
     input: CreateApprovalInput,
   ): Promise<{ row: ApprovalRow; created: boolean }> {
-    const parsed = ApprovalBriefSchema.safeParse(input.brief);
-    if (!parsed.success) {
-      throw new ApprovalError(
-        "APPROVAL_BRIEF_INVALID",
-        `brief violates the 11-field contract (19 §3): ${parsed.error.issues
-          .map((i) => `${i.path.join(".")}: ${i.message}`)
-          .join("; ")}`,
-      );
-    }
-    if (!isApprovalKind(input.kind)) {
-      throw new ApprovalError("APPROVAL_KIND_INVALID", `unknown approval kind "${input.kind}"`);
-    }
-    if (!isTaskRisk(input.risk)) {
-      throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown risk "${input.risk}"`);
-    }
-    return this.insertApproval(tx, ctx, input, parsed.data, input.urgency ?? "normal");
+    // F2 (Jim review): burada kapıların KOPYASI vardı ve dördüncüsü (`urgency`)
+    // eksikti — "gövde paylaşıldı ama KAPILAR kopyalandı" tam da tek-üretim-yolu
+    // iddiasını delen şey. Artık iki giriş de AYNI doğrulayıcıdan geçiyor.
+    const { brief, urgency } = validateApprovalInput(input);
+    return this.insertApproval(tx, ctx, input, brief, urgency);
   }
 
   private async insertApproval(
