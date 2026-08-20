@@ -16,6 +16,9 @@
       "path": "../../packages/agent-actions"
     },
     {
+      "path": "../../packages/contracts"
+    },
+    {
       "path": "../../packages/domain"
     },
     {

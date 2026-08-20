@@ -24,11 +24,31 @@ export const WORKSPACES: WorkspaceSpec[] = [
   { dir: "packages/llm", name: "llm", allowed: ["domain", "config"] },
   { dir: "packages/contracts", name: "contracts", allowed: ["domain", "events"] },
   { dir: "packages/ui", name: "ui", allowed: [] },
-  { dir: "apps/server", name: "server", allowed: ["domain", "db", "events", "contracts", "llm", "tools", "config"] },
+  // E4/T35: the single-writer Family-B action dispatcher, extracted so the
+  // worker loop and the MCP gateway run the SAME code (INV-13 — one writer).
+  // It sits above the data packages and below both callers.
+  {
+    dir: "packages/agent-actions",
+    name: "agent-actions",
+    allowed: ["domain", "db", "events", "llm", "tools", "contracts"],
+  },
+  {
+    dir: "apps/server",
+    name: "server",
+    // agent-actions (E4/T35): server-side MCP verbs must dispatch through the
+    // same writer as the worker, not a second copy of the rules.
+    allowed: ["domain", "db", "events", "contracts", "llm", "tools", "config", "agent-actions"],
+  },
   { dir: "apps/web", name: "web", allowed: ["contracts", "ui"] },
   // U13 (36 §11): Electron shell over the built apps/web bundle — zero @acos deps.
   { dir: "apps/desktop", name: "desktop", allowed: [] },
-  { dir: "workers/agent-worker", name: "agent-worker", allowed: ["domain", "db", "events", "llm", "tools", "config"] },
+  {
+    dir: "workers/agent-worker",
+    // contracts: runtime event/DTO types shared with the server (pure types).
+    // agent-actions: the shared Family-B dispatcher (E4/T35).
+    name: "agent-worker",
+    allowed: ["domain", "db", "events", "llm", "tools", "config", "contracts", "agent-actions"],
+  },
   { dir: "workers/execution-worker", name: "execution-worker", allowed: ["domain", "tools", "config", "contracts"] },
   { dir: "services/sandbox-manager", name: "sandbox-manager", allowed: ["config", "contracts", "tools"] },
   // E4/T31 (ADR-022 §4): host-side identity broker — zero @acos deps by design (holds the subscription credential, nothing else).
