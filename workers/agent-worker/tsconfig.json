@@ -13,6 +13,9 @@
   ],
   "references": [
     {
+      "path": "../../packages/agent-actions"
+    },
+    {
       "path": "../../packages/domain"
     },
     {

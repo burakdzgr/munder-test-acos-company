@@ -5,22 +5,17 @@
 // başarısızsa olay düşer, döngü asla etkilenmez — truth DB'de (agent_steps,
 // approvals, llm_calls). Bu kanal chain-of-thought TAŞIMAZ.
 import { connect, type NatsConnection } from "nats";
-import { runtimeSubjectFor, type RuntimeEventType } from "@acos/contracts";
+import { runtimeSubjectFor } from "@acos/contracts";
 
-export interface RuntimeEventInput {
-  type: RuntimeEventType;
-  sessionId?: string | null | undefined;
-  agentId?: string | null | undefined;
-  taskId?: string | null | undefined;
-  stepNo?: number | null | undefined;
-  opId?: string | null | undefined;
-  payload?: Record<string, unknown> | undefined;
-}
-
-export interface RuntimeEventPort {
-  emit(companyId: string, event: RuntimeEventInput): void;
-  close(): Promise<void>;
-}
+// Sözleşme (port arayüzü + op nabzı) ORTAK EVDE yaşar: dağıtıcı da aynı
+// şekli kullanıyor ve iki ayrı tanım kaçınılmaz olarak ayrışırdı. Burada
+// yalnız NATS'e basan SOMUT yayıncı kalır.
+export {
+  startOperationHeartbeat,
+  type RuntimeEventInput,
+  type RuntimeEventPort,
+} from "@acos/agent-actions";
+import type { RuntimeEventPort } from "@acos/agent-actions";
 
 /** Bağlantı tembel + arkaplanda yeniden denenir; emit HİÇBİR ZAMAN throw
  *  etmez ve beklemez (fire-and-forget). */
@@ -79,34 +74,4 @@ export function createRuntimeEventPublisher(natsUrl: string): RuntimeEventPort {
       nats = null;
     },
   };
-}
-
-/** TASK 3 — aktif operation heartbeat'i: uzun süren model/araç çağrısı
- *  boyunca op.heartbeat basar; dönen fonksiyon durdurur. */
-export function startOperationHeartbeat(
-  port: RuntimeEventPort | undefined,
-  companyId: string,
-  base: Omit<RuntimeEventInput, "type" | "payload"> & { operationType: string },
-  intervalMs = 10_000,
-): () => void {
-  if (!port) return () => {};
-  const startedAt = Date.now();
-  const timer = setInterval(() => {
-    port.emit(companyId, {
-      type: "op.heartbeat",
-      sessionId: base.sessionId,
-      agentId: base.agentId,
-      taskId: base.taskId,
-      stepNo: base.stepNo,
-      opId: base.opId,
-      payload: {
-        operationType: base.operationType,
-        startedAt,
-        elapsedMs: Date.now() - startedAt,
-        status: "running",
-      },
-    });
-  }, intervalMs);
-  timer.unref?.();
-  return () => clearInterval(timer);
 }
