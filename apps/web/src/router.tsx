@@ -1,6 +1,11 @@
-// Route tree (24 §2): /login, /setup, / (company select), /c/$companyId
-// layout with organization + agents views. Remaining views land with their
-// tasks (tasks T27, office T26, …).
+// Route tree (24 §2; E1 tek ekran).
+//
+// E1 (Founder isteği, 2026-08-20): şirket içindeki 16 görünüm rotası TEK
+// EKRANA katlandı. Rota nesneleri duruyor — eski derin bağlantılar,
+// yer imleri ve e2e URL'leri kırılmasın diye — ama artık kendi sayfalarını
+// AÇMIYOR: `beforeLoad` ilgili PANELİ ister ve komuta merkezine yönlendirir.
+// Yani /c/:id/tasks bağlantısı hâlâ "görev panosunu göster" demek; sadece
+// gideceği yer ayrı bir sayfa değil, tek ekranın bir paneli.
 import {
   createRootRoute,
   createRoute,
@@ -9,27 +14,15 @@ import {
 } from "@tanstack/react-router";
 import { AcosApiError } from "@acos/contracts/client";
 import { api } from "./lib/api.js";
+import { usePanelBus } from "./stores/panels.js";
+import { useFocus } from "./stores/focus.js";
 import { AppShell } from "./shell/AppShell.js";
 import { CommandCenter } from "./shell/CommandCenter.js";
 import { LoginPage } from "./features/auth/LoginPage.js";
 import { SetupPage } from "./features/auth/SetupPage.js";
 import { CompanySelectPage } from "./features/home/CompanySelectPage.js";
-import { OrganizationView } from "./features/organization/OrganizationView.js";
-import { AgentsView } from "./features/agents/AgentsView.js";
-import { AgentDetailView } from "./features/agents/AgentDetailView.js";
-import { EventsView } from "./features/events/EventsView.js";
-import { OfficeView } from "./features/office/OfficeView.js";
-import { TasksView } from "./features/tasks/TasksView.js";
-import { CommunicationView } from "./features/comms/CommunicationView.js";
-import { ApprovalsView } from "./features/approvals/ApprovalsView.js";
-import { TerminalsView } from "./features/terminals/TerminalsView.js";
-import { ProjectsView } from "./features/projects/ProjectsView.js";
-import { SkillsView } from "./features/skills/SkillsView.js";
-import { MemoryView } from "./features/memory/MemoryView.js";
-import { CostsView } from "./features/costs/CostsView.js";
-import { ReportsView } from "./features/costs/ReportsView.js";
-import { SettingsView } from "./features/settings/SettingsView.js";
-import { DashboardView } from "./features/dashboard/DashboardView.js";
+// E1: görünüm bileşenleri artık burada değil, CommandCenter'ın panel
+// kayıt defterinde import edilir (tek varış noktası orası).
 import { ThemePreviewPage } from "./theme/PreviewPage.js";
 import { OfficeWindow } from "./features/office/OfficeWindow.js";
 
@@ -47,6 +40,18 @@ async function requireAuth() {
     }
     throw err;
   }
+}
+
+
+/**
+ * Tek ekrana katla: istenen paneli aç ve komuta merkezine yönlendir.
+ * (Panel kimlikleri CommandCenter'daki kayıt defteriyle birebir.)
+ */
+function foldIntoCommandCenter(panelId: string) {
+  return ({ params }: { params: { companyId: string } }) => {
+    usePanelBus.getState().openPanel(panelId);
+    throw redirect({ to: "/c/$companyId", params: { companyId: params.companyId } });
+  };
 }
 
 const loginRoute = createRoute({
@@ -115,43 +120,49 @@ const companyIndexRoute = createRoute({
 const organizationRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "organization",
-  component: OrganizationView,
+  beforeLoad: foldIntoCommandCenter("organization"),
 });
 
 const agentsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "agents",
-  component: AgentsView,
+  beforeLoad: foldIntoCommandCenter("agents"),
 });
 
 const agentDetailRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "agents/$agentId",
-  component: AgentDetailView,
+  // Derin bağlantı korunur: ajan ODAĞA alınır (paneller ona göre vurgular)
+  // ve Ajanlar paneli açılır — ayrı bir sayfa açılmaz.
+  beforeLoad: ({ params }) => {
+    useFocus.getState().setSelectedAgent(params.agentId);
+    usePanelBus.getState().openPanel("agents");
+    throw redirect({ to: "/c/$companyId", params: { companyId: params.companyId } });
+  },
 });
 
 const eventsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "events",
-  component: EventsView,
+  beforeLoad: foldIntoCommandCenter("events"),
 });
 
 const officeRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "office",
-  component: OfficeView,
+  beforeLoad: foldIntoCommandCenter("office"),
 });
 
 const tasksRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "tasks",
-  component: TasksView,
+  beforeLoad: foldIntoCommandCenter("tasks"),
 });
 
 const commsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "communication",
-  component: CommunicationView,
+  beforeLoad: foldIntoCommandCenter("communication"),
   /**
    * `?dm=<agentId>` — ofisteki avatardan "Konuş" ile gelindiğinde o ajanın
    * DM'i kendiliğinden açılır. Doğrulama şart: doğrulanmamış search'te
@@ -168,55 +179,55 @@ const commsRoute = createRoute({
 const approvalsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "approvals",
-  component: ApprovalsView,
+  beforeLoad: foldIntoCommandCenter("approvals"),
 });
 
 const terminalsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "terminals",
-  component: TerminalsView,
+  beforeLoad: foldIntoCommandCenter("terminals"),
 });
 
 const projectsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "projects",
-  component: ProjectsView,
+  beforeLoad: foldIntoCommandCenter("projects"),
 });
 
 const skillsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "skills",
-  component: SkillsView,
+  beforeLoad: foldIntoCommandCenter("skills"),
 });
 
 const memoryRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "memory",
-  component: MemoryView,
+  beforeLoad: foldIntoCommandCenter("memory"),
 });
 
 const costsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "costs",
-  component: CostsView,
+  beforeLoad: foldIntoCommandCenter("costs"),
 });
 
 const reportsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "reports",
-  component: ReportsView,
+  beforeLoad: foldIntoCommandCenter("reports"),
 });
 
 const dashboardRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "dashboard",
-  component: DashboardView,
+  beforeLoad: foldIntoCommandCenter("dashboard"),
 });
 
 const settingsRoute = createRoute({
   getParentRoute: () => companyRoute,
   path: "settings",
-  component: SettingsView,
+  beforeLoad: foldIntoCommandCenter("settings"),
 });
 
 const routeTree = rootRoute.addChildren([

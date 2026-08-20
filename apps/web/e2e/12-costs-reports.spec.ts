@@ -65,6 +65,8 @@ test("costs dashboard shows ledger totals + forecast; reports view renders the e
   await openCompany(page, "Acme");
 
   // ---- COSTS: totals from the real ledger + forecast row ----
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-costs").click();
   const total = page.getByTestId("costs-total");
   await expect(total).toBeVisible();
@@ -85,6 +87,8 @@ test("costs dashboard shows ledger totals + forecast; reports view renders the e
   });
 
   // ---- REPORTS: the executive report renders with the ledger numbers ----
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-reports").click();
   const row = page
     .getByTestId("report-row")

@@ -10,6 +10,8 @@ test("tasks board: groom → assign; owner-only transition refused for the Found
 }) => {
   await login(page);
   await openCompany(page, "Acme Technologies");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-tasks").click();
   await expect(page.getByTestId("kanban-board").or(page.getByText("Görev yok"))).toBeVisible({
     timeout: 15_000,

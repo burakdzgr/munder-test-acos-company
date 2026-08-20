@@ -7,6 +7,10 @@ test("login → Acme visible → org chart shows the 8 seeded reporting lines", 
   await login(page);
   await openCompany(page, "Acme Technologies");
 
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+
+  await page.getByTestId("panel-launcher").click();
+
   await page.getByTestId("nav-organization").click();
   await expect(page.getByTestId("org-chart")).toBeVisible();
 
@@ -19,8 +23,9 @@ test("login → Acme visible → org chart shows the 8 seeded reporting lines", 
 test("create a new unit through the UI (demo step 3)", async ({ page }) => {
   await login(page);
   await openCompany(page, "Acme Technologies");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-organization").click();
-
   const slug = `growth-${Date.now() % 100000}`;
   await page.fill('input[name="unitName"]', "Growth");
   await page.fill('input[name="unitSlug"]', slug);

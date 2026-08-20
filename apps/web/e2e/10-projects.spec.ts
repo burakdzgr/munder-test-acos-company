@@ -15,8 +15,9 @@ test("greenfield project: 3-field create → intake → active; GOAL cascades on
 
   await login(page);
   await openCompany(page, "Acme");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-projects").click();
-
   await page.getByTestId("project-create-open").click();
   await page.fill('input[name="name"]', name);
   await page.fill(
@@ -50,6 +51,8 @@ test("greenfield project: 3-field create → intake → active; GOAL cascades on
   await expect(report).toContainText("Analyze this project and implement feature X");
 
   // the routed GOAL cascaded through the scripted org onto the board
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-tasks").click();
   await expect(
     page.getByText("Deliver: Analyze this project and implement feature X").first(),

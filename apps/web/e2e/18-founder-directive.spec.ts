@@ -14,14 +14,15 @@ test("Founder ofisten CEO'ya tek adımda görev verir", async ({ page }) => {
 
   await login(page);
   await openCompany(page, "Acme");
-  await page.getByTestId("nav-office").click();
-
-  // 1) CEO keşfedilebilir: düğme unvanını yazıyor
-  const directiveButton = page.getByTestId("office-directive-button");
+  // E1 (tek ekran): direktif artık ÜST ÇUBUKTAKİ Founder kimliğinden verilir —
+  // ayrı bir ofis sayfasına gitmek gerekmiyor. Düğmenin başlığı (title) CEO'yu
+  // adıyla ve unvanıyla söyler, yani "şirketin tepesi kim" cevabı yerinde.
+  const directiveButton = page.getByTestId("me-name");
   await expect(directiveButton).toBeVisible({ timeout: 20_000 });
-  await expect(directiveButton).toContainText("görev ver");
+  await expect(directiveButton).toBeEnabled({ timeout: 20_000 });
+  await expect(directiveButton).toHaveAttribute("title", /görevi ver/);
 
-  // 2) tek form → atanmış hedef
+  // tek form → atanmış hedef
   await directiveButton.click();
   const title = `Direktif smoke ${Date.now() % 100000}`;
   await page.fill('input[name="directiveTitle"]', title);
@@ -42,6 +43,8 @@ test("Founder ofisten CEO'ya tek adımda görev verir", async ({ page }) => {
   // verebilsin. Kapatmadan gezinmeye çalışmak, modalın tıklamayı yemesiyle
   // sonuçlanır; ilk sürümde tam olarak bu oldu.)
   await page.getByTestId("directive-close").click();
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-tasks").click();
   await expect(page.getByTestId("kanban-board")).toBeVisible({ timeout: 20_000 });
   await expect(page.getByText(title, { exact: false }).first()).toBeVisible({ timeout: 20_000 });

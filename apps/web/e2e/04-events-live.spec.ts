@@ -9,8 +9,11 @@ test("events timeline: paged history + live WS delivery", async ({ page }) => {
   await login(page);
   await openCompany(page, "Acme Technologies");
 
-  await page.getByTestId("nav-events").click();
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
 
+  await page.getByTestId("panel-launcher").click();
+
+  await page.getByTestId("nav-events").click();
   // WS connects through the same-origin /ws proxy
   await expect(page.getByTestId("status-bar")).toContainText("ws: open", { timeout: 15_000 });
 
