@@ -256,6 +256,16 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
             ? `${kind} turn split the work off (${created} task.created) and handed it on (${delegated} delegated, ${parked} status change(s)); container now ${status} and closes by roll-up`
             : `${kind} turn left nothing behind (${created} created, ${delegated} delegated, ${parked} status change(s)) - the container cannot close by roll-up`,
         );
+        // Say what this run did NOT prove. A container turn closing by handoff
+        // says nothing about the leaf path, and a reader counting greens would
+        // otherwise carry away "the whole close chain is proven on a real
+        // server". It is not: complete_task is exercised against the mock
+        // gateway only (T39 follow-up).
+        record(
+          "SKIP",
+          "a LEAF turn closes with complete_task",
+          "no leaf turn in this run - the leaf path is proven against the mock gateway, not yet on a real server (T39)",
+        );
       } else {
         const handedOff = ["REVIEW", "QA", "DONE"].includes(status);
         const changed = eventsBy("task.status.changed");
