@@ -67,9 +67,20 @@ WITH caps AS (
 )
 SELECT '1c' AS id,
        'VACUITY GUARD: no declared capability matched unit/position/skill' AS claim,
-       CASE WHEN (SELECT count(*) FROM caps) > 0 AND count(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS verdict,
+       -- god (2026-08-21): nobetcinin kendisi bir kez daha derinlestirildi.
+       -- "Eslesme yok" iddiasi, EŞLEŞME YUZEYININ de dolu olmasini gerektirir:
+       -- org_units/positions BOS olsaydi "hicbiri tutmadi" onemsizce dogru olur
+       -- ve 1c yanlis sebeple PASS verirdi. agent_skills'in bos olmasi TASARIM
+       -- (fabrika onu hic yazmaz — yalniz okur), ama kadro yuzeyi DOLU olmali.
+       CASE WHEN (SELECT count(*) FROM caps) > 0
+             AND (SELECT count(*) FROM org_units u WHERE u.company_id = :company) > 0
+             AND (SELECT count(*) FROM positions p WHERE p.company_id = :company) > 0
+             AND count(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS verdict,
        CASE WHEN (SELECT count(*) FROM caps) = 0
             THEN 'NOTHING TO SCAN: no task declared capabilities — this guard cannot vouch for anything'
+            WHEN (SELECT count(*) FROM org_units u WHERE u.company_id = :company) = 0
+              OR (SELECT count(*) FROM positions p WHERE p.company_id = :company) = 0
+            THEN 'NOTHING TO SCAN: the match surface (org_units/positions) is empty — "no match" would be trivially true'
             WHEN count(*) = 0
             THEN format('%s capability label(s) scanned, none matched — the relaxed path was genuinely required',
                         (SELECT count(*) FROM caps))
@@ -223,17 +234,23 @@ SELECT '4c' AS id,
        'INV-2 (downstream surface): no secret material in steps/observations/messages' AS claim,
        CASE WHEN (SELECT count(*) FROM agent_steps x WHERE x.company_id = :company)
                + (SELECT count(*) FROM messages x WHERE x.company_id = :company)
-               + (SELECT count(*) FROM tool_invocations x WHERE x.company_id = :company) > 0
+               + (SELECT count(*) FROM tool_invocations x WHERE x.company_id = :company)
+               + (SELECT count(*) FROM events x WHERE x.company_id = :company)
+               + (SELECT count(*) FROM artifacts x WHERE x.company_id = :company) > 0
              AND count(*) = 0 THEN 'PASS' ELSE 'FAIL' END AS verdict,
        CASE WHEN (SELECT count(*) FROM agent_steps x WHERE x.company_id = :company)
                 + (SELECT count(*) FROM messages x WHERE x.company_id = :company)
-                + (SELECT count(*) FROM tool_invocations x WHERE x.company_id = :company) = 0
-            THEN 'NOTHING TO SCAN: no steps, messages or tool rows — INV-2 is NOT vouched for'
+                + (SELECT count(*) FROM tool_invocations x WHERE x.company_id = :company)
+                + (SELECT count(*) FROM events x WHERE x.company_id = :company)
+                + (SELECT count(*) FROM artifacts x WHERE x.company_id = :company) = 0
+            THEN 'NOTHING TO SCAN: no steps, messages, tool rows, events or artifacts — INV-2 is NOT vouched for'
             ELSE coalesce(string_agg(hit, '; '),
                           format('clean across %s scannable rows',
                                  (SELECT count(*) FROM agent_steps x WHERE x.company_id = :company)
                                + (SELECT count(*) FROM messages x WHERE x.company_id = :company)
-                               + (SELECT count(*) FROM tool_invocations x WHERE x.company_id = :company)))
+                               + (SELECT count(*) FROM tool_invocations x WHERE x.company_id = :company)
+                               + (SELECT count(*) FROM events x WHERE x.company_id = :company)
+                               + (SELECT count(*) FROM artifacts x WHERE x.company_id = :company)))
        END AS detail
 FROM (
   SELECT format('agent_steps#%s:%s', s.id, pat.p) AS hit
@@ -248,17 +265,41 @@ FROM (
   SELECT format('tool_invocations#%s:%s', ti.id, pat.p)
   FROM tool_invocations ti, pat
   WHERE ti.company_id = :company AND ti.input::text LIKE '%' || pat.p || '%'
+  UNION ALL
+  -- Kevin (2026-08-21): olay yükleri ve teslimat metni de ajanın ürettiği yüzeydir
+  SELECT format('events#%s:%s', e.seq, pat.p)
+  FROM events e, pat
+  WHERE e.company_id = :company AND e.payload::text LIKE '%' || pat.p || '%'
+  UNION ALL
+  SELECT format('artifacts#%s:%s', a.id, pat.p)
+  FROM artifacts a, pat
+  WHERE a.company_id = :company AND coalesce(a.content_md, '') LIKE '%' || pat.p || '%'
 ) leaks;
 
 -- 4d — broker metering: CLI oturumlarının çağrıları oturuma atıflı, ücretli ve roll-up tutuyor
+-- DÜZELTME (Kevin, 2026-08-21): ilk sürümde `cost_cents > 0` şartı vardı — YANLIŞ.
+-- CLI oturumlarının llm_calls satırları TASARIM GEREĞİ cost_cents=0 (claude-cli
+-- fiyatlandırması T5'te AÇIK kart: abonelik harcaması ÖLÇÜLÜR, fiyatlanmaz).
+-- O şart DOĞRU bir koşuyu FAIL ettirirdi. Metering kanıtı bu yüzden TOKEN
+-- tabanlı: (a) oturuma atıflı satır VAR, (b) ÖKSÜZ satır YOK (var olmayan bir
+-- oturuma atıf), (c) roll-up mutabakatı 4d2'de. Tutar bilgi olarak raporlanır,
+-- iddia edilmez.
 SELECT '4d' AS id,
-       'broker metering: session-attributed, priced, and rolled up consistently' AS claim,
+       'broker metering: session-attributed with no orphan rows (tokens, not price)' AS claim,
        CASE WHEN count(*) FILTER (WHERE l.agent_session_id IS NOT NULL) > 0
-             AND count(*) FILTER (WHERE l.agent_session_id IS NOT NULL AND coalesce(l.cost_cents,0) <= 0) = 0
+             AND count(*) FILTER (
+                   WHERE l.agent_session_id IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM agent_sessions s
+                                     WHERE s.company_id = l.company_id AND s.id = l.agent_session_id)
+                 ) = 0
             THEN 'PASS' ELSE 'FAIL' END AS verdict,
-       format('session-attributed=%s unpriced=%s total_cents=%s',
+       format('session-attributed=%s orphan=%s tokens_in=%s tokens_out=%s cost_cents=%s (0 expected for CLI, T5)',
               count(*) FILTER (WHERE l.agent_session_id IS NOT NULL),
-              count(*) FILTER (WHERE l.agent_session_id IS NOT NULL AND coalesce(l.cost_cents,0) <= 0),
+              count(*) FILTER (
+                   WHERE l.agent_session_id IS NOT NULL
+                     AND NOT EXISTS (SELECT 1 FROM agent_sessions s
+                                     WHERE s.company_id = l.company_id AND s.id = l.agent_session_id)),
+              coalesce(sum(l.tokens_in), 0), coalesce(sum(l.tokens_out), 0),
               coalesce(sum(l.cost_cents), 0)) AS detail
 FROM llm_calls l
 WHERE l.company_id = :company;

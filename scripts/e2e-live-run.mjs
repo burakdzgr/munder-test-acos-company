@@ -14,7 +14,7 @@
 // ATEŞLEME PAHALIDIR: 4 canlı CLI ajanı = gerçek abonelik tüketimi + host yükü.
 // --go bayrağı olmadan hiçbir şey başlamaz.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const FLAG = (name) => process.argv.includes(`--${name}`);
@@ -77,9 +77,13 @@ function preflight() {
   add(Boolean(process.env.ACOS_BROKER_SECRET), "ACOS_BROKER_SECRET present (value never printed)");
   add(Boolean(process.env.IDENTITY_BROKER_URL), "IDENTITY_BROKER_URL set", process.env.IDENTITY_BROKER_URL ?? "unset");
 
-  // Oscar §1: cap KADRODAN KÜÇÜK olmalı, yoksa kapı hiç devreye girmez.
-  const cap = Number(process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "3");
-  add(cap === 3, "MAX_LIVE_SESSIONS_PER_COMPANY=3 (smaller than the 4-agent roster, on purpose)", String(cap));
+  // The cap is an INVARIANT, not a number: it must be smaller than the roster
+  // the CEO ends up hiring, or the concurrency gate never engages and T38's
+  // "a task at the ceiling WAITS, it is not dropped" sub-claim cannot be shown.
+  // The roster is unknown until staffing runs, so presence is all we can check
+  // here; Oscar's gate (P3) checks cap < roster against the real headcount.
+  const cap = process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "";
+  add(cap !== "", "MAX_LIVE_SESSIONS_PER_COMPANY set (gate P3 checks cap < roster once staffed)", cap || "unset");
 
   const kit = process.env.ACOS_CLI_WORKSPACE_IMAGE ?? "";
   add(kit !== "", "ACOS_CLI_WORKSPACE_IMAGE set (workspace image must carry the CLI kit)", kit || "unset");
@@ -161,6 +165,40 @@ try {
   writeFileSync(join(OUT_DIR, "office-window.txt"), `${officeUrl}\n`);
   log(`\n   company ${companyId}`);
   log(`   FOUNDER WATCHES: ${officeUrl}\n`);
+
+  // Oscar's precondition gate: a run can only prove what its SHAPE allows.
+  // P1 lead + active report (else claim 1 is untestable), P2 matching surface
+  // populated while agent_skills stays empty (else 1c passes for the wrong
+  // reason), P3 cap < roster (else the concurrency gate never engages). Run it
+  // as soon as staffing has materialised, so a doomed run dies in minutes
+  // instead of burning a whole execution phase first.
+  for (let i = 0; i < 60; i += 1) {
+    try {
+      const response = await fetch(`${SLOT_SERVER}/api/v1/companies/${companyId}/agents`);
+      const body = await response.json();
+      const items = Array.isArray(body) ? body : (body?.items ?? []);
+      if (items.length >= 2) break;
+    } catch {
+      /* staffing has not landed yet */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+  }
+  const gateSql = readFileSync(join(process.cwd(), "scripts", "live-run-precondition-gate.sql"), "utf8");
+  const gateOut = spawnSync(
+    "docker",
+    ["compose", "-p", PROJECT, "-f", "infrastructure/docker/compose.yaml", "exec", "-T", "postgres",
+     "psql", "-U", "acos", "-d", "acos", "-At", "-F", "|", "-v", "ON_ERROR_STOP=1",
+     "-v", `company='${companyId}'`, "-v", `cap=${process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "3"}`, "-f", "-"],
+    { encoding: "utf8", input: gateSql },
+  );
+  const gateText = `${gateOut.stdout ?? ""}${gateOut.stderr ?? ""}`.trim();
+  log("\n-- 2b. precondition gate (Oscar)");
+  for (const line of gateText.split("\n")) log(`   ${line}`);
+  if (gateText.includes("|FAIL|")) {
+    log("\n   GATE FAILED — this run cannot prove what it set out to prove; stopping early.");
+    driver.kill();
+  }
+
 
   watcher = spawn("sh", ["scripts/live-run-runtime-evidence.sh", "watch"], {
     env: { ...stackEnv, COMPANY_ID: companyId, RUN_START: runStart, OUT: join(OUT_DIR, "evidence") },
