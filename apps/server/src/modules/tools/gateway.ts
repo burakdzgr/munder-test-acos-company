@@ -21,7 +21,7 @@ import {
   type EscalationTarget,
   type ScopeRelation,
 } from "@acos/domain/policies";
-import type { AutonomyLevel, RiskClass } from "@acos/domain";
+import { uuidv5, type AutonomyLevel, type RiskClass } from "@acos/domain";
 import {
   detectInjection,
   elevateRisk,
@@ -33,6 +33,7 @@ import {
 } from "@acos/tools";
 import {
   appendEvents,
+  ApprovalsService,
   beginIdempotent,
   completeIdempotent,
   CostService,
@@ -91,6 +92,11 @@ export interface ToolInvokeResponse {
   status: "denied" | "awaiting_approval" | "dispatched" | "succeeded" | "failed";
   reason: string | null;
   approver?: EscalationTarget;
+  /** T57: `require_approval` kararının AÇTIĞI onay kaydı. Bunlar olmadan MCP
+   *  zarfı `awaiting_approval` kuramaz (actions.ts `approvalStatus==='pending'
+   *  && typeof approvalId === 'string'` arar) ve ajan onayı hiç ÖĞRENEMEZ. */
+  approvalId?: string;
+  approvalStatus?: string;
   riskClass: RiskClass;
   elevatedFrom?: RiskClass;
   output?: unknown;
@@ -230,12 +236,68 @@ function branchMatches(pattern: string, branch: string): boolean {
   }
 }
 
+/** T57: R sınıfı → onay kaydının task-risk alanı (19 §3 `risk` enum'u ayrı). */
+const APPROVAL_RISK_FOR: Record<RiskClass, "low" | "medium" | "high" | "critical"> = {
+  R0: "low",
+  R1: "low",
+  R2: "medium",
+  R3: "high",
+};
+
+/**
+ * T57: politika kaynaklı onay için 11 alanlı brief (19 §3).
+ *
+ * `escalate` brief'inden FARKI dürüstlüktür: orada metni AJAN yazar
+ * (`reason`/`attempted`/`recommendation` onun sözleridir). Burada kararı
+ * POLİTİKA verdi ve ajanın yazdığı bir gerekçe YOK — o yüzden `attempted`
+ * uydurulmuyor, "ajan alternatif denemedi; bu risk sınıfı onay ister" diye
+ * OLDUĞU gibi yazılıyor. Founder neyi onayladığını görmeli.
+ */
+function buildToolApprovalBrief(input: {
+  toolName: string;
+  riskClass: RiskClass;
+  agentName: string;
+  reason: string;
+  approver: EscalationTarget;
+}) {
+  return {
+    title: `${input.riskClass} tool: ${input.toolName}`.slice(0, 120),
+    request: `${input.agentName} wants to run the ${input.riskClass} tool "${input.toolName}".`,
+    reason: `The Tool Gateway requires approval for this call (${input.reason}).`,
+    attempted: [
+      "(policy decision — the agent proposed no alternatives; this risk class requires approval before the tool runs)",
+    ],
+    options: [
+      {
+        option: `Approve: run "${input.toolName}"`.slice(0, 500),
+        pros: "The agent continues its turn with the tool result.",
+        cons: `The ${input.riskClass} effect happens.`,
+        cost_cents: 0,
+      },
+      {
+        option: "Reject: the tool does not run",
+        pros: "No effect takes place.",
+        cons: "The agent must find another route or escalate.",
+        cost_cents: 0,
+      },
+    ],
+    recommendation: `Approve only if "${input.toolName}" is what this agent should be doing right now.`,
+    risk: `${input.riskClass} — an approved call takes effect immediately and is not undone by rejecting a later one.`,
+    cost: { amount_cents: 0, currency: "USD" },
+    impact: `Approved: the call runs and the agent's turn continues. Rejected: the call never runs.`,
+    urgency: `normal — the agent's turn is blocked until ${input.approver} decides.`,
+    deadline: null,
+  };
+}
+
 export class ToolGateway {
   private readonly db: GuardedDb;
   private readonly dispatchPort: ToolDispatchPort;
   private readonly resolveCredential: CredentialResolver;
   private readonly now: () => Date;
   private readonly costs: CostService;
+  /** T57: `require_approval` bir KAYIT açmalı — yoksa onaylanacak bir şey yok. */
+  private readonly approvals: ApprovalsService;
 
   constructor(deps: ToolGatewayDeps) {
     this.db = deps.db;
@@ -243,6 +305,7 @@ export class ToolGateway {
     this.resolveCredential = deps.resolveCredential ?? (() => Promise.resolve(null));
     this.now = deps.now ?? (() => new Date());
     this.costs = new CostService(this.db, this.now);
+    this.approvals = new ApprovalsService(this.db);
   }
 
   async invoke(ctx: CompanyContext, req: ToolInvokeRequest): Promise<ToolInvokeResponse> {

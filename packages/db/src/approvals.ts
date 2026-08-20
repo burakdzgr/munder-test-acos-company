@@ -128,7 +128,46 @@ export class ApprovalsService {
       throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown urgency "${urgency}"`);
     }
 
-    return this.db.transaction(async (tx) => {
+    return this.db.transaction((tx) => this.insertApproval(tx, ctx, input, brief, urgency));
+  }
+
+  /**
+   * T57: aynı gövde, ÇAĞIRANIN transaction'ında. Tool Gateway onay kaydını
+   * `tool_invocations` satırıyla AYNI transaction'da açmak zorunda — ayrı
+   * transaction, "onay bekleyen ama kaydı olmayan çağrı" penceresini geri
+   * açardı ki T57'nin kilidi tam olarak oydu.
+   */
+  async createInTx(
+    tx: Tx,
+    ctx: CompanyContext,
+    input: CreateApprovalInput,
+  ): Promise<{ row: ApprovalRow; created: boolean }> {
+    const parsed = ApprovalBriefSchema.safeParse(input.brief);
+    if (!parsed.success) {
+      throw new ApprovalError(
+        "APPROVAL_BRIEF_INVALID",
+        `brief violates the 11-field contract (19 §3): ${parsed.error.issues
+          .map((i) => `${i.path.join(".")}: ${i.message}`)
+          .join("; ")}`,
+      );
+    }
+    if (!isApprovalKind(input.kind)) {
+      throw new ApprovalError("APPROVAL_KIND_INVALID", `unknown approval kind "${input.kind}"`);
+    }
+    if (!isTaskRisk(input.risk)) {
+      throw new ApprovalError("APPROVAL_BRIEF_INVALID", `unknown risk "${input.risk}"`);
+    }
+    return this.insertApproval(tx, ctx, input, parsed.data, input.urgency ?? "normal");
+  }
+
+  private async insertApproval(
+    tx: Tx,
+    ctx: CompanyContext,
+    input: CreateApprovalInput,
+    brief: ApprovalBrief,
+    urgency: string,
+  ): Promise<{ row: ApprovalRow; created: boolean }> {
+    {
       if (input.id) {
         const [existing] = await tx
           .select()
@@ -192,7 +231,7 @@ export class ApprovalsService {
         meta: { kind: input.kind, urgency },
       });
       return { row: row!, created: true };
-    });
+    }
   }
 
   /** Inbox query (19 §11, 21 §3.10): urgency desc, then oldest first. */

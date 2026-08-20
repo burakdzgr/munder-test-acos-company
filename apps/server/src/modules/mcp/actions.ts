@@ -352,8 +352,14 @@ export async function callActionTool(
   })) as Record<string, unknown>;
 
   const ok = observation.ok === true;
+  // T57: `ok &&` şartı, onay bekleyişini YALNIZ `escalate` yolundan gelebilir
+  // varsayıyordu — o dal `ok:true` döner. Gateway yolunda ise `use_tool`
+  // gözlemi `ok:false` döner (`status==='awaiting_approval'`), dolayısıyla
+  // kayıt AÇILSA BİLE zarf "denied" olurdu ve ajan onay beklediğini
+  // öğrenemezdi. Sözleşme §5 zaten "onay bekleyişi HATA DEĞİLDİR" diyor:
+  // kararı `ok`a değil, onay kaydının varlığına bağlıyoruz.
   const awaitingApproval =
-    ok && observation.approvalStatus === "pending" && typeof observation.approvalId === "string";
+    observation.approvalStatus === "pending" && typeof observation.approvalId === "string";
   const reason =
     typeof observation.error === "string"
       ? observation.error
@@ -371,7 +377,7 @@ export async function callActionTool(
     approver: awaitingApproval ? "founder" : null,
   });
   // Sözleşme §5: onay bekleyişi HATA DEĞİLDİR.
-  const isError = !ok;
+  const isError = !ok && !awaitingApproval;
   const text = awaitingApproval
     ? `${toolName}: Founder onayı bekliyor (approvalId=${observation.approvalId}). Karar gelene kadar iş İLERLEMEDİ.`
     : ok

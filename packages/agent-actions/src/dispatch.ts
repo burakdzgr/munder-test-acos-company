@@ -196,6 +196,9 @@ export interface ActionDispatchDeps {
         error?: string | undefined;
         costCents?: number | undefined;
         retryAfterSec?: number | undefined;
+        /** T57: `require_approval` kararının açtığı kayıt (gateway doldurur). */
+        approvalId?: string | undefined;
+        approvalStatus?: string | undefined;
       }>)
     | undefined;
   runtimeEvents?: RuntimeEventPort | undefined;
@@ -631,6 +634,14 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
             ...(res.error !== undefined && { error: res.error }),
             ...(res.costCents !== undefined && { costCents: res.costCents }),
             ...(res.retryAfterSec !== undefined && { retryAfterSec: res.retryAfterSec }),
+            // T57: gateway `require_approval` dediğinde AÇTIĞI kaydı buradan
+            // geçiriyoruz. Bunlar olmadan MCP zarfı `awaiting_approval` kuramaz
+            // ve ajan, onay beklediğini ÖĞRENEMEZ — canlı koşuda CEO tam olarak
+            // burada dondu (kayıt yoktu, bilgi de yoktu).
+            ...(typeof (res as { approvalId?: string }).approvalId === "string" && {
+              approvalId: (res as { approvalId?: string }).approvalId,
+              approvalStatus: (res as { approvalStatus?: string }).approvalStatus ?? "pending",
+            }),
           };
         }
         case "send_message": {
