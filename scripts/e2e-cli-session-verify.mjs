@@ -211,61 +211,96 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
     record("PASS", "agent session resolved from the PTY", `terminal ${session.id.slice(0, 8)} -> agent session ${agentSessionId.slice(0, 8)}`);
   }
 
-  // ---- 3. it CLOSED its task through the gateway --------------------------
+  // ---- 3. the turn ENDED its task the way its kind allows -----------------
+  // Corrected after the runtime lane weighed in (Kevin, T31): this was asserted
+  // against tool_invocations, which cannot answer it. Family B verbs run
+  // through the shared action dispatch, NOT ToolGateway.invoke, so closing a
+  // task leaves no tool_invocations row at all — only Family A calls and the
+  // builtin audits do. Asserting there reported "the turn never closed its
+  // task" about turns that had done exactly what 07 §2 asks of them.
+  //
+  // And the shape depends on the task's KIND. Containers (goal/initiative/epic)
+  // are never "completed" by their owner — they close by roll-up, so an owner's
+  // turn legitimately ends by splitting the work off and parking. Leaves
+  // (task/subtask) end at REVIEW/QA/DONE. Splitting the claim this way is 07 §2,
+  // not a weakening: each kind is still required to have finished something.
+  const CONTAINER_KINDS = ["goal", "initiative", "epic"];
   if (!agentSessionId) {
-    record("SKIP", "the turn closed its task via the gateway", "no agent session to scope the audit rows to");
-  } else if (!hasColumn("tool_invocations", "id")) {
-    record("SKIP", "the turn closed its task via the gateway", "no tool_invocations table");
+    record("SKIP", "the turn ended its task the way its kind allows", "no agent session to scope to");
   } else {
-    // Scoping the audit rows to THIS session takes one of three shapes
-    // depending on how the row was written: the worker loop tags the agent
-    // session directly, while the CLI's builtin rows carry the MCP session's
-    // identity and reach the agent session through Oscar's mcp_sessions row
-    // (Kevin, T31 §3). Try them in order of directness.
+    const [row] = sql(
+      `select coalesce(t.kind,'?'), coalesce(t.status,'?'), s.agent_id, s.started_at, coalesce(s.ended_at, now()), coalesce(t.id::text,'')
+         from agent_sessions s left join tasks t on t.id = s.task_id
+        where s.id::text = '${agentSessionId}'`,
+    );
+    if (!row) {
+      record("SKIP", "the turn ended its task the way its kind allows", "no agent_sessions row");
+    } else {
+      const [kind, status, agentId, startedAt, endedAt, taskId] = row.split("|");
+      const inWindow = `occurred_at between timestamptz '${startedAt}' and timestamptz '${endedAt}'`;
+      const eventsBy = (type) =>
+        Number(
+          sql(
+            `select count(*) from events where company_id::text = '${companyId}' and type = '${type}' and agent_id::text = '${agentId}' and ${inWindow}`,
+          )[0] ?? "0",
+        );
+      if (CONTAINER_KINDS.includes(kind)) {
+        const created = eventsBy("task.created");
+        const parked = eventsBy("task.status.changed");
+        const delegated = eventsBy("task.delegated");
+        const ok = created > 0 && parked + delegated > 0;
+        record(
+          ok ? "PASS" : "FAIL",
+          "the turn ended its task the way its kind allows",
+          ok
+            ? `${kind} turn split the work off (${created} task.created) and handed it on (${delegated} delegated, ${parked} status change(s)); container now ${status} and closes by roll-up`
+            : `${kind} turn left nothing behind (${created} created, ${delegated} delegated, ${parked} status change(s)) - the container cannot close by roll-up`,
+        );
+      } else {
+        const handedOff = ["REVIEW", "QA", "DONE"].includes(status);
+        const changed = eventsBy("task.status.changed");
+        record(
+          handedOff && changed > 0 ? "PASS" : "FAIL",
+          "the turn ended its task the way its kind allows",
+          handedOff && changed > 0
+            ? `${kind} reached ${status} with a status change by this agent`
+            : `${kind} sits at ${status} after the session (${changed} status change(s) by this agent) - the leaf never reached review or done`,
+        );
+      }
+      void taskId;
+    }
+  }
+
+  // ---- 3a. INV-3 holds where the tools actually execute --------------------
+  if (!agentSessionId || !hasColumn("tool_invocations", "id")) {
+    record("SKIP", "INV-3 holds for CLI builtins (PreToolUse hook wired)", "no session/table to scope to");
+  } else {
     const scope = hasColumn("tool_invocations", "agent_session_id")
       ? `agent_session_id::text = '${agentSessionId}'`
-      : hasColumn("tool_invocations", "session_id")
-        ? `session_id::text = '${session.id}'`
-        : hasColumn("tool_invocations", "mcp_session_id") && hasColumn("mcp_sessions", "agent_session_id")
-          ? `mcp_session_id in (select id from mcp_sessions where agent_session_id::text = '${agentSessionId}')`
-          : null;
+      : hasColumn("tool_invocations", "mcp_session_id") && hasColumn("mcp_sessions", "agent_session_id")
+        ? `mcp_session_id in (select id from mcp_sessions where agent_session_id::text = '${agentSessionId}')`
+        : null;
     if (!scope) {
-      record("SKIP", "the turn closed its task via the gateway", "no session column to join on");
+      record("SKIP", "INV-3 holds for CLI builtins (PreToolUse hook wired)", "no session column to join on");
     } else {
-      const rows = sql(
-        `select tool_name, count(*) from tool_invocations where ${scope} group by tool_name`,
-      );
-      const names = rows.map((row) => row.split("|")[0]);
-      // The gateway names Family B verbs `task.*` (task.query, task.create), so
-      // a row for the closing verb can read either way depending on which side
-      // wrote it. Accept both rather than call a closed task unaudited.
-      const completed = names.some((name) => /complete_task|task\.complete/.test(name));
       // The hook posts the RAW builtin ({tool:"Bash"}), but the gateway
       // TRANSLATES it server-side (T30 §9) before writing the row, so the audit
       // trail carries ACOS verbs (terminal.run, fs.read) and never the CLI's
-      // own tool names. Matching on "Bash" therefore reported "the hook never
-      // fired" while its rows sat in the table. The marker the gateway stamps
-      // is what identifies them.
+      // own tool names. The marker the gateway stamps is what identifies them.
       const builtins = hasColumn("tool_invocations", "result_summary")
         ? sql(
             `select tool_name, count(*) from tool_invocations where ${scope} and result_summary like '%executed by the CLI%' group by tool_name`,
-          ).map((row) => row.split("|")[0])
+          ).map((r) => r.split("|")[0])
         : [];
-      record(
-        completed ? "PASS" : "FAIL",
-        "the turn closed its task via the gateway",
-        completed
-          ? `complete_task audited (+${builtins.length} builtin-sourced row kind(s) from the PreToolUse hook)`
-          : `no complete_task row for this session (saw: ${names.join(", ") || "nothing"})`,
+      const all = sql(`select tool_name, count(*) from tool_invocations where ${scope} group by tool_name`).map(
+        (r) => r.split("|")[0],
       );
-      // INV-3: every tool execution leaves an audit row. Builtins run INSIDE
-      // the CLI, so their rows are the only proof the hook is actually wired.
       record(
         builtins.length > 0 ? "PASS" : "FAIL",
         "INV-3 holds for CLI builtins (PreToolUse hook wired)",
         builtins.length > 0
-          ? `${builtins.join(", ")} (translated from CLI builtins, marker present)`
-          : "no row carries the gateway's builtin marker - the hook never fired",
+          ? `${builtins.join(", ")} carry the gateway's builtin marker (of ${all.length} audited verb kind(s))`
+          : `no row carries the builtin marker - the hook never fired (saw: ${all.join(", ") || "nothing"})`,
       );
     }
   }
@@ -291,7 +326,20 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
       count > 0 && cliTagged === count ? "PASS" : "FAIL",
       "model calls are attributed to this session and tagged runtime=cli",
       count === 0
-        ? "no llm_calls rows — nothing reached the broker"
+        ? (() => {
+            // "No ledger rows" has two very different causes and the message
+            // must say which: nothing ran, or something ran and was not
+            // recorded. agent_sessions carries the broker's metered totals, so
+            // it settles the question without a broker surface.
+            const metered = Number(
+              sql(
+                `select coalesce(tokens_in,0) + coalesce(tokens_out,0) from agent_sessions where id::text = '${agentSessionId}'`,
+              )[0] ?? "0",
+            );
+            return metered > 0
+              ? `the broker metered ${metered} token(s) for this session but the ledger has no row - the turn ran and went unrecorded`
+              : "no llm_calls rows and nothing metered - the turn never reached the broker";
+          })()
         : `${cliTagged}/${count} row(s) tagged runtime='cli'`,
     );
 
