@@ -113,6 +113,8 @@ export interface BuildAppOptions {
   internalApiToken?: string;
   /** sandbox-manager internal API — terminal ring/log source (22 §5.2, T41). */
   sandboxManagerUrl?: string;
+  /** E4/A (T30): konteynerdeki CLI'ın çağıracağı MCP adresi (workspace ağı). */
+  mcpPublicUrl?: string;
   /** Single-user mode (AUTH_AUTOLOGIN): mint a Founder session for cookie-less GETs. */
   autologinFounder?: boolean;
 }
@@ -465,6 +467,23 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       return options.internalApiToken;
     },
     starter: () => app.agentWorkflowStarter,
+  });
+
+  // ---------- E4/A: MCP tool-gateway (T30) ----------
+  // Konteynerdeki `claude` oturumu ACOS'a BURADAN ulaşır — Tool Gateway'in
+  // üstüne oturur, yanına değil. Kimlik oturum jetonundan türer.
+  const { registerMcpRoutes } = await import("./modules/mcp/routes.js");
+  await registerMcpRoutes(app, {
+    guardedDb: () => {
+      if (!options.guardedDb) throw new ApiError("internal", "mcp not wired");
+      return options.guardedDb;
+    },
+    gateway: toolGatewaySvc,
+    internalApiToken: () => {
+      if (!options.internalApiToken) throw new ApiError("internal", "internal token not wired");
+      return options.internalApiToken;
+    },
+    publicMcpUrl: () => options.mcpPublicUrl ?? "http://server:3000/mcp/v1",
   });
 
   // ---------- E2/W3+W5: düzenlenebilir kadro önerisi (T19) ----------

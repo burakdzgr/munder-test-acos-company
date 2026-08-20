@@ -279,20 +279,16 @@ async function run(): Promise<void> {
       // ajana ikinci workflow başlatılmaz; görev ASSIGNED kuyruğunda bekler,
       // oturum kapanınca sunucudaki session-ended drain'i sıradakini başlatır.
       startAgentWorkflow: async ({ companyId, agentId, taskId }) => {
-        const { and, eq, inArray } = await import("drizzle-orm");
-        const { agentSessions } = await import("@acos/db/schema");
-        const [live] = await guardedDb
-          .select({ taskId: agentSessions.taskId })
-          .from(agentSessions)
-          .where(
-            and(
-              eq(agentSessions.companyId, companyId),
-              eq(agentSessions.agentId, agentId),
-              inArray(agentSessions.status, ["starting", "running"]),
-            ),
-          )
-          .limit(1);
-        if (live && live.taskId !== taskId) return; // kuyrukta bekler
+        // Kapı sunucu ikiziyle AYNI koddan gelir (@acos/db checkSessionGate):
+        // ajan başına tek canlı oturum + şirket eşzamanlılık tavanı (E4/A).
+        const { checkSessionGate } = await import("@acos/db");
+        const gate = await checkSessionGate(guardedDb, {
+          companyId,
+          agentId,
+          taskId,
+          maxLiveSessionsPerCompany: config.agentRuntime.maxLiveSessionsPerCompany,
+        });
+        if (!gate.ok) return; // kuyrukta bekler
         await startAgentTaskWorkflow(temporalClient, "agentTaskWorkflow", {
           companyId,
           agentId,
@@ -315,6 +311,18 @@ async function run(): Promise<void> {
       // rework re-entry with the verdict pre-seeded (T43): a DISTINCT
       // workflow id (rework key) so it never races the prior run's close
       startAgentWorkflow: async ({ companyId, agentId, taskId, initialReviewVerdict, reworkKey }) => {
+        // Yeniden giriş de canlı bir oturumdur: tavanın dışında kalırsa tavan
+        // tavan olmaktan çıkar. Reddedilirse iş kaybolmaz — CHANGES_REQUESTED/
+        // QA_FAILED/REJECTED "sahibinin sırası" kümesindedir (T14), yani
+        // drain ve 30 dk'lık sweep onu yeniden başlatır.
+        const { checkSessionGate } = await import("@acos/db");
+        const gate = await checkSessionGate(guardedDb, {
+          companyId,
+          agentId,
+          taskId,
+          maxLiveSessionsPerCompany: config.agentRuntime.maxLiveSessionsPerCompany,
+        });
+        if (!gate.ok) return;
         await temporalClient.workflow
           .start("agentTaskWorkflow", {
             taskQueue: TASK_QUEUES.agentTasks,

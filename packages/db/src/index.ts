@@ -99,6 +99,13 @@ export {
 } from "./delegation.js";
 export { recordLlmCall, type LlmCallRecord } from "./llm-calls.js";
 export {
+  checkSessionGate,
+  pickCompanyQueuedTasks,
+  LIVE_SESSION_STATUSES,
+  type SessionGateDecision,
+  type SessionGateInput,
+} from "./session-gate.js";
+export {
   ApprovalsService,
   ApprovalError,
   sweepApprovals,

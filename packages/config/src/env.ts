@@ -99,6 +99,13 @@ export const envSchema = z.object({
   DOCKER_SOCK: z.string().min(1).default("/var/run/docker.sock"),
   EGRESS_PROXY_URL: z.url().default("http://egress-proxy:3128"),
 
+  // E4/A (T30) — ajan turu bir CLI oturumu olduğunda: konteynerin çağıracağı
+  // MCP adresi ve ŞİRKET BAZLI eşzamanlı canlı oturum tavanı. Tavanın
+  // varsayılanı bilerek 3 — bugünkü fiili paralellik (köprünün eşzamanlılığı)
+  // ile aynı, yani CLI yolunu açmak makineyi bugünkünden kötü duruma DÜŞÜREMEZ.
+  MCP_PUBLIC_URL: z.url().default("http://server:3000/mcp/v1"),
+  MAX_LIVE_SESSIONS_PER_COMPANY: z.coerce.number().int().min(1).default(3),
+
   // Budgets / safety defaults
   DEFAULT_COMPANY_DAILY_BUDGET_CENTS: z.coerce.number().int().min(0).default(5000),
 
@@ -150,6 +157,10 @@ export interface Config {
     readonly maxWorkspaces: number;
     readonly dockerSock: string;
     readonly egressProxyUrl: string;
+  };
+  readonly agentRuntime: {
+    readonly mcpPublicUrl: string;
+    readonly maxLiveSessionsPerCompany: number;
   };
   readonly budgets: { readonly defaultCompanyDailyCents: number };
   readonly observability: {
@@ -221,6 +232,10 @@ export function loadConfig(processEnv: Record<string, string | undefined>): Conf
       maxWorkspaces: env.MAX_WORKSPACES,
       dockerSock: env.DOCKER_SOCK,
       egressProxyUrl: env.EGRESS_PROXY_URL,
+    },
+    agentRuntime: {
+      mcpPublicUrl: env.MCP_PUBLIC_URL,
+      maxLiveSessionsPerCompany: env.MAX_LIVE_SESSIONS_PER_COMPANY,
     },
     budgets: { defaultCompanyDailyCents: env.DEFAULT_COMPANY_DAILY_BUDGET_CENTS },
     observability: {

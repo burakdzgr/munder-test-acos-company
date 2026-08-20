@@ -368,6 +368,27 @@ describe("migrations 0001–0011 + row-level coverage of every table (T12)", () 
       [U.company],
     );
 
+    // ---- 0026 project↔team link (E2/W1, T17) ----
+    await client.query(
+      `INSERT INTO project_team_memberships (id, company_id, project_id, org_unit_id, added_by)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'backfill')`,
+      [U.company, U.project, U.unit],
+    );
+
+    // ---- 0027 staffing proposals (E2/W3, T19) ----
+    await client.query(
+      `INSERT INTO staffing_proposals (id, company_id, project_id, status, source, teams)
+       VALUES (gen_random_uuid(), $1, $2, 'draft', 'llm', '[]'::jsonb)`,
+      [U.company, U.project],
+    );
+
+    // ---- 0028 mcp sessions (E4/A, T30) ----
+    await client.query(
+      `INSERT INTO mcp_sessions (id, company_id, agent_id, task_id, agent_session_id, token_hash, expires_at)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, 'sha256-test', now() + interval '1 hour')`,
+      [U.company, U.agent, U.task, U.session],
+    );
+
     // every table now has ≥1 row
     const { rows } = await client.query(`
       SELECT c.relname AS t, s.n_live_tup
