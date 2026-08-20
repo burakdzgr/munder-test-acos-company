@@ -167,11 +167,11 @@ done < "$OUT/s0.sessions.txt"
 
 say "== 4c INV-2 content scan (server-side surfaces; CLI prompts are never stored server-side)"
 sql "with pat as (select '(INTERNAL_API_TOKEN=|ACOS_BROKER_SECRET=|CLAUDE_CODE_OAUTH_TOKEN=|sk-ant-[A-Za-z0-9_-]{8,}|acos_pat_[A-Za-z0-9]{8,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})' as re) \
- select 'tool_invocations.input', count(*) filter (where input::text ~ pat.re \), count(*) from tool_invocations, pat where company_id=:'company' and created_at>=:'run_start'
- union all select 'agent_steps', count(*) filter (where (action::text ~ pat.re or observation::text ~ pat.re) \), count(*) from agent_steps, pat where company_id=:'company' and created_at>=:'run_start'
- union all select 'messages', count(*) filter (where body ~ pat.re \), count(*) from messages, pat where company_id=:'company' and created_at>=:'run_start'
- union all select 'events.payload', count(*) filter (where payload::text ~ pat.re \), count(*) from events, pat where company_id=:'company' and occurred_at>=:'run_start'
- union all select 'artifacts', count(*) filter (where coalesce(content_md,'') ~ pat.re" | tee "$OUT/4c.scan.txt"), count(*) from artifacts, pat where company_id=:'company' and created_at>=:'run_start'
+ select 'tool_invocations.input', count(*) filter (where input::text ~ pat.re), count(*) from tool_invocations, pat where company_id=:'company' and created_at>=:'run_start' \
+ union all select 'agent_steps', count(*) filter (where action::text ~ pat.re or observation::text ~ pat.re), count(*) from agent_steps, pat where company_id=:'company' and created_at>=:'run_start' \
+ union all select 'messages', count(*) filter (where body ~ pat.re), count(*) from messages, pat where company_id=:'company' and created_at>=:'run_start' \
+ union all select 'events.payload', count(*) filter (where payload::text ~ pat.re), count(*) from events, pat where company_id=:'company' and occurred_at>=:'run_start' \
+ union all select 'artifacts', count(*) filter (where coalesce(content_md,'') ~ pat.re), count(*) from artifacts, pat where company_id=:'company' and created_at>=:'run_start'" | tee "$OUT/4c.scan.txt"
 # A failed query writes nothing, and "no rows" summed to 0 hits — i.e. a broken
 # scan reported "no credential pattern found". Require the five expected surface
 # rows before believing a zero.
