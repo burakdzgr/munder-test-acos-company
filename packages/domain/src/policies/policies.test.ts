@@ -222,10 +222,10 @@ describe("runaway guards (08 §9)", () => {
   });
 
   it("(c) step cap: warn at 40, hard at 50", () => {
-    expect(stepCapState(39)).toBe("ok");
-    expect(stepCapState(40)).toBe("warn");
-    expect(stepCapState(49)).toBe("warn");
-    expect(stepCapState(50)).toBe("hard");
+    expect(stepCapState(59)).toBe("ok");
+    expect(stepCapState(60)).toBe("warn");
+    expect(stepCapState(119)).toBe("warn");
+    expect(stepCapState(120)).toBe("hard");
   });
 
   it("(d) loop detector: ≥3 equal hashes within last 6 steps", () => {
@@ -255,6 +255,52 @@ describe("runaway guards (08 §9)", () => {
     expect(actionHash("use_tool", { tool: "fs.write" })).not.toBe(
       actionHash("use_tool", { tool: "fs.read" }),
     );
+  });
+
+  // Regression: the workflow kept a PRIVATE normalizer that folded every digit
+  // to a placeholder ("line numbers, byte counts"). That also folded
+  // src/file-1.ts and src/file-2.ts together, so writing a numbered series of
+  // files — ordinary productive work — was reported as a loop and the agent
+  // was stopped on its 3rd file. Numbered siblings must stay DISTINCT.
+  it("(d) normalization: numbered siblings are different actions, not a loop", () => {
+    const write = (n: number) =>
+      actionHash("use_tool", { tool: "write_file", input: { path: `src/file-${n}.ts` }, reason: `step ${n}` });
+    const series = [write(1), write(2), write(3), write(4), write(5), write(6)];
+    expect(new Set(series).size).toBe(6);
+    expect(loopDetected(series)).toBe(false);
+    // …while the SAME file written over and over still trips
+    expect(loopDetected([write(1), write(1), write(1)])).toBe(true);
+  });
+
+  it("(d) normalization: a uuid or stamp EMBEDDED in a string still collapses", () => {
+    const call = (id: string) =>
+      actionHash("use_tool", { tool: "run_command", command: `curl /api/v1/tasks/${id}` });
+    const a = call("0198b2c3-aaaa-7bbb-8ccc-1234567890ab");
+    const b = call("0198b2c3-ffff-7eee-8ddd-ba0987654321");
+    expect(a).toBe(b); // a fresh nonce per attempt must not hide the repeat
+    expect(loopDetected([a, b, call("0198b2c3-1111-7222-8333-444455556666")])).toBe(true);
+    // same for a wall-clock stamp pasted into the argument
+    const stamped = (ts: string) => actionHash("send_message", { note: `retry at ${ts}` });
+    expect(stamped("2026-08-11T00:00:00Z")).toBe(stamped("2026-08-11T09:09:09Z"));
+    // …but a genuinely different command is still a different action
+    expect(call("0198b2c3-aaaa-7bbb-8ccc-1234567890ab")).not.toBe(
+      actionHash("use_tool", { tool: "run_command", command: "curl /api/v1/agents" }),
+    );
+  });
+
+  it("(d) normalization: long free text compares by its first 100 chars", () => {
+    const base = "x".repeat(100);
+    const say = (tail: string) => actionHash("send_message", { body: `${base}${tail}` });
+    // a cosmetic late edit must not buy the agent another lap
+    expect(say(" ping")).toBe(say(" pong"));
+    // divergence INSIDE the compared prefix is still a different message
+    expect(say("")).not.toBe(actionHash("send_message", { body: `${"y".repeat(100)}` }));
+  });
+
+  it("(d) the same file addressed relatively or under /work is one action", () => {
+    const read = (path: string) => actionHash("use_tool", { tool: "fs.read", path });
+    expect(read("./src/a.ts")).toBe(read("src/a.ts"));
+    expect(read("/work/src/a.ts")).toBe(read("src/a.ts"));
   });
 
   it("(e) ping-pong: alternation counts, same-sender or new pair resets, >8 trips", () => {

@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Worker } from "@temporalio/worker";
 import { TestWorkflowEnvironment } from "@temporalio/testing";
-import { uuidv7 } from "@acos/domain";
+import { STEP_HARD_CAP, uuidv7 } from "@acos/domain";
 import { TASK_QUEUES } from "@acos/config";
 
 const require = createRequire(import.meta.url);
@@ -88,7 +88,14 @@ function makeStubActivities(options: StubOptions) {
   return { activities, calls };
 }
 
-/** Distinct use_tool actions — loop-detector-safe filler. */
+/**
+ * Distinct use_tool actions — loop-detector-safe filler.
+ *
+ * This is only true because normalization keeps numbered siblings APART. The
+ * workflow's old private normalizer folded every digit to a placeholder, so
+ * `file-1.ts` and `file-2.ts` hashed alike and this "filler" tripped guard (d)
+ * on its 4th step — which is why (c) could never reach the cap it measures.
+ */
 const distinctTool = (n: number) => ({
   type: "use_tool",
   tool: "write_file",
@@ -180,15 +187,18 @@ describe("runaway guards (08 §9, 32 §3)", () => {
     expect(stub.calls.guardEscalate[0]).toMatchObject({ guard: "loop" });
   }, 60_000);
 
-  it("(c)+(§10) 50 local steps → continueAsNew with carried state; hard cap trips at 51", async () => {
-    const script = Array.from({ length: 60 }, (_, i) => distinctTool(i + 1));
+  it(`(c)+(§10) continueAsNew every 50 local steps; cumulative cap trips at ${STEP_HARD_CAP}`, async () => {
+    // The cap is CUMULATIVE across continues, so this walks three runs:
+    // 1..50, 51..100, 101..120 — then the 121st step is refused.
+    const script = Array.from({ length: STEP_HARD_CAP + 10 }, (_, i) => distinctTool(i + 1));
     const stub = makeStubActivities({ script });
     const workflowId = `guard-can-${Date.now()}`;
     const result = await runWorkflow(stub, { workflowId });
-    // run 1 executed steps 1..50 then continued; run 2 hit the cumulative cap
     expect(result).toMatchObject({ outcome: "guard_stopped" });
-    expect(stub.calls.persisted).toHaveLength(50);
-    expect(stub.calls.persisted[49]).toMatchObject({ stepNo: 50 });
+    // guard (c) is evaluated at the TOP of the loop against completed steps, so
+    // exactly STEP_HARD_CAP steps run and the next one is refused before it starts
+    expect(stub.calls.persisted).toHaveLength(STEP_HARD_CAP);
+    expect(stub.calls.persisted[STEP_HARD_CAP - 1]).toMatchObject({ stepNo: STEP_HARD_CAP });
     expect(stub.calls.guardEscalate[0]).toMatchObject({ guard: "step_cap" });
     // the FIRST run's history ends in ContinueAsNew — proof the boundary fired
     const firstRun = env.client.workflow.getHandle(workflowId);
@@ -199,7 +209,7 @@ describe("runaway guards (08 §9, 32 §3)", () => {
     expect(continued).toBe(true);
     // session stayed open across the continue — closed exactly once at the end
     expect(stub.calls.sessionClosed).toHaveLength(1);
-  }, 120_000);
+  }, 240_000);
 
   it("managerDirective(pause) parks the loop; resume continues; cancel ends it", async () => {
     // both steps park on wait_for(reply) — signal timing is deterministic

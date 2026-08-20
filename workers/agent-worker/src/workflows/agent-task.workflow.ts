@@ -16,7 +16,15 @@ import {
   sleep,
   workflowInfo,
 } from "@temporalio/workflow";
-import { uuidv5 } from "@acos/domain";
+import {
+  LOOP_THRESHOLD,
+  LOOP_WINDOW,
+  STEP_HARD_CAP,
+  STEP_SOFT_WARN,
+  actionHash,
+  loopDetected,
+  uuidv5,
+} from "@acos/domain";
 import { AgentActionSchema, type AgentAction } from "@acos/llm/agent-action";
 import type { createAgentTaskActivities } from "../activities/agent-task.js";
 import type { LlmMessage } from "@acos/llm";
@@ -95,12 +103,8 @@ export interface AgentTaskOutcome {
 }
 
 const MAX_REPAIRS = 2;
-const STEP_SOFT_WARN = 60; // guard (c) soft — injected into section 10
-const STEP_HARD_CAP = 120; // guard (c) hard — cumulative across continues (raised for live LLM)
 const CONTINUE_EVERY_STEPS = 50; // 08 §10 (local steps per run)
 const HISTORY_EVENT_LIMIT = 5_000;
-const LOOP_WINDOW = 10; // guard (d) — longer pattern detection
-const LOOP_TRIP = 4; // more tolerant (was 3)
 
 /**
  * Canlı model toleransı (2026-08-14): markdown çiti / önsöz-sonsöz metni
@@ -142,26 +146,6 @@ function describeError(err: unknown, depth = 0): string {
     return cause ? `${head} <- ${describeError(cause, depth + 1)}` : head;
   }
   return String(err);
-}
-
-/** guard (d) normalization: lowercase, strip volatile fields (08 §9). */
-function normalizedActionHash(action: AgentAction): string {
-  const raw = JSON.stringify(action)
-    .toLowerCase()
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>")
-    .replace(/\d{4}-\d{2}-\d{2}t[\d:.]+z?/g, "<ts>")
-    // Normalize file paths: strip leading ./ and /work/ prefix
-    .replace(/\.\/|\/work\//g, "")
-    // Normalize numbers (line numbers, byte counts, etc.)
-    .replace(/\b\d+\b/g, "<n>")
-    // Normalize message/note content length (first 100 chars only)
-    .replace(/"(body|note|summary|content|message)":\s*"([^"]{100})[^"]*"/g, '"$1":"$2<...>"');
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < raw.length; i++) {
-    hash ^= raw.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16);
 }
 
 export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTaskOutcome> {
@@ -285,7 +269,8 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
 
   try {
     for (;;) {
-      // guard (c) hard: cumulative cap — starting a step beyond 50 is refused
+      // guard (c) hard: cumulative cap — starting a step beyond the cap is
+      // refused (value in @acos/domain/policies, cumulative across continues)
       if (stepNo >= STEP_HARD_CAP) {
         await activities.guardEscalateActivity({
           ...ref,
@@ -443,17 +428,19 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
       }
 
       // guard (d): loop detector — ≥3 identical normalized hashes within the
-      // last 6 steps forces request_help (08 §9d)
-      const actionHash = normalizedActionHash(action);
-      loopHashes.push(actionHash);
+      // last 6 steps forces request_help (08 §9d). Threshold, window, hash and
+      // normalization ALL come from @acos/domain/policies — this workflow used
+      // to keep a private copy that silently drifted to 4-in-10.
+      const stepHash = actionHash(action.type, action);
+      loopHashes.push(stepHash);
       if (loopHashes.length > LOOP_WINDOW) loopHashes.shift();
-      if (loopHashes.filter((h) => h === actionHash).length >= LOOP_TRIP) {
+      if (loopDetected(loopHashes)) {
         await activities.persistStepActivity({
           ...ref,
           stepId,
           stepNo,
           action,
-          observation: { ok: false, guard: "loop", hash: actionHash },
+          observation: { ok: false, guard: "loop", hash: stepHash },
           usage,
           costCents,
           durationMs: Date.now() - stepStart,
@@ -462,7 +449,7 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
           ...ref,
           stepId,
           guard: "loop",
-          detail: `action hash ${actionHash} repeated ${LOOP_TRIP}x within ${LOOP_WINDOW} steps`,
+          detail: `action hash ${stepHash} repeated ${LOOP_THRESHOLD}x within ${LOOP_WINDOW} steps`,
         });
         outcome = "guard_stopped";
         break;
