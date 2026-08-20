@@ -551,9 +551,9 @@ export class DockerSandbox {
   }
 
   /**
-   * End a live agent session deterministically. Escalation: two Ctrl-C
-   * keystrokes (interrupt a running turn, then exit at the prompt — the CLI's
-   * own "press Ctrl-C again to exit") → SIGTERM to the recorded session pid
+   * End a live agent session deterministically. Escalation: Ctrl-C up to four
+   * times, 1.5 s apart (interrupt a running turn, then exit at the prompt — the
+   * CLI's own "press Ctrl-C again to exit") → SIGTERM to the recorded session pid
    * (written by run-session.sh into HOME) → close our side of the PTY. Each
    * step waits `graceMs` for the stream to end. Idempotent.
    */
@@ -568,12 +568,18 @@ export class DockerSandbox {
       while (!ended() && this.deps.nowMs() < deadline) await new Promise((r) => setTimeout(r, 100));
       return ended();
     };
-    try {
-      s.stream.write("\x03");
-      await new Promise((r) => setTimeout(r, 400));
-      if (!ended()) s.stream.write("\x03");
-    } catch {
-      /* stream already gone */
+    // Ctrl-C, repeated: the first interrupts a running turn, the next exits at
+    // the prompt ("Press Ctrl-C again to exit"). Live finding 2026-08-21: two
+    // presses 400 ms apart were swallowed while the TUI was mid-render and the
+    // session fell through to SIGTERM (exit 143). Press up to four times, 1.5 s
+    // apart, stopping as soon as the stream ends — still well inside graceMs.
+    for (let press = 0; press < 4 && !ended(); press++) {
+      try {
+        s.stream.write("\x03");
+      } catch {
+        break; /* stream already gone */
+      }
+      await wait(1_500);
     }
     if (await wait(graceMs)) return this.agentSessionStatus(sessionId);
     try {
