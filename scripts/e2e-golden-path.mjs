@@ -540,10 +540,17 @@ async function main() {
       return (
         all.find((task) => {
           const parent = task.parentId ? byId.get(task.parentId) : null;
+          // "Child and parent share an owner" is NOT enough, and this gate
+          // proved it live: the CEO handed an initiative AND its epic to the
+          // same lead, which satisfies that predicate without anyone keeping a
+          // slice of their own work. Decision B is specifically "I split this
+          // and I am taking this piece" — so the child must ALSO have been
+          // created by the agent that owns the parent.
           return (
             parent &&
             task.ownerAgentId &&
             parent.ownerAgentId === task.ownerAgentId &&
+            task.creatorAgentId === parent.ownerAgentId &&
             task.status === "DONE"
           );
         }) ?? null
@@ -569,7 +576,7 @@ async function main() {
       return hasT29 ? BREAK(detail, "control-plane:delegation self-assignment") : SKIP(`${detail} (T29 not in this build)`);
     }
     return PASS(
-      `TASK-${selfTaken.number}(${selfTaken.kind}) self-taken by its parent's owner and closed`,
+      `TASK-${selfTaken.number}(${selfTaken.kind}) was split off by its parent's owner, KEPT by them, and closed`,
     );
   });
 
