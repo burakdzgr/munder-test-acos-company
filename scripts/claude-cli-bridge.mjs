@@ -21,7 +21,7 @@ const CLAUDE_BIN =
   process.env.CLAUDE_BIN ??
   "C:\\Users\\BURAK\\.vscode\\extensions\\anthropic.claude-code-2.1.234-win32-x64\\resources\\native-binary\\claude.exe";
 const WORKDIR = mkdtempSync(join(tmpdir(), "claude-bridge-"));
-const MAX_PARALLEL = 2;
+const MAX_PARALLEL = Number(process.env.BRIDGE_MAX_PARALLEL ?? 2);
 
 let active = 0;
 const queue = [];
