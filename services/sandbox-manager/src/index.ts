@@ -1,6 +1,13 @@
 export const packageName = "@acos/sandbox-manager" as const;
 
-export { DockerSandbox, SandboxError, type DockerSandboxDeps } from "./docker.js";
+export {
+  AGENT_SESSION_ENTRY,
+  DockerSandbox,
+  SandboxError,
+  type AgentSessionOpen,
+  type AgentSessionStatus,
+  type DockerSandboxDeps,
+} from "./docker.js";
 export {
   TerminalSession,
   RING_BYTES,

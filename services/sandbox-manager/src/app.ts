@@ -242,6 +242,66 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     },
   );
 
+  // --- Agent CLI session (E4/T31, ADR-022): `claude` as THE PTY process ---
+
+  app.post<{ Params: { sessionId: string } }>(
+    "/internal/v1/terminals/:sessionId/agent-session/open",
+    async (request, reply) => {
+      const parsed = z
+        .object({
+          workspaceId: z.string(),
+          cols: z.number().int().min(10).max(500).default(120),
+          rows: z.number().int().min(4).max(200).default(32),
+          env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/), z.string().max(64 * 1024)).default({}),
+          cwd: z.string().startsWith("/").optional(),
+          entrypoint: z.array(z.string()).min(1).optional(),
+        })
+        .safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ code: "validation_failed", issues: parsed.error.issues });
+      }
+      // INV-2 at the seam: a raw provider credential must never ride into the
+      // container. The entry script re-checks; this is defence in depth.
+      for (const [k, v] of Object.entries(parsed.data.env)) {
+        if (/^sk-ant-(?!sess)/.test(v) || k === "ANTHROPIC_API_KEY" || k === "CLAUDE_CODE_OAUTH_TOKEN") {
+          return reply.status(400).send({ code: "raw_credential_rejected", message: `env ${k} looks like a raw credential` });
+        }
+      }
+      const result = await deps.sandbox.openAgentSession({
+        workspaceId: parsed.data.workspaceId,
+        sessionId: request.params.sessionId,
+        cols: parsed.data.cols,
+        rows: parsed.data.rows,
+        env: parsed.data.env,
+        ...(parsed.data.cwd !== undefined ? { cwd: parsed.data.cwd } : {}),
+        ...(parsed.data.entrypoint !== undefined ? { entrypoint: parsed.data.entrypoint } : {}),
+      });
+      return reply.status(result.opened ? 201 : 200).send({ sessionId: request.params.sessionId, ...result });
+    },
+  );
+
+  app.get<{ Params: { sessionId: string } }>(
+    "/internal/v1/terminals/:sessionId/agent-session",
+    async (request, reply) => {
+      const status = deps.sandbox.agentSessionStatus(request.params.sessionId);
+      if (!status) return reply.status(404).send({ code: "not_found", message: "no agent session" });
+      return reply.send(status);
+    },
+  );
+
+  app.post<{ Params: { sessionId: string } }>(
+    "/internal/v1/terminals/:sessionId/agent-session/end",
+    async (request, reply) => {
+      const parsed = z.object({ graceMs: z.number().int().min(100).max(60_000).default(8_000) }).safeParse(request.body ?? {});
+      if (!parsed.success) {
+        return reply.status(400).send({ code: "validation_failed", issues: parsed.error.issues });
+      }
+      const status = await deps.sandbox.endAgentSession(request.params.sessionId, parsed.data.graceMs);
+      if (!status) return reply.status(404).send({ code: "not_found", message: "no agent session" });
+      return reply.send(status);
+    },
+  );
+
   app.get<{ Params: { sessionId: string } }>(
     "/internal/v1/terminals/:sessionId/log",
     async (request, reply) => {

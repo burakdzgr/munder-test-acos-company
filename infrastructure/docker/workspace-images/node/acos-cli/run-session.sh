@@ -21,7 +21,10 @@ set -eu
 KIT=/opt/acos/cli
 : "${HOME:=/home/node}"
 export HOME
-mkdir -p "$HOME/.claude"
+mkdir -p "$HOME/.claude" "$HOME/.acos"
+# sandbox-manager endAgentSession escalates to SIGTERM on this pid; `exec`
+# below keeps it — the CLI becomes this very process.
+echo $$ > "$HOME/.acos/session.pid"
 
 # Pre-accept the one-time interactive dialogs that would otherwise park the PTY:
 # onboarding/theme, the bypass-permissions acknowledgement and the cwd trust

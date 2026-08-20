@@ -28,6 +28,39 @@ const LABEL_CREATED = "acos.created_at";
  *  read-only rootfs (the tmpfs /tmp is noexec, S8). */
 const KEEPALIVE = ["/bin/sh", "-c", "while true; do sleep 3600; done"];
 const DEFAULT_IMAGE = "alpine:3.20"; // real workspace images land with T38
+/** The in-container session entry (baked read-only into acos/workspace-node, E4/T31). */
+export const AGENT_SESSION_ENTRY = "/opt/acos/cli/run-session.sh";
+
+export interface AgentSessionOpen {
+  readonly workspaceId: string;
+  readonly sessionId: string;
+  readonly cols: number;
+  readonly rows: number;
+  /** Runtime-injected env: brokered identity + gateway token + brief. */
+  readonly env: Readonly<Record<string, string>>;
+  readonly cwd?: string;
+  /** Test seam only — production always runs the baked entry script. */
+  readonly entrypoint?: readonly string[];
+}
+
+export interface AgentSessionStatus {
+  readonly sessionId: string;
+  readonly workspaceId: string;
+  readonly running: boolean;
+  readonly startedAt: number;
+  readonly endedAt: number | null;
+  readonly exitCode: number | null;
+}
+
+interface AgentSessionState {
+  workspaceId: string;
+  exec: import("dockerode").Exec;
+  stream: NodeJS.ReadWriteStream;
+  startedAt: number;
+  endedAt: number | null;
+  exitCode: number | null;
+  ending: boolean;
+}
 
 export class SandboxError extends Error {
   constructor(
@@ -58,6 +91,8 @@ export class DockerSandbox {
     string,
     { exec: import("dockerode").Exec; stream: NodeJS.ReadWriteStream }
   >();
+  /** Live agent CLI sessions (E4/T31): the `claude` process IS the PTY process. */
+  private readonly agentSessions = new Map<string, AgentSessionState>();
   private static readonly MAX_TRACKED_TERMINALS = 200;
 
   constructor(private readonly deps: DockerSandboxDeps) {
@@ -421,6 +456,154 @@ export class DockerSandbox {
     }
     this.shells.delete(sessionId);
     return true;
+  }
+
+  // ---------- agent CLI session (E4/T31, ADR-022) ----------
+
+  /**
+   * Start the agent's Claude Code CLI session as THE process of this PTY.
+   * Same frame plumbing as `openShell` (ring + NATS `term.<sessionId>` + log),
+   * so the Founder watches the genuine session; the shell registry is shared
+   * so takeover keystrokes / resize / close work unchanged. The entrypoint is
+   * the read-only kit baked into the workspace image; `env` carries ONLY the
+   * brokered identity (ANTHROPIC_BASE_URL + acos-sess token), the gateway
+   * session token and the brief — never a raw credential (the entry script
+   * refuses to start if it sees one).
+   */
+  async openAgentSession(input: AgentSessionOpen): Promise<{ opened: boolean }> {
+    const live = this.agentSessions.get(input.sessionId);
+    if (live && live.endedAt === null) return { opened: false }; // idempotent while running
+    const container = await this.requireContainer(input.workspaceId);
+    const session = this.newTerminalSession(input.sessionId);
+    const env = [
+      "TERM=xterm-256color",
+      "HOME=/home/node",
+      ...Object.entries(input.env).map(([k, v]) => `${k}=${v}`),
+    ];
+    const exec = await container.exec({
+      Cmd: [...(input.entrypoint ?? [AGENT_SESSION_ENTRY])],
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+      WorkingDir: input.cwd ?? "/work",
+      Env: env,
+    });
+    const stream = await exec.start({ Tty: true, hijack: true, stdin: true });
+    const state: AgentSessionState = {
+      workspaceId: input.workspaceId,
+      exec,
+      stream: stream as unknown as NodeJS.ReadWriteStream,
+      startedAt: this.deps.nowMs(),
+      endedAt: null,
+      exitCode: null,
+      ending: false,
+    };
+    this.agentSessions.set(input.sessionId, state);
+    this.shells.set(input.sessionId, { exec, stream: state.stream });
+    stream.on("data", (chunk: Buffer) => session.emit("stdout", chunk));
+    let closed = false;
+    const finish = async () => {
+      if (closed) return;
+      closed = true;
+      this.shells.delete(input.sessionId);
+      // the hijacked socket can end before Docker has the exit code — wait briefly
+      let code: number | null = null;
+      const deadline = this.deps.nowMs() + 5_000;
+      for (;;) {
+        try {
+          const info = await exec.inspect();
+          if (!info.Running) {
+            code = info.ExitCode ?? null;
+            break;
+          }
+        } catch {
+          break;
+        }
+        if (this.deps.nowMs() >= deadline) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      state.exitCode = code;
+      state.endedAt = this.deps.nowMs();
+      session.emit("stdout", `\r\n[acos: agent session ended${code === null ? "" : ` (exit ${code})`}]\r\n`);
+      this.deps.log?.("agent session ended", { sessionId: input.sessionId, exitCode: code });
+    };
+    stream.on("end", () => void finish());
+    stream.on("error", () => void finish());
+    // resize AFTER the handlers are wired: a process that exits immediately
+    // ends the hijacked stream during this await and the 'end' would be lost
+    await exec.resize({ w: input.cols, h: input.rows }).catch(() => {});
+    this.deps.log?.("agent session opened", { workspaceId: input.workspaceId, sessionId: input.sessionId });
+    return { opened: true };
+  }
+
+  agentSessionStatus(sessionId: string): AgentSessionStatus | undefined {
+    const s = this.agentSessions.get(sessionId);
+    if (!s) return undefined;
+    return {
+      sessionId,
+      workspaceId: s.workspaceId,
+      running: s.endedAt === null,
+      startedAt: s.startedAt,
+      endedAt: s.endedAt,
+      exitCode: s.exitCode,
+    };
+  }
+
+  /**
+   * End a live agent session deterministically. Escalation: two Ctrl-C
+   * keystrokes (interrupt a running turn, then exit at the prompt — the CLI's
+   * own "press Ctrl-C again to exit") → SIGTERM to the recorded session pid
+   * (written by run-session.sh into HOME) → close our side of the PTY. Each
+   * step waits `graceMs` for the stream to end. Idempotent.
+   */
+  async endAgentSession(sessionId: string, graceMs = 8_000): Promise<AgentSessionStatus | undefined> {
+    const s = this.agentSessions.get(sessionId);
+    if (!s) return undefined;
+    if (s.endedAt !== null || s.ending) return this.agentSessionStatus(sessionId);
+    s.ending = true;
+    const ended = () => s.endedAt !== null;
+    const wait = async (ms: number) => {
+      const deadline = this.deps.nowMs() + ms;
+      while (!ended() && this.deps.nowMs() < deadline) await new Promise((r) => setTimeout(r, 100));
+      return ended();
+    };
+    try {
+      s.stream.write("\x03");
+      await new Promise((r) => setTimeout(r, 400));
+      if (!ended()) s.stream.write("\x03");
+    } catch {
+      /* stream already gone */
+    }
+    if (await wait(graceMs)) return this.agentSessionStatus(sessionId);
+    try {
+      const container = await this.requireContainer(s.workspaceId);
+      const kill = await container.exec({
+        Cmd: ["/bin/sh", "-c", 'p=$(cat /home/node/.acos/session.pid 2>/dev/null); [ -n "$p" ] && kill -TERM "$p"'],
+        AttachStdout: false,
+        AttachStderr: false,
+        Env: ["HOME=/home/node"],
+      });
+      await kill.start({ Detach: true });
+    } catch {
+      /* container gone or no pid file — fall through */
+    }
+    if (await wait(graceMs)) return this.agentSessionStatus(sessionId);
+    this.closeShell(sessionId);
+    await wait(2_000);
+    return this.agentSessionStatus(sessionId);
+  }
+
+  /** Ended sessions older than `maxAgeMs` are forgotten (status is transient; the DB owns history). */
+  forgetEndedAgentSessions(maxAgeMs: number): number {
+    let n = 0;
+    for (const [id, s] of this.agentSessions) {
+      if (s.endedAt !== null && this.deps.nowMs() - s.endedAt > maxAgeMs) {
+        this.agentSessions.delete(id);
+        n++;
+      }
+    }
+    return n;
   }
 
   // ---------- helpers ----------
