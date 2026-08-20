@@ -257,34 +257,39 @@ async function ensureLiveModelRouting(
           .onConflictDoNothing()
           .returning({ id: modelProviders.id })
       )[0]?.id;
-    if (!providerId) return; // lost a boot race — the winner seeded it
-
-    // A1 (26 §3.1): seed the price list into `model_providers.pricing` in the
-    // document shape so Settings → Providers can edit it at runtime. Only
-    // written while the column still holds its empty default — an operator's
-    // edits are never overwritten on boot.
-    await db
-      .update(modelProviders)
-      .set({ pricing: seedPricingDocument("anthropic") })
-      .where(
-        and(
-          eq(modelProviders.id, providerId),
-          sql`${modelProviders.pricing} = '{}'::jsonb`,
-        ),
-      );
-
-    const LIVE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
-    const FAST_MODEL =
-      process.env.ANTHROPIC_FAST_MODEL ?? "claude-haiku-4-5-20251001";
-    for (const [purpose, model] of [
-      ["reasoning", LIVE_MODEL],
-      ["coding", LIVE_MODEL],
-      ["fast", FAST_MODEL],
-    ] as const) {
+    // T11(c): burada `if (!providerId) return;` vardı — bir boot yarışını
+    // kaybetmek TÜM fonksiyonu iptal ediyordu, yani aşağıdaki Claude CLI /
+    // Gemini / OpenAI / Ollama zinciri hiç tohumlanmıyordu. 9980503'ün
+    // düzelttiği hatanın aynı sınıfı: iç bloktan dış akışı sonlandırmak.
+    // Yarışı kaybettiysek YALNIZ Anthropic bloğunu atla; zincir kurulmalı.
+    if (providerId) {
+      // A1 (26 §3.1): seed the price list into `model_providers.pricing` in the
+      // document shape so Settings → Providers can edit it at runtime. Only
+      // written while the column still holds its empty default — an operator's
+      // edits are never overwritten on boot.
       await db
-        .insert(modelProfiles)
-        .values({ companyId, purpose, providerId, model, priority: 0 })
-        .onConflictDoNothing();
+        .update(modelProviders)
+        .set({ pricing: seedPricingDocument("anthropic") })
+        .where(
+          and(
+            eq(modelProviders.id, providerId),
+            sql`${modelProviders.pricing} = '{}'::jsonb`,
+          ),
+        );
+
+      const LIVE_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+      const FAST_MODEL =
+        process.env.ANTHROPIC_FAST_MODEL ?? "claude-haiku-4-5-20251001";
+      for (const [purpose, model] of [
+        ["reasoning", LIVE_MODEL],
+        ["coding", LIVE_MODEL],
+        ["fast", FAST_MODEL],
+      ] as const) {
+        await db
+          .insert(modelProfiles)
+          .values({ companyId, purpose, providerId, model, priority: 0 })
+          .onConflictDoNothing();
+      }
     }
   }
 

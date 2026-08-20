@@ -48,6 +48,14 @@ export const ASSIGNED_STALE_MS = 30 * 60 * 1000;
  * DRAFT+sahipsiz kaldı ve DAG ilk delegasyondan sonra bir daha ilerlemedi).
  */
 export const ORPHAN_CHILD_STALE_MS = 5 * 60 * 1000;
+/**
+ * Çocuksuz konteyner eşiği [WRITER-DECISION]: bir hedef/girişim, sahibi onu
+ * bölene kadar meşru olarak IN_PROGRESS'te durur — CEO'nun ilk turu dakikalar
+ * sürebilir. Yarım saat sonra HİÇ çocuğu yoksa bölünme olmamış demektir;
+ * yetim-çocuk eşiğini (5 dk) burada kullanmak sağlıklı bir decompose'u
+ * yarıda yakalardı.
+ */
+export const CONTAINER_CHILDLESS_STALE_MS = 30 * 60 * 1000;
 
 export interface StuckTaskFinding {
   companyId: string;
@@ -62,7 +70,8 @@ export interface StuckTaskFinding {
     | "assigned_too_long"
     | "rework_stalled"
     | "orphan_child_assigned"
-    | "review_reopened";
+    | "review_reopened"
+    | "container_childless";
   /** Sahibinin canlı oturumu yoksa çağıran workflow'u yeniden başlatmalı. */
   needsWorkflowRestart: boolean;
   stuckForMs: number;
@@ -105,7 +114,13 @@ const REWORK_STATUSES: ReadonlySet<string> = new Set([
 export async function sweepStuckTasks(
   db: Db,
   guardedDb: GuardedDb,
-  opts: { now?: Date; waitForMs?: number; assignedStaleMs?: number; orphanStaleMs?: number } = {},
+  opts: {
+    now?: Date;
+    waitForMs?: number;
+    assignedStaleMs?: number;
+    orphanStaleMs?: number;
+    containerChildlessStaleMs?: number;
+  } = {},
 ): Promise<StuckSweepResult> {
   const now = opts.now ?? new Date();
   const waitForMs = opts.waitForMs ?? DEFAULT_WAIT_FOR_MS;
@@ -320,14 +335,14 @@ export async function sweepStuckTasks(
     }
   }
 
-  // 4. REVIEW-YETİMLERİ (P0-2): request_review görevi REVIEW'a taşıdı ama o
+  // 4. İNCELEME/QA YETİMLERİ (P0-2 + T11(b)): request_review görevi REVIEW'a taşıdı ama o
   // an uygun reviewer yoktu (REVIEW_NO_ELIGIBLE_REVIEWER sessizce yutulur) →
   // review satırı yok, görevi kapatacak zincir hiç başlamadı ve görev süresiz
   // REVIEW'da asılı. Kadro sonradan tamamlanınca (ör. Agent Factory lideri
   // işe aldı) sweep incelemeyi yeniden açar; reviewWorkflow'u başlatmak
   // Temporal istemcisini tutan katmanın işi (review alanı finding'de).
   const reviewOrphanRows = await db.execute(sql`
-    SELECT t.id, t.company_id, t.number, t.title, t.owner_agent_id,
+    SELECT t.id, t.company_id, t.number, t.title, t.owner_agent_id, t.status,
            COALESCE(
              (SELECT max(e.occurred_at) FROM events e
                WHERE e.company_id = t.company_id AND e.task_id = t.id
@@ -335,7 +350,7 @@ export async function sweepStuckTasks(
              t.created_at
            ) AS since
       FROM ${tasks} t
-     WHERE t.status = 'REVIEW' AND t.owner_agent_id IS NOT NULL
+     WHERE t.status IN ('REVIEW', 'QA') AND t.owner_agent_id IS NOT NULL
        -- T10 (Oscar verify): konteynerleri (goal/initiative) inceleme-yetimi
        -- sweep'ine ASLA sokma. Konteyner 07 §2 gereği roll-up ile kapanır;
        -- buraya girerse review satırı açılır → QA → mergeIfEligible fence'i
@@ -353,6 +368,7 @@ export async function sweepStuckTasks(
     number: number;
     title: string;
     owner_agent_id: string;
+    status: string;
     since: string | Date;
   }>).filter((o) => now.getTime() - new Date(o.since).getTime() >= orphanStaleMs);
 
@@ -364,6 +380,11 @@ export async function sweepStuckTasks(
         const { review } = await reviewsService.requestReview(ctx, {
           taskId: orphan.id,
           authorAgentId: orphan.owner_agent_id,
+          // T11(b): QA turu açılamadığında görev SESSİZCE QA'da asılı kalıyordu
+          // — bu sweep yalnız REVIEW'a bakıyordu. Aynı yetimlik, bir sonraki
+          // aşamada. Durum QA ise yeniden açılan tur da QA turudur; 'code'
+          // açmak incelemeyi bir adım geri sarardı.
+          kind: orphan.status === "QA" ? "qa" : "code",
         });
         if (!review.reviewerAgentId) continue;
         result.findings.push({
@@ -388,6 +409,92 @@ export async function sweepStuckTasks(
           console.warn("review-orphan sweep failed", err);
         }
       }
+    }
+  }
+
+  // 5. ÇOCUKSUZ KONTEYNERLER (T11a): 07 §2'ye göre hedef/girişim kendi işini
+  // YAPMAZ, çocuklarından TÜREYEREK kapanır. Sahibi hiç bölmeden turunu
+  // kapatırsa (ya da complete_task'ı konteyner fence'ine çarparsa) ortada
+  // kapatacak çocuk yoktur: rollUpContainer 0 çocukta erken döner ve bu sweep
+  // IN_PROGRESS'i hiç taramaz. Sonuç: konteyner SONSUZA KADAR IN_PROGRESS'te
+  // durur ve hiçbir mekanizma bunu söylemez.
+  //
+  // Sweep burada görevi TAŞIMAZ — konteynerin durumunu roll-up yazar (INV-13)
+  // ve "bu hedef nasıl bölünmeli" bir insan/yönetici kararıdır. Yaptığı şey
+  // sessizliği bozmaktır: bir kez eskale eder (tekrar tekrar değil; işaret
+  // olay defterindeki guardFlag'dir) ve bulguyu çağırana bildirir.
+  const containerStaleMs = opts.containerChildlessStaleMs ?? CONTAINER_CHILDLESS_STALE_MS;
+  const childlessRows = await db.execute(sql`
+    SELECT t.id, t.company_id, t.number, t.title, t.owner_agent_id,
+           COALESCE(
+             (SELECT max(e.occurred_at) FROM events e
+               WHERE e.company_id = t.company_id AND e.task_id = t.id
+                 AND e.type = 'task.status.changed'),
+             t.created_at
+           ) AS since
+      FROM ${tasks} t
+     WHERE t.kind IN ('goal', 'initiative')
+       AND t.status = 'IN_PROGRESS'
+       AND NOT EXISTS (
+         SELECT 1 FROM ${tasks} c
+          WHERE c.company_id = t.company_id AND c.parent_id = t.id
+       )
+       -- bir kez söylenir: aynı konteyner için ikinci bir eskalasyon üretme
+       AND NOT EXISTS (
+         SELECT 1 FROM events e
+          WHERE e.company_id = t.company_id AND e.task_id = t.id
+            AND e.type = 'agent.escalated'
+            AND e.payload->>'guardFlag' = 'container_childless'
+       )
+  `);
+  const childless = (childlessRows.rows as Array<{
+    id: string;
+    company_id: string;
+    number: number;
+    title: string;
+    owner_agent_id: string | null;
+    since: string | Date;
+  }>).filter((c) => now.getTime() - new Date(c.since).getTime() >= containerStaleMs);
+
+  for (const container of childless) {
+    const ctx = companyContext(container.company_id);
+    const manager = container.owner_agent_id
+      ? await managerOf(db, container.company_id, container.owner_agent_id)
+      : null;
+    try {
+      await guardedDb.transaction(async (tx) =>
+        appendEvents(tx, ctx, [
+          {
+            type: "agent.escalated",
+            actor: { kind: "system", id: null },
+            taskId: container.id,
+            ...(container.owner_agent_id && { agentId: container.owner_agent_id }),
+            payload: {
+              reason: `TASK-${container.number} bir konteyner (hedef/girişim) ama HİÇ alt görevi yok ve ${Math.round(containerStaleMs / 60000)} dakikadır IN_PROGRESS: bölünme hiç olmamış, kapanışı türetecek çocuk yok.`,
+              attempted: ["roll-up (0 çocukta erken döner)", "stuck sweep (IN_PROGRESS taranmaz)"],
+              recommendation: "Hedefi alt görevlere böl ya da iptal et — konteyner kendi başına kapanamaz.",
+              guardFlag: "container_childless",
+              ...(manager && { toAgentId: manager }),
+              ...(manager ? {} : { toFounder: true }),
+            },
+          },
+        ]),
+      );
+      result.findings.push({
+        companyId: container.company_id,
+        taskId: container.id,
+        taskNumber: Number(container.number),
+        title: container.title,
+        ownerAgentId: container.owner_agent_id,
+        managerAgentId: manager,
+        kind: "container_childless",
+        // konteynerin sahibinin döngüsünü yeniden başlatmak İŞE YARAMAZ:
+        // eksik olan bir tur değil, bir karar (böl ya da iptal et)
+        needsWorkflowRestart: false,
+        stuckForMs: now.getTime() - new Date(container.since).getTime(),
+      });
+    } catch (err) {
+      console.warn("childless-container sweep failed", err);
     }
   }
 
@@ -422,11 +529,13 @@ export function describeStuckTask(finding: StuckTaskFinding): string {
       ? `${minutes} dakikadır yanıt bekliyor (wait_for süresi doldu, BLOCKED'a alındı)`
       : finding.kind === "orphan_child_assigned"
         ? `${minutes} dakikadır sahipsizdi — Scheduler seçimiyle delege edildi`
-        : finding.kind === "review_reopened"
-          ? `${minutes} dakikadır reviewersız REVIEW'daydı — inceleme yeniden açıldı`
-          : finding.kind === "rework_stalled"
-            ? `${minutes} dakikadır düzeltme bekliyor ama tur hiç başlamadı`
-            : `${minutes} dakikadır atanmış ama başlamadı`;
+        : finding.kind === "container_childless"
+          ? `${minutes} dakikadır HİÇ alt görevi olmayan bir konteyner olarak IN_PROGRESS — bölünmesi ya da iptali gerekiyor`
+          : finding.kind === "review_reopened"
+            ? `${minutes} dakikadır incelemecisiz REVIEW/QA'daydı — tur yeniden açıldı`
+            : finding.kind === "rework_stalled"
+              ? `${minutes} dakikadır düzeltme bekliyor ama tur hiç başlamadı`
+              : `${minutes} dakikadır atanmış ama başlamadı`;
   const restart = finding.needsWorkflowRestart ? " — ajanın döngüsü çalışmıyor, yeniden başlatılıyor" : "";
   return `TASK-${finding.taskNumber} "${finding.title}" ${what}${restart}.`;
 }

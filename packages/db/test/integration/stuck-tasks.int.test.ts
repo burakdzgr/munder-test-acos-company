@@ -305,6 +305,140 @@ describe("stuck-task sweep (09 §9, 07 §8)", { timeout: 60_000 }, () => {
     expect(again.findings.filter((f) => f.taskId === task.id)).toHaveLength(0);
   });
 
+  it("QA'da incelemecisiz asılı kalan görevi de yeniden açar — ve turu QA olarak açar (T11b)", async () => {
+    // Aynı yetimlik, bir sonraki aşamada: QA turu açılamazsa görev SESSİZCE
+    // QA'da kalıyordu, çünkü bu sweep yalnız status='REVIEW'a bakıyordu.
+    const [project] = await db
+      .insert(projects)
+      .values({
+        companyId,
+        slug: `qaproj${(counter += 1)}`,
+        name: "qaproj",
+        objectiveMd: "x",
+        status: "executing",
+        createdByUserId: founderUserId,
+      })
+      .returning();
+    const [repo] = await db
+      .insert(repositories)
+      .values({
+        companyId,
+        projectId: project!.id,
+        name: "qarepo",
+        barePath: `/data/repos/${project!.id}.git`,
+      })
+      .returning();
+    const task = await service.create(
+      ctx,
+      { kind: "task", title: `QA'da asılı iş ${counter}`, objective: "x", projectId: project!.id },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, task.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, task.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, task.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, task.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+    await db.insert(workspaces).values({
+      companyId,
+      projectId: project!.id,
+      taskId: task.id,
+      repositoryId: repo!.id,
+      agentId: OWNER,
+      isolationLevel: "coding",
+      image: "acos/workspace-node",
+      branch: `task/${counter}-qa`,
+      status: "in_use",
+    });
+    await state.transition(ctx, task.id, "REVIEW", { kind: "agent", agentId: OWNER });
+    // incelemeci onayladı, görev QA'ya geçti — ama QA turu açılamadı
+    await db
+      .update(tasks)
+      .set({ status: "QA" })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, task.id)));
+
+    const later = new Date(Date.now() + 6 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    const finding = result.findings.find((f) => f.taskId === task.id);
+    // ÖNCEDEN: bu görev hiç görülmezdi
+    expect(finding).toBeDefined();
+    expect(finding!.kind).toBe("review_reopened");
+    const rows = await db
+      .select({ kind: reviews.kind, status: reviews.status })
+      .from(reviews)
+      .where(and(eq(reviews.companyId, companyId), eq(reviews.taskId, task.id)));
+    expect(rows).toHaveLength(1);
+    // QA'daki bir görev için 'code' turu açmak incelemeyi bir adım geri sarardı
+    expect(rows[0]!.kind).toBe("qa");
+  });
+
+  it("HİÇ çocuğu olmayan konteyneri bildirir ve BİR KEZ eskale eder (T11a)", async () => {
+    // 07 §2: konteyner kendi işini yapmaz, çocuklarından türeyerek kapanır.
+    // Sahibi hiç bölmediyse kapanışı türetecek çocuk yoktur; roll-up 0 çocukta
+    // erken döner ve bu sweep IN_PROGRESS'i hiç taramazdı → sonsuz IN_PROGRESS.
+    counter += 1;
+    const goal = await service.create(
+      ctx,
+      { kind: "goal", title: `Bölünmemiş hedef ${counter}`, objective: "x" },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, goal.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, goal.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, goal.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, goal.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+
+    // eşik dolmadan dokunmaz: CEO hâlâ bölüyor olabilir
+    const early = await sweepStuckTasks(db, guardedDb);
+    expect(early.findings.filter((f) => f.taskId === goal.id)).toHaveLength(0);
+
+    const later = new Date(Date.now() + 31 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    const finding = result.findings.find((f) => f.taskId === goal.id);
+    expect(finding).toBeDefined();
+    expect(finding!.kind).toBe("container_childless");
+    // eksik olan bir tur değil, bir KARAR (böl ya da iptal et) — döngüyü
+    // yeniden başlatmak hiçbir şey çözmez
+    expect(finding!.needsWorkflowRestart).toBe(false);
+    // sweep konteynerin durumunu YAZMAZ: onu roll-up yazar (INV-13)
+    expect(await statusOf(goal.id)).toBe("IN_PROGRESS");
+
+    const escalations = await db
+      .select({ id: events.id })
+      .from(events)
+      .where(
+        and(
+          eq(events.companyId, companyId),
+          eq(events.taskId, goal.id),
+          eq(events.type, "agent.escalated"),
+        ),
+      );
+    expect(escalations).toHaveLength(1);
+
+    // 30 dakikada bir aynı şeyi bağırmaz: ikinci sweep sessiz kalır
+    const again = await sweepStuckTasks(db, guardedDb, { now: later });
+    expect(again.findings.filter((f) => f.taskId === goal.id)).toHaveLength(0);
+  });
+
+  it("çocuğu OLAN konteyner sweep'e hiç girmez", async () => {
+    counter += 1;
+    const goal = await service.create(
+      ctx,
+      { kind: "goal", title: `Bölünmüş hedef ${counter}`, objective: "x" },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, goal.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, goal.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, goal.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, goal.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+    await service.create(
+      ctx,
+      { kind: "initiative", parentId: goal.id, title: `Girişim ${counter}`, objective: "x" },
+      { kind: "founder" },
+    );
+
+    const later = new Date(Date.now() + 31 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    expect(result.findings.filter((f) => f.kind === "container_childless" && f.taskId === goal.id)).toHaveLength(0);
+  });
+
   it("canlı oturumu olan görev için yeniden başlatma istenmez", async () => {
     const task = await assignedTask("Çalışan iş");
     await db.insert(agentSessions).values({

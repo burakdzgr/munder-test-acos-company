@@ -483,8 +483,30 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
       if (taskRow && ownerTurn.includes(taskRow.status) && taskRow.ownerAgentId === input.agentId) {
         await taskState
           .transition(ctx, input.taskId, "IN_PROGRESS", { kind: "agent", agentId: input.agentId })
-          .catch(() => {
-            /* yarışta başkası taşımış olabilir; durum zaten ilerlemiştir */
+          .catch((err: unknown) => {
+            // T11(d): burası sessizce yutuyordu. Yarışta başkası taşımışsa
+            // sorun yok — AMA gerçek bir DB/izin hatası da aynı sessizliğe
+            // düşüyordu: görev ASSIGNED kalıyor, üç park yolu da
+            // `status === "IN_PROGRESS"` koşuluna bağlı olduğu için hepsi
+            // no-op oluyor ve T12'nin semptomu İZ BIRAKMADAN geri geliyordu.
+            // Yutmaya devam ediyoruz (tur sürmeli) ama artık görünür:
+            // konsolda uyarı + Founder'ın canlı konsoluna bir olay.
+            console.warn(
+              JSON.stringify({
+                msg: "owner-turn transition to IN_PROGRESS failed",
+                taskId: input.taskId,
+                agentId: input.agentId,
+                from: taskRow?.status,
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
+            rt(input, "agent.status", {
+              payload: {
+                status: "running",
+                activity: "WORKING",
+                note: `IN_PROGRESS geçişi başarısız (${taskRow?.status} kaldı)`,
+              },
+            });
           });
       }
       rt(input, "agent.status", { payload: { status: "running", activity: "WORKING" } });
