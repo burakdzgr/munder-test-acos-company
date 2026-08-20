@@ -74,6 +74,15 @@ export interface ToolInvokeRequest {
   scopeRelation?: ScopeRelation | undefined;
   /** Temporal activity attempt key — replays return the recorded result. */
   idempotencyKey?: string | undefined;
+  /**
+   * E4/A (T30): AUDIT + POLICY ONLY — validate, authorize, write the audit
+   * row, but do NOT dispatch. The CLI-in-container runs its own built-in
+   * Bash/Read/Edit/Write inside the sandbox and asks the gateway first (its
+   * PreToolUse hook); executing it a second time here would be wrong AND
+   * would double the side effect. INV-3 is preserved because the per-op
+   * decision and the `tool_invocations` row still happen.
+   */
+  auditOnly?: boolean | undefined;
 }
 
 export interface ToolInvokeResponse {
@@ -643,6 +652,41 @@ export class ToolGateway {
     if (decision.verdict !== "allow") {
       await this.recordIdempotent(ctx, req, requestHash, base);
       return base;
+    }
+
+    // ---- 7a. audit-only (E4/A): karar verildi, satır yazıldı, ÇALIŞTIRMA YOK.
+    // Sandbox içindeki CLI komutu kendisi koşturur; burada ikinci kez koşmak
+    // yan etkiyi ikiye katlardı. Maliyet 0'dır — bu satır bir icra değil, bir
+    // karardır; 0 maliyetli çağrı zaten defter kaydı üretmez (26 §2).
+    if (req.auditOnly) {
+      await this.db.transaction(async (tx) => {
+        await tx
+          .update(toolInvocations)
+          .set({
+            status: "succeeded",
+            costCents: 0,
+            durationMs: 0,
+            finishedAt: this.now(),
+            resultSummary: "builtin allowed; executed by the CLI inside the sandbox",
+          })
+          .where(
+            and(eq(toolInvocations.companyId, ctx.companyId), eq(toolInvocations.id, invocationId)),
+          );
+        await emitDomainEvent(tx, ctx, {
+          type: "tool.invocation.completed",
+          actor,
+          ...refs,
+          payload: {
+            toolName: def.name,
+            riskClass: effectiveRisk,
+            costCents: 0,
+            resultDigest: "builtin:audit-only",
+          },
+        });
+      });
+      const allowed: ToolInvokeResponse = { ...base, status: "succeeded", costCents: 0 };
+      await this.recordIdempotent(ctx, req, requestHash, allowed);
+      return allowed;
     }
 
     // ---- 7b. dispatch (S2 credentials resolved HERE, never earlier) ----

@@ -94,6 +94,7 @@ async function main(): Promise<void> {
     autologinFounder: config.security.autologinFounder,
     sandboxManagerUrl: config.sandbox.managerUrl,
     mcpPublicUrl: config.agentRuntime.mcpPublicUrl,
+    maxLiveSessionsPerCompany: config.agentRuntime.maxLiveSessionsPerCompany,
     healthCheckers: buildCheckers({
       pool,
       natsUrl: config.nats.url,

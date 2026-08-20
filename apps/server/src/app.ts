@@ -115,6 +115,8 @@ export interface BuildAppOptions {
   sandboxManagerUrl?: string;
   /** E4/A (T30): konteynerdeki CLI'ın çağıracağı MCP adresi (workspace ağı). */
   mcpPublicUrl?: string;
+  /** E4/A (T30): şirket başına eşzamanlı canlı oturum tavanı. */
+  maxLiveSessionsPerCompany?: number;
   /** Single-user mode (AUTH_AUTOLOGIN): mint a Founder session for cookie-less GETs. */
   autologinFounder?: boolean;
 }
@@ -484,6 +486,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       return options.internalApiToken;
     },
     publicMcpUrl: () => options.mcpPublicUrl ?? "http://server:3000/mcp/v1",
+    maxLiveSessionsPerCompany: () => options.maxLiveSessionsPerCompany ?? 3,
   });
 
   // ---------- E2/W3+W5: düzenlenebilir kadro önerisi (T19) ----------

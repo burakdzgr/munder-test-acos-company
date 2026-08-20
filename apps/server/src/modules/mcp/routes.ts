@@ -9,7 +9,8 @@ import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { timingSafeEqual } from "node:crypto";
-import { companyContext, type GuardedDb } from "@acos/db";
+import { checkSessionGate, companyContext, type GuardedDb } from "@acos/db";
+import { auditBuiltinTool } from "./builtin-audit.js";
 import type { ToolGateway } from "../tools/gateway.js";
 import { handleMcpRpc, type JsonRpcRequest } from "./server.js";
 import {
@@ -26,6 +27,8 @@ export interface McpRoutesDeps {
   internalApiToken: () => string;
   /** Konteynerin çağıracağı mutlak adres (workspace ağından erişilebilir). */
   publicMcpUrl: () => string;
+  /** E4/A: şirket başına eşzamanlı canlı oturum tavanı (broker admission). */
+  maxLiveSessionsPerCompany: () => number;
 }
 
 function bearerOk(header: string | undefined, token: string): boolean {
@@ -107,6 +110,95 @@ export async function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDep
       return reply.status(result.revoked ? 200 : 404).send(result);
     },
   );
+
+  // --- broker (host): oturum kabulü (şirket eşzamanlılık tavanı) --------
+  // Kevin'in broker'ı CLI sürecini DOĞURMADAN ÖNCE burayı sorar. Tavanın
+  // kendisi Scheduler'ın (bu uç yalnız aynı kapıyı — @acos/db checkSessionGate
+  // — okur), yani iki farklı yerde iki farklı tavan oluşamaz.
+  //
+  // SERBEST BIRAKMA UCU YOK, bilerek: yer, `agent_sessions` satırı
+  // starting/running olmaktan çıkınca boşalır. Broker'a ayrı bir "release"
+  // vermek, oturum yaşam döngüsünün İKİNCİ bir sahibini yaratırdı; broker
+  // çökerse yer, oturumu kapatan mevcut yollarla (workflow kapanışı + 30 dk
+  // stuck sweep) yine boşalır.
+  typed.post(
+    "/internal/v1/agent-sessions/admit",
+    {
+      schema: {
+        body: z.object({
+          companyId: z.uuid(),
+          agentId: z.uuid(),
+          taskId: z.uuid(),
+        }),
+        tags: ["mcp"],
+        hide: true,
+      },
+    },
+    async (request, reply) => {
+      if (!bearerOk(request.headers.authorization, deps.internalApiToken())) {
+        return reply
+          .status(401)
+          .send({ code: "unauthenticated", message: "internal token required" });
+      }
+      const cap = deps.maxLiveSessionsPerCompany();
+      const gate = await checkSessionGate(deps.guardedDb(), {
+        companyId: request.body.companyId,
+        agentId: request.body.agentId,
+        taskId: request.body.taskId,
+        maxLiveSessionsPerCompany: cap,
+      });
+      if (gate.ok) return { admitted: true, cap };
+      return {
+        admitted: false,
+        cap,
+        reason: gate.reason,
+        liveSessions: gate.liveSessions,
+        // tavan sürekli değişen bir şey değil; agresif yoklama makineyi
+        // yormasın diye ölçülü bir geri çekilme öneriyoruz
+        retryAfterMs: 30_000,
+      };
+    },
+  );
+
+  // --- konteyner: CLI'ın YERLEŞİK araçları için denetim + politika ------
+  // Kevin'in PreToolUse kancası her Bash/Read/Edit/Write'tan ÖNCE burayı
+  // çağırır; INV-3 böylece korunur (işlem başına karar + tool_invocations
+  // satırı). Çalıştırma CLI'da kalır — gateway koşturmaz (auditOnly).
+  //
+  // Bu uç /internal/* altında ama SADECE oturum jetonunu kabul eder: onu
+  // çağıran taraf KONTEYNERDİR ve şirket çapındaki internal token oraya
+  // hiçbir koşulda girmez.
+  app.post("/internal/v1/tool-invocations/builtin", { schema: { hide: true } }, async (request, reply) => {
+    const auth = await verifyMcpToken(deps.guardedDb(), bearerValue(request.headers.authorization));
+    if (!auth.ok) {
+      const status =
+        auth.failure.code === "forbidden" ? 403 : auth.failure.code === "conflict" ? 409 : 401;
+      return reply.status(status).send({ allow: false, ...auth.failure });
+    }
+    const body = z
+      .object({
+        tool: z.string().min(1).max(80),
+        input: z.record(z.string(), z.unknown()).optional(),
+        args: z.record(z.string(), z.unknown()).optional(),
+      })
+      .safeParse(request.body);
+    if (!body.success) {
+      // fail-closed: anlamadığımız istek geçmez
+      return reply
+        .status(400)
+        .send({ allow: false, reason: "validation_failed", issues: body.error.issues });
+    }
+    const result = await auditBuiltinTool(deps.gateway(), auth.identity, {
+      tool: body.data.tool,
+      args: body.data.args ?? body.data.input ?? {},
+    });
+    await touchMcpSession(
+      deps.guardedDb(),
+      companyContext(auth.identity.companyId),
+      auth.identity.mcpSessionId,
+    ).catch(() => {});
+    return reply.status(200).send(result);
+  });
 
   // --- konteyner: MCP (JSON-RPC 2.0) -----------------------------------
   app.post("/mcp/v1", { schema: { hide: true } }, async (request, reply) => {

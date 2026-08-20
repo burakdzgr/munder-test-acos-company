@@ -26,6 +26,7 @@ import {
   type GuardedDb,
 } from "@acos/db";
 import {
+  agentSessions,
   agents,
   orgEdges,
   orgUnits,
@@ -58,8 +59,12 @@ let closedTaskId = "";
 let sessionCookie = "";
 let csrfToken = "";
 
+/** Yerleşik araç denetimi gateway'i ÇALIŞTIRMAMALI — sayaç bunu kanıtlar. */
+let fsShellDispatches = 0;
+
 const fakePort: ToolDispatchPort = {
   async dispatch({ tool }) {
+    if (tool.name === "terminal.run" || tool.name.startsWith("fs.")) fsShellDispatches += 1;
     if (tool.name === "task.query") {
       return { output: { tasks: [], total: 0, provenance: "platform" } };
     }
@@ -354,6 +359,112 @@ describe("MCP tool-gateway (E4/A)", { timeout: 300_000 }, () => {
     });
     // oturum jetonu YENİ jeton bastıramaz — yetki yükseltme yolu kapalı
     expect(withSessionToken.statusCode).toBe(401);
+  });
+
+  it("CLI'ın YERLEŞİK aracı denetlenir: karar + tool_invocations satırı, ÇALIŞTIRMA YOK", async () => {
+    // Kevin'in PreToolUse kancası: Read/Bash/Edit/Write önce buraya sorar.
+    // terminal.run takıma verilir; kanca 'Bash' der, gateway 'terminal.run'
+    // görür — çeviri sunucuda, TEK yerde.
+    await db.insert(toolPermissions).values({
+      companyId,
+      toolName: "terminal.run",
+      subjectKind: "org_unit",
+      subjectId: unitId,
+      constraints: {},
+    });
+    const dev = await mint({ agentId: DEV, taskId: openTaskId });
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/internal/v1/tool-invocations/builtin",
+      headers: { authorization: `Bearer ${dev.sessionToken}` },
+      payload: { tool: "Bash", input: { command: "pnpm test", cwd: "." } },
+    });
+    expect(allowed.statusCode).toBe(200);
+    const decision = allowed.json();
+    expect(decision.allow, JSON.stringify(decision)).toBe(true);
+    expect(decision.toolName).toBe("terminal.run");
+    expect(decision.invocationId).toBeTruthy();
+
+    const [row] = await db
+      .select()
+      .from(toolInvocations)
+      .where(
+        and(eq(toolInvocations.companyId, companyId), eq(toolInvocations.id, decision.invocationId)),
+      );
+    // INV-3: işlem başına satır VAR…
+    expect(row!.toolName).toBe("terminal.run");
+    expect(row!.agentId).toBe(DEV);
+    expect(row!.decision).toBe("allow");
+    // …ama gateway KOŞTURMADI: komutu CLI kendi kutusunda çalıştırır, burada
+    // ikinci kez koşmak yan etkiyi ikiye katlardı. Maliyet 0, defter kaydı yok.
+    expect(row!.costCents).toBe(0);
+    expect(row!.resultSummary).toContain("executed by the CLI");
+    expect(fsShellDispatches).toBe(0);
+  });
+
+  it("yerleşik araç denetimi FAIL-CLOSED: izinsiz araç ve TANINMAYAN araç geçmez", async () => {
+    const dev = await mint({ agentId: DEV, taskId: openTaskId });
+    // fs.write grant'ı YOK → kanca durdurur
+    const noGrant = await app.inject({
+      method: "POST",
+      url: "/internal/v1/tool-invocations/builtin",
+      headers: { authorization: `Bearer ${dev.sessionToken}` },
+      payload: { tool: "Write", input: { file_path: "src/x.ts", content: "x" } },
+    });
+    expect(noGrant.json().allow).toBe(false);
+    expect(noGrant.json().reason).toBe("NO_PERMISSION_GRANT");
+
+    // haritada olmayan yerleşik araç: bilinmeyeni geçirmek denetlenmemiş bir
+    // yüzeyi sessizce açardı
+    const unknown = await app.inject({
+      method: "POST",
+      url: "/internal/v1/tool-invocations/builtin",
+      headers: { authorization: `Bearer ${dev.sessionToken}` },
+      payload: { tool: "WebFetch", input: { url: "https://example.com" } },
+    });
+    expect(unknown.json().allow).toBe(false);
+    expect(unknown.json().reason).toContain("UNMAPPED_BUILTIN");
+
+    // jetonsuz çağrı hiç geçmez
+    const anonymous = await app.inject({
+      method: "POST",
+      url: "/internal/v1/tool-invocations/builtin",
+      payload: { tool: "Bash", input: { command: "ls" } },
+    });
+    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.json().allow).toBe(false);
+  });
+
+  it("broker oturum kabulü aynı tavanı okur ve reddi geri çekilmeyle bildirir", async () => {
+    const admit = async () =>
+      app.inject({
+        method: "POST",
+        url: "/internal/v1/agent-sessions/admit",
+        headers: { authorization: `Bearer ${INTERNAL_TOKEN}` },
+        payload: { companyId, agentId: CEO, taskId: openTaskId },
+      });
+    expect((await admit()).json()).toMatchObject({ admitted: true });
+
+    // ajan meşgulse kabul edilmez (aynı kapı, iki yerde iki tavan yok)
+    await db.insert(agentSessions).values({
+      companyId,
+      agentId: CEO,
+      taskId: null,
+      workflowId: "wf-admit",
+      runId: "run-admit",
+      status: "running",
+    });
+    const refused = (await admit()).json();
+    expect(refused.admitted).toBe(false);
+    expect(refused.reason).toBe("agent_busy");
+    expect(refused.retryAfterMs).toBeGreaterThan(0);
+
+    const anonymous = await app.inject({
+      method: "POST",
+      url: "/internal/v1/agent-sessions/admit",
+      payload: { companyId, agentId: CEO, taskId: openTaskId },
+    });
+    expect(anonymous.statusCode).toBe(401);
   });
 
   it("initialize + ping MCP el sıkışmasını tamamlar, bildirim 202 döner", async () => {
