@@ -141,6 +141,37 @@ check(
 );
 await page.screenshot({ path: `${SHOTS}/w2-03-new-company.png` });
 
+// --- Açılış sayfası da AYNI modali kullanıyor (E2/W2 ikinci kapı) ---
+// 1) hiç şirket yokken: karşılama ekranı → modal → kurucu CEO
+companies = [];
+calls.length = 0;
+await page.goto("http://localhost:5199/", { waitUntil: "networkidle" });
+await page.getByTestId("company-wizard").waitFor({ timeout: 15_000 });
+check("boş kurulum ekranı tek eyleme indi", await page.getByTestId("company-create-open").isVisible());
+await page.getByTestId("company-create-open").click();
+await page.getByTestId("create-company-modal").waitFor({ timeout: 10_000 });
+await page.fill('input[name="companyName"]', "İlk Şirket");
+await page.fill('input[name="companyCeoName"]', "Aylin Vural");
+await page.getByTestId("company-create-submit").click();
+await page.getByTestId("company-created").waitFor({ timeout: 20_000 });
+check(
+  "açılış sayfasından açılan şirket de CEO'lu doğdu",
+  calls.some((c) => c.includes("/org/positions") && c.includes("executive")) &&
+    calls.some((c) => c.includes(`/companies/${NEW_CID}/agents`)),
+  calls.map((c) => c.split(" ")[0].replace("/api/v1", "")).join(" · "),
+);
+await page.screenshot({ path: `${SHOTS}/w2-04-landing-empty.png` });
+
+// 2) şirket listesi varken: "Yeni şirket ekle" de aynı modali açıyor
+await page.goto("http://localhost:5199/", { waitUntil: "networkidle" });
+await page.getByTestId("company-list").waitFor({ timeout: 15_000 });
+await page.getByTestId("company-create-open").click();
+check(
+  "liste ekranındaki 'Yeni şirket ekle' de aynı modali açıyor",
+  await page.getByTestId("company-with-ceo").isVisible(),
+);
+await page.screenshot({ path: `${SHOTS}/w2-05-landing-list.png` });
+
 console.log(results.join("\n"));
 await browser.close();
 process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
