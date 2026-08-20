@@ -10,12 +10,13 @@ import { useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { cn, presenceColor } from "@acos/ui";
 import type { CompanyAgentSession, TerminalSessionDto } from "@acos/contracts";
-import { api } from "../../lib/api.js";
+import { api, keys } from "../../lib/api.js";
 import { useTeamMemberSet } from "../../lib/teamFilter.js";
 import { usePresence } from "../../stores/presence.js";
 import { useFocus } from "../../stores/focus.js";
 import { useTerminalGrid, type TerminalDensity } from "../../stores/terminalGrid.js";
 import { AgentSessionCell, FounderDirectiveForm, SessionFocusModal } from "./AgentSessionCell.js";
+import { pendingRows, type PendingRow } from "./pending.js";
 import { GridXterm } from "./GridXterm.js";
 
 const DENSITY_FONT: Record<TerminalDensity, number> = { S: 12, M: 10, L: 9 };
@@ -188,6 +189,42 @@ type GridCell =
   | { key: string; kind: "session"; session: CompanyAgentSession; ptys: TerminalSessionDto[] }
   | { key: string; kind: "pty"; session: TerminalSessionDto };
 
+/** Hayalet hücre: ajanın canlı oturumu yok ama açık görevi var. Terminal
+ *  göstermez — çünkü GERÇEKTEN akan bir şey yok; uydurma bir konsol çizmek
+ *  Founder'ı yanıltırdı. Söylediği tek şey doğru olan şey: kim, hangi işte,
+ *  neden ekranda akış yok. */
+function PendingCell({ row }: { row: PendingRow }) {
+  const tone =
+    row.kind === "parked"
+      ? "text-[#4cc2ff] border-[#4cc2ff]/40"
+      : row.kind === "queued"
+        ? "text-acos-fg2 border-acos-line"
+        : "text-[#e8c268] border-[#e8c268]/40";
+  return (
+    <div
+      data-testid={`pending-cell-${row.kind}`}
+      data-agent-id={row.agentId}
+      className="flex min-h-0 flex-col rounded-md border border-dashed border-acos-line bg-acos-bg1/60"
+    >
+      <div className="flex h-6 shrink-0 items-center gap-1.5 border-b border-acos-line/60 px-2 text-[9.5px]">
+        <span className="h-1.5 w-1.5 rounded-full bg-acos-fg2/50" />
+        <span className="truncate font-semibold text-acos-fg1">{row.agentName}</span>
+        <span className="shrink-0 text-acos-fg2">TASK-{row.taskNumber}</span>
+        <span className={cn("ml-auto shrink-0 rounded-full border px-1.5 text-[8.5px] font-semibold", tone)}>
+          {row.kind === "parked" ? "beklemede" : row.kind === "queued" ? "sırada" : "kopuk"}
+        </span>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col justify-center gap-1 px-3 text-[10px]">
+        <p className="truncate text-acos-fg1">{row.taskTitle}</p>
+        <p className={cn("text-[9.5px]", tone.split(" ")[0])} data-testid="pending-reason">
+          {row.kind === "parked" ? "⏸ " : row.kind === "queued" ? "⋯ " : "⚠ "}
+          {row.label}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function TerminalGrid() {
   const { companyId } = useParams({ from: "/c/$companyId" });
   const density = useTerminalGrid((s) => s.density);
@@ -215,6 +252,19 @@ export function TerminalGrid() {
     refetchInterval: 10_000,
   });
 
+  // SIRADAKİLER (2026-08-21): canlı oturum tavanı dolduğunda görev almış ama
+  // oturumu açılmamış ajanlar ızgaradan TAMAMEN kayboluyordu. Aynı iki
+  // sorgunun cache'i görev panosu/roster ile paylaşılır (ek yük yok).
+  const boardTasks = useQuery({
+    queryKey: [companyId, "tasks", "board"],
+    queryFn: () => api.tasks.list(companyId, {}),
+    refetchInterval: 15_000,
+  });
+  const roster = useQuery({
+    queryKey: keys.agents(companyId),
+    queryFn: () => api.agents.list(companyId),
+  });
+
   const { team, members } = useTeamMemberSet(companyId);
   const active = (sessions.data?.items ?? []).filter(
     (s) =>
@@ -228,6 +278,12 @@ export function TerminalGrid() {
   const openSessions = visibleSessions.filter((s) => !closedAgentIds.includes(s.agentId));
   const hiddenCount =
     active.length - open.length + (visibleSessions.length - openSessions.length);
+  const agentNames = new Map(
+    (roster.data ?? []).map((a) => [a.id, a.name] as const),
+  );
+  const pending = pendingRows(boardTasks.data ?? [], visibleSessions, agentNames).filter(
+    (row) => members === null || members.has(row.agentId),
+  );
   const focused = focusedId ? (active.find((s) => s.id === focusedId) ?? null) : null;
   const focusedSession = focusedSessionId
     ? (visibleSessions.find((s) => s.id === focusedSessionId) ?? null)
@@ -292,6 +348,9 @@ export function TerminalGrid() {
       <div className="flex h-6 shrink-0 items-center gap-1.5 border-b border-acos-line px-2 text-[9.5px] text-acos-fg2">
         <span>
           {openSessions.length} oturum · {open.length} terminal
+          {pending.length > 0 && (
+            <span data-testid="pending-count"> · {pending.length} sırada</span>
+          )}
           {hiddenCount > 0 && ` · ${hiddenCount} gizli`}
           {team && <span className="text-dept-engineering"> · filtre: {team.name}</span>}
         </span>
@@ -318,7 +377,7 @@ export function TerminalGrid() {
         <DensityChip value="M" />
         <DensityChip value="L" />
       </div>
-      {open.length === 0 && openSessions.length === 0 ? (
+      {open.length === 0 && openSessions.length === 0 && pending.length === 0 ? (
         <div
           className="flex flex-1 items-center justify-center text-[11px] text-acos-fg2"
           data-testid="terminal-grid-empty"
@@ -394,6 +453,11 @@ export function TerminalGrid() {
                 </CellFrame>
               )}
             </div>
+          ))}
+          {/* Sıradakiler her zaman SONDA: canlı hücreler öne çıksın, ama
+              dördüncü ajan da ekranda kalsın (tavan dolu ≠ ajan yok). */}
+          {pending.map((row) => (
+            <PendingCell key={`pending:${row.agentId}`} row={row} />
           ))}
         </div>
       )}

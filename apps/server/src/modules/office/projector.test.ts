@@ -459,3 +459,53 @@ describe("delegasyon koreografisi (2026-08-18 — agent.task.assigned)", () => {
     expect(out.every((i) => i.type !== "office.avatar.moved")).toBe(true);
   });
 });
+
+// CANLI KOSUM GORUNURLUGU (2026-08-21): Founder 4 ajanli bir kosumu
+// izlerken "bekleyen" ve "frenlenen" anlar ofiste HIC gorunmuyordu —
+// park eden ajan ekranda yazmaya devam ediyordu. Rozet artik son adimi
+// takip eder; park WAITING, guard freni BLOCKED, uyanma tekrar WORKING.
+describe("bekleme/uyanma/fren rozetleri (2026-08-21 — canli kosum izlenebilirligi)", () => {
+  it("wait_for parki WAITING cizer, sonraki adim ajani WORKING'e dondurur (uyanma gorunur)", async () => {
+    const h = makeHarness();
+    const park = await h.projector.handleEvent(
+      envelope("agent.step.recorded", { sessionId: ALICE, stepNo: 5, actionType: "wait_for" }, ALICE),
+    );
+    expect(park[0]).toMatchObject({ type: "office.status.changed", agentId: ALICE, badge: "WAITING" });
+
+    // uyanma: sistem aktoruyle gelen WAITING→IN_PROGRESS gecisi sahibi
+    // cozemiyor; gorunurlugu saglayan sey ajanin ATTIGI ADIM.
+    const wake = await h.projector.handleEvent(
+      envelope("agent.step.recorded", { sessionId: ALICE, stepNo: 6, actionType: "use_tool" }, ALICE),
+    );
+    expect(wake[0]).toMatchObject({ agentId: ALICE, badge: "WORKING" });
+  });
+
+  it("request_help konusma rozetidir (blokajin ilk adresi yoneticidir)", async () => {
+    const h = makeHarness();
+    const help = await h.projector.handleEvent(
+      envelope("agent.step.recorded", { sessionId: ALICE, stepNo: 3, actionType: "request_help" }, ALICE),
+    );
+    expect(help[0]).toMatchObject({ agentId: ALICE, badge: "COMMUNICATING" });
+  });
+
+  it("adi konmamis bir adim da hayat belirtisidir: rozet WORKING'e duser", async () => {
+    const h = makeHarness();
+    const step = await h.projector.handleEvent(
+      envelope("agent.step.recorded", { sessionId: ALICE, stepNo: 1, actionType: "create_task" }, ALICE),
+    );
+    expect(step[0]).toMatchObject({ agentId: ALICE, badge: "WORKING" });
+  });
+
+  it("guard freni (loop/butce/adim tavani) BLOCKED cizer; deadline cizmez (o eskalasyon yolu)", async () => {
+    const h = makeHarness();
+    const tripped = await h.projector.handleEvent(
+      envelope("agent.guard.triggered", { guard: "loop", context: {} }, ALICE),
+    );
+    expect(tripped[0]).toMatchObject({ agentId: ALICE, badge: "BLOCKED" });
+
+    const deadline = await h.projector.handleEvent(
+      envelope("agent.guard.triggered", { guard: "deadline", context: {} }, BOB),
+    );
+    expect(deadline.every((i) => i.type !== "office.status.changed")).toBe(true);
+  });
+});

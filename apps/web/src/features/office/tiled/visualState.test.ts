@@ -54,3 +54,18 @@ describe("görsel durum", () => {
     expect(new Set(idle)).toEqual(new Set([0])); // hareket yok
   });
 });
+
+it("bekleyen ajan masasinda oturur ama KUM SAATI tasir (calisandan ayirt edilir)", () => {
+  const waiting = visualStateFor({ badge: "WAITING", moving: false, atSeat: true, dir: "down" });
+  const working = visualStateFor({ badge: "WORKING", moving: false, atSeat: true, dir: "down" });
+  expect(waiting).toMatchObject({ posture: "seated", activity: "waiting", bubble: "wait" });
+  expect(working.bubble).toBe("none");
+  // ayni durus, FARKLI isaret: Founder ikisini bir bakista ayirir
+  expect(waiting.posture).toBe(working.posture);
+  expect(waiting.bubble).not.toBe(working.bubble);
+});
+
+it("bekleyen ajan yazmaz: yazma ritmi yalniz WORKING'e ait", () => {
+  const waiting = visualStateFor({ badge: "WAITING", moving: false, atSeat: true, dir: "down" });
+  expect(typingOffset(waiting.activity, 1)).toBe(0);
+});
