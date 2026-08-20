@@ -42,6 +42,7 @@ import { useUiPrefs, type CommandPreset } from "../stores/uiPrefs.js";
 import { useFocus } from "../stores/focus.js";
 import { RealtimeDispatcher, useRealtimeStatus } from "../realtime/RealtimeDispatcher.js";
 import { HireModal } from "../features/agents/HireModal.js";
+import { CreateCompanyModal } from "../features/companies/CreateCompanyModal.js";
 import { TeamManageModal } from "../features/organization/TeamManageModal.js";
 import { useNotifications } from "../stores/notifications.js";
 import { usePanelBus } from "../stores/panels.js";
@@ -325,6 +326,7 @@ export function AppShell() {
   const lastEvent = useEventTicker((s) => s.events[0]);
   const requestPreset = useUiPrefs((s) => s.requestPreset);
   const [hireOpen, setHireOpen] = useState(false);
+  const [createCompanyOpen, setCreateCompanyOpen] = useState(false);
   // E1: Founder direktifi üst çubuktan verilir; hedef her zaman şirketin
   // tepe yöneticisidir (sunucu ProjectsService.topExecutive ile bulur).
   const [directiveOpen, setDirectiveOpen] = useState(false);
@@ -411,6 +413,18 @@ export function AppShell() {
               </option>
             ))}
           </select>
+          {/* E2/W2: "yeni sirket acacak ekran yok" (Founder, 2026-08-20).
+              Sunucu ucu zaten vardi; eksik olan giristi. Secicinin icinde
+              duruyor cunku kullanicinin sirket dusundugu tek yer burasi. */}
+          <button
+            onClick={() => setCreateCompanyOpen(true)}
+            data-testid="company-create-open"
+            aria-label="Yeni şirket aç"
+            title="Yeni şirket aç — kendi ajanları, projeleri ve bütçesiyle"
+            className="border-l border-acos-line px-1.5 py-0.5 text-[13px] leading-none text-acos-fg2 hover:text-acos-fg0"
+          >
+            +
+          </button>
         </span>
         <PanelLauncher />
         </div>
@@ -603,6 +617,7 @@ export function AppShell() {
       <Toasts />
 
       <HireModal open={hireOpen} onClose={() => setHireOpen(false)} />
+      <CreateCompanyModal open={createCompanyOpen} onClose={() => setCreateCompanyOpen(false)} />
       {executive && (
         <DirectiveDialog
           companyId={companyId}
