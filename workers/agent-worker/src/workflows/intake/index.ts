@@ -4,7 +4,8 @@
 // artifact, routing) runs on this queue's own activities. Analyzer failures
 // degrade their section and NEVER block the report (P6); ingest failure is a
 // Founder-visible setup error.
-import { proxyActivities } from "@temporalio/workflow";
+import { condition, proxyActivities, setHandler, workflowInfo } from "@temporalio/workflow";
+import { staffingProposalDecidedSignal } from "../signals.js";
 import type {
   IntakeControlActivities,
   IngestSummary,
@@ -255,8 +256,16 @@ export interface ProjectGoalInput {
   constraints: string | null;
 }
 
+/**
+ * E2/W5: insan kararı beklenirken iş akışı ne kadar yaşar. Founder sihirbazı
+ * yarıda bırakıp ertesi gün dönebilir; süre dolarsa öneri satırı DURUR
+ * (proje waiting_for_founder'da bekler) ve onay ucu uygulamayı YERİNDE yapar —
+ * yani zaman aşımı kararı çöpe atmaz, yalnız uyandırma yolunu değiştirir.
+ */
+const PROPOSAL_HUMAN_TIMEOUT = "7 days";
+
 export async function projectGoalWorkflow(input: ProjectGoalInput): Promise<{ state: string }> {
-  await control
+  const analysis = await control
     .analyzeRequirementsActivity({
       companyId: input.companyId,
       projectId: input.projectId,
@@ -265,6 +274,52 @@ export async function projectGoalWorkflow(input: ProjectGoalInput): Promise<{ st
       constraints: input.constraints,
     })
     .catch(() => null);
+
+  // ------------------------------------------------------------------
+  // E2/W4+W5 — CEO ÖNERİR, İNSAN DÜZENLER, İNSAN ONAYLAR.
+  //
+  // Önce planlama tek nefeste akıyordu: gap analizi → İKİLİ hire onayı →
+  // Agent Factory. Founder'ın "bir takım daha ekle / bu ekip 3 kişi olsun"
+  // diyebileceği bir an YOKTU. Artık akış burada DURUR ve öneri satırı
+  // (staffing_proposals) düzenlenebilir halde insanı bekler.
+  //
+  // Öneri üretilemezse (router yok, model bozuk JSON döndü, gereksinim
+  // analizi boş) hiç durmayız: akış eski deterministik gap yoluna düşer.
+  // Sihirbaz bir LLM arızasında projeyi ASLA kilitlemez.
+  // ------------------------------------------------------------------
+  const proposal = await control
+    .proposeStaffingActivity({
+      companyId: input.companyId,
+      projectId: input.projectId,
+      projectName: input.projectName,
+      objective: input.objective,
+      requiredCapabilities: analysis?.requiredCapabilities ?? [],
+      goalTaskId: null,
+      workflowId: workflowInfo().workflowId,
+    })
+    .catch(() => null);
+
+  if (proposal) {
+    let decision: "confirmed" | "cancelled" | null = null;
+    setHandler(staffingProposalDecidedSignal, (payload) => {
+      // yalnız BU önerinin kararı — eski bir önerinin geç sinyali akışı
+      // yanlışlıkla ilerletmesin
+      if (payload.proposalId === proposal.proposalId) decision = payload.decision;
+    });
+    const decided = await condition(() => decision !== null, PROPOSAL_HUMAN_TIMEOUT);
+    if (!decided) return { state: "waiting_for_founder" }; // süre doldu: karar onay ucunda
+    if (decision === "cancelled") return { state: "waiting_for_founder" };
+
+    // Onaylandı → Agent Factory TAM OLARAK bu satırları kurar (takımlar T17
+    // bağıyla projeye yazılır), sonra planlama normal yolundan sürer.
+    await control
+      .applyStaffingProposalActivity({
+        companyId: input.companyId,
+        proposalId: proposal.proposalId,
+      })
+      .catch(() => ({ hired: 0 }));
+  }
+
   const continuation = await control
     .continueProjectPlanningActivity({
       companyId: input.companyId,

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import {
   check,
   index,
+  integer,
   jsonb,
   pgTable,
   text,
@@ -200,5 +201,56 @@ export const projectTeamMemberships = pgTable(
       "project_team_memberships_added_by_check",
       sql`${t.addedBy} IN ('system','founder','agent','backfill')`,
     ),
+  ],
+);
+
+/**
+ * E2/W3 (T19) — kadro önerisi, migration 0027.
+ *
+ * Önce plan `tasks.context.staffingPlan` içinde DONUYORDU ve Founder'ın tek
+ * seçeneği ikili onaydı: "takım ekle" / "kişi sayısını değiştir" diye bir şey
+ * yoktu. Sihirbazın çekirdeği burası — CEO önerir (source='llm'), insan
+ * düzenler (version artar), onaylayınca Agent Factory TAM OLARAK `teams`
+ * dizisini kurar.
+ *
+ * `teams` şekli (StaffingProposalTeam): { key, capability, teamName,
+ * headcount, existingCount, hireCount, rationale? }. `hireCount` ve
+ * `existingCount` SUNUCUDA türetilir; istemci yalnız hedef `headcount` yollar.
+ */
+export const staffingProposals = pgTable(
+  "staffing_proposals",
+  {
+    id: id(),
+    companyId: companyId(),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    goalTaskId: uuid("goal_task_id"),
+    approvalId: uuid("approval_id"),
+    /** W5: öneriyi BEKLEYEN iş akışı — onay ucu sinyali buraya yollar. */
+    workflowId: text("workflow_id"),
+    status: text("status").notNull().default("draft"),
+    /** iyimser kilit: PATCH bu sayıyı geri yollar, uyuşmazsa 409 */
+    version: integer("version").notNull().default(1),
+    source: text("source").notNull().default("deterministic"),
+    rationaleMd: text("rationale_md").notNull().default(""),
+    teams: jsonb("teams").notNull().default(sql`'[]'::jsonb`),
+    estimatedCostCents: integer("estimated_cost_cents").notNull().default(0),
+  },
+  (t) => [
+    // proje başına AYNI ANDA tek açık öneri — sihirbazın ikinci girişi
+    // mevcut öneriyi bulur, yenisini üretmez
+    uniqueIndex("staffing_proposals_open_uq")
+      .on(t.projectId)
+      .where(sql`${t.status} IN ('draft','awaiting_human','confirmed')`),
+    index("staffing_proposals_company_idx").on(t.companyId, t.projectId),
+    check(
+      "staffing_proposals_status_check",
+      sql`${t.status} IN ('draft','awaiting_human','confirmed','applied','cancelled')`,
+    ),
+    check("staffing_proposals_source_check", sql`${t.source} IN ('llm','deterministic','human')`),
+    check("staffing_proposals_version_check", sql`${t.version} >= 1`),
   ],
 );

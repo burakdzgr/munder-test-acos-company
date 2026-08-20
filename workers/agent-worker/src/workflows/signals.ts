@@ -32,5 +32,15 @@ export const managerDirectiveSignal =
   );
 export const cancelSignal = defineSignal<[{ by: string; reason: string }]>("cancel");
 
+/**
+ * E2/W5 (T19) — kadro önerisi kararı. Planlama iş akışı öneriyi yazdıktan
+ * sonra İNSANI bekler; Founder onayla/iptal ettiğinde sunucu bu sinyali
+ * öneriyi bekleyen iş akışına yollar (workflowId öneri satırında durur).
+ */
+export const staffingProposalDecidedSignal =
+  defineSignal<[{ proposalId: string; decision: "confirmed" | "cancelled" }]>(
+    "staffingProposalDecided",
+  );
+
 /** agentInboxWorkflow intake (08 §7). */
 export const inboxItemSignal = defineSignal<[InboxItemSignal]>("inboxItem");

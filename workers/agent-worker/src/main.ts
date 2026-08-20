@@ -378,6 +378,32 @@ async function run(): Promise<void> {
       router,
       routingFor,
       // TASK 9: planning devamı sunucuda (staffing gap + onay + CEO start)
+      // E2/W4 (T19): CEO'nun önerdiği kadro planı server'a yazılır
+      proposeStaffing: async (input) => {
+        const res = await fetch(`${serverInternalUrl}/internal/v1/staffing/proposal`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${config.security.internalApiToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(input),
+        });
+        if (!res.ok) throw new Error(`staffing proposal failed (${res.status})`);
+        return (await res.json()) as { id: string; status: string; teams: unknown[] };
+      },
+      // E2/W5: onaylanan öneri Agent Factory'ye uygulanır
+      applyStaffingProposal: async ({ companyId, proposalId }) => {
+        const res = await fetch(`${serverInternalUrl}/internal/v1/staffing/proposal/apply`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${config.security.internalApiToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ companyId, proposalId }),
+        });
+        if (!res.ok) throw new Error(`staffing proposal apply failed (${res.status})`);
+        return (await res.json()) as { hired: number };
+      },
       planningContinue: async ({ companyId, projectId }) => {
         const res = await fetch(`${serverInternalUrl}/internal/v1/staffing/continue`, {
           method: "POST",

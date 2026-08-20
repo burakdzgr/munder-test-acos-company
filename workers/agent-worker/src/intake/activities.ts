@@ -48,6 +48,26 @@ export interface IntakeControlActivityDeps {
   codeIndexRebuild?:
     | ((input: { companyId: string; projectId: string }) => Promise<void>)
     | undefined;
+  /**
+   * E2/W4 (T19): CEO'nun ÖNERDİĞİ kadro planını server'a yazar
+   * (`/internal/v1/staffing/proposal`). Gap analizi deterministik kalır —
+   * yeni olan LLM adımı yalnız ÖNERİdir.
+   */
+  proposeStaffing?:
+    | ((input: {
+        companyId: string;
+        projectId: string;
+        goalTaskId: string | null;
+        workflowId: string | null;
+        source: "llm" | "deterministic";
+        rationaleMd: string;
+        teams: Array<{ capability: string; teamName?: string; headcount: number; rationale?: string }>;
+      }) => Promise<{ id: string; status: string; teams: unknown[] }>)
+    | undefined;
+  /** E2/W5: onaylanan öneriyi Agent Factory'ye uygular. */
+  applyStaffingProposal?:
+    | ((input: { companyId: string; proposalId: string }) => Promise<{ hired: number }>)
+    | undefined;
   /** TASK 9: server'ın planning devam ucu (staffing gap + CEO start). */
   planningContinue?:
     | ((input: { companyId: string; projectId: string }) => Promise<{ state: string }>)
@@ -348,6 +368,123 @@ export function createIntakeControlActivities(deps: IntakeControlActivityDeps) {
       } catch {
         return null; // degrade — planlama analizsiz sürer
       }
+    },
+
+    /**
+     * E2/W4 (T19) — CEO PROJE İÇİN TAKIM ÖNERİR.
+     *
+     * Doküman kuralı gereği gap analizi deterministik kalır (LLM yok); yeni
+     * olan adım yalnız ÖNERİdir: proje adı + gereksinimlerden takım yapısı ve
+     * kadro sayısı. Router yoksa ya da model bozuk JSON dönerse ÖNERİ
+     * ÜRETİLMEZ (`null`) — akış eski deterministik gap yoluna düşer, yani
+     * sihirbaz bir LLM arızasında projeyi kilitlemez.
+     */
+    async proposeStaffingActivity(input: {
+      companyId: string;
+      projectId: string;
+      projectName: string;
+      objective: string;
+      requiredCapabilities: string[];
+      goalTaskId: string | null;
+      workflowId: string | null;
+    }): Promise<{ proposalId: string; teamCount: number } | null> {
+      if (!deps.proposeStaffing) return null;
+      const ctx = companyContext(input.companyId);
+      let source: "llm" | "deterministic" = "deterministic";
+      let rationaleMd = "";
+      let teams: Array<{
+        capability: string;
+        teamName?: string;
+        headcount: number;
+        rationale?: string;
+      }> = [];
+
+      if (deps.router && deps.routingFor) {
+        const prompt = [
+          `"${input.projectName}" projesi için TAKIM YAPISI öner.`,
+          `Hedef: ${input.objective}`,
+          input.requiredCapabilities.length > 0
+            ? `Gereksinim analizinin çıkardığı uzmanlıklar: ${input.requiredCapabilities.join(", ")}`
+            : "",
+          "",
+          "Bu işi bitirecek EN KÜÇÜK ekibi kur. YALNIZ şu şekilde bir JSON döndür:",
+          '  { "rationale": "<=400 karakter gerekçe",',
+          '    "teams": [ { "capability": "backend", "team_name": "Backend",',
+          '                 "headcount": 2, "rationale": "<=160 karakter" } ] }',
+          "",
+          "Kurallar: en çok 6 takım; her takım 1-8 kişi; capability tek kelime ve",
+          "İngilizce olsun (backend, frontend, devops, qa, design, data, mobile,",
+          "security, marketing, fullstack). Yönetici/CEO ekleme — zaten var.",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        try {
+          const routing = await deps.routingFor(ctx, "");
+          const result = await deps.router.complete(
+            { purpose: "reasoning", messages: [{ role: "user", content: prompt }] },
+            routing,
+          );
+          const start = result.text.indexOf("{");
+          const end = result.text.lastIndexOf("}");
+          if (start >= 0 && end > start) {
+            const parsed = JSON.parse(result.text.slice(start, end + 1)) as {
+              rationale?: unknown;
+              teams?: unknown;
+            };
+            const rows = Array.isArray(parsed.teams) ? parsed.teams : [];
+            teams = rows
+              .map((raw) => raw as Record<string, unknown>)
+              .filter((raw) => typeof raw.capability === "string")
+              .slice(0, 6)
+              .map((raw) => ({
+                capability: String(raw.capability),
+                ...(typeof raw.team_name === "string" ? { teamName: raw.team_name } : {}),
+                headcount: Math.max(1, Math.min(8, Number(raw.headcount ?? 1) || 1)),
+                ...(typeof raw.rationale === "string" ? { rationale: raw.rationale } : {}),
+              }));
+            if (typeof parsed.rationale === "string") rationaleMd = parsed.rationale.slice(0, 4000);
+            if (teams.length > 0) source = "llm";
+          }
+        } catch {
+          /* degrade — aşağıdaki deterministik yedeğe düşer */
+        }
+      }
+
+      // Yedek: modelin önerisi yoksa gereksinim analizinin uzmanlıkları BİRE
+      // BİR öneriye çevrilir. Sihirbaz yine de düzenlenebilir bir plan gösterir.
+      if (teams.length === 0) {
+        teams = input.requiredCapabilities.slice(0, 6).map((raw) => {
+          const match = /^(.*?)(?:\s*[x×]\s*(\d{1,2}))?$/i.exec(raw.trim());
+          return {
+            capability: (match?.[1] ?? raw).trim().toLowerCase(),
+            headcount: Math.max(1, Number(match?.[2] ?? 1)),
+          };
+        });
+        rationaleMd =
+          rationaleMd ||
+          "Model önerisi alınamadı; plan gereksinim analizindeki uzmanlıklardan türetildi (düzenlenebilir).";
+      }
+      if (teams.length === 0) return null; // önerecek hiçbir şey yok
+
+      const proposal = await deps.proposeStaffing({
+        companyId: input.companyId,
+        projectId: input.projectId,
+        goalTaskId: input.goalTaskId,
+        workflowId: input.workflowId,
+        source,
+        rationaleMd,
+        teams,
+      });
+      return { proposalId: proposal.id, teamCount: proposal.teams.length };
+    },
+
+    /** E2/W5 — onaylanan öneriyi Agent Factory'ye uygular. */
+    async applyStaffingProposalActivity(input: {
+      companyId: string;
+      proposalId: string;
+    }): Promise<{ hired: number }> {
+      if (!deps.applyStaffingProposal) return { hired: 0 };
+      return deps.applyStaffingProposal(input);
     },
 
     /**

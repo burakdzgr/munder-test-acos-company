@@ -243,6 +243,15 @@ async function main(): Promise<void> {
           }
         });
     };
+    // E2/W5: Founder onayı, öneriyi BEKLEYEN planlama iş akışını uyandırır.
+    // workflowId öneri satırında durur — akış id'si zamana bağlı üretildiği
+    // için tahmin edilemez, o yüzden öneriyi yazan aktivite kendi id'sini
+    // kaydeder ve onay ucu onu okur.
+    app.proposalSignaller = async ({ workflowId, proposalId, decision }) => {
+      await temporalClient.workflow
+        .getHandle(workflowId)
+        .signal("staffingProposalDecided", { proposalId, decision });
+    };
     app.log.info("comms delivery signal port attached (Temporal)");
   } catch (err) {
     app.log.error({ err }, "Temporal unavailable — comms delivery signalling disabled");

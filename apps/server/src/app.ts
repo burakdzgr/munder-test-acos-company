@@ -83,6 +83,10 @@ declare module "fastify" {
           constraints: string | null;
         }) => Promise<void>)
       | null;
+    /** E2/W5: onaylanan kadro önerisini BEKLEYEN iş akışına sinyal. */
+    proposalSignaller:
+      | import("./modules/staffing/proposal-routes.js").ProposalSignaller
+      | null;
   }
 }
 
@@ -463,6 +467,21 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     starter: () => app.agentWorkflowStarter,
   });
 
+  // ---------- E2/W3+W5: düzenlenebilir kadro önerisi (T19) ----------
+  const { registerProposalRoutes } = await import("./modules/staffing/proposal-routes.js");
+  await registerProposalRoutes(app, {
+    guardedDb: () => {
+      if (!options.guardedDb) throw new ApiError("internal", "staffing not wired");
+      return options.guardedDb;
+    },
+    companiesSvc,
+    internalApiToken: () => {
+      if (!options.internalApiToken) throw new ApiError("internal", "internal token not wired");
+      return options.internalApiToken;
+    },
+    proposalSignaller: () => app.proposalSignaller,
+  });
+
   // ---------- preview gateway (REVISION TASK 3) ----------
   const { registerPreviewRoutes } = await import("./modules/preview/routes.js");
   previewFallback = await registerPreviewRoutes(app, {
@@ -531,6 +550,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   // ---------- projects + intake (T42; 14 §2) ----------
   app.decorate("intakeStarter", null);
   app.decorate("goalStarter", null);
+  app.decorate("proposalSignaller", null);
   await registerProjectRoutes(app, {
     guardedDb: () => {
       if (!options.guardedDb) throw new ApiError("internal", "projects not wired");
