@@ -236,7 +236,10 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
         `select tool_name, count(*) from tool_invocations where ${scope} group by tool_name`,
       );
       const names = rows.map((row) => row.split("|")[0]);
-      const completed = names.some((name) => /complete_task/.test(name));
+      // The gateway names Family B verbs `task.*` (task.query, task.create), so
+      // a row for the closing verb can read either way depending on which side
+      // wrote it. Accept both rather than call a closed task unaudited.
+      const completed = names.some((name) => /complete_task|task\.complete/.test(name));
       // The hook posts the RAW builtin ({tool:"Bash"}), but the gateway
       // TRANSLATES it server-side (T30 §9) before writing the row, so the audit
       // trail carries ACOS verbs (terminal.run, fs.read) and never the CLI's
