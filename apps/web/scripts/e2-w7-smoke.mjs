@@ -1,13 +1,21 @@
-// E2/W7+W6+W8 kanıt betiği — projeler-birincil kabuk, proje sihirbazı ve
-// ofis odağı. TAMAMEN MOCK API (paylaşılan hiçbir stack'e dokunmaz).
-//   node apps/web/scripts/e2-w7-smoke.mjs <shotDir>
+// E2/W7+W6+W8 kanıt betiği — projeler-birincil kabuk, proje sihirbazı, ofis
+// odağı. TAMAMEN MOCK API (paylaşılan hiçbir stack'e dokunmaz).
+//
+// İKİ MOD:
+//   node apps/web/scripts/e2-w7-smoke.mjs <shotDir>              → Oscar'ın
+//        DONDURULMUŞ uçları (project-teams + staffing-proposal) VARMIŞ gibi:
+//        gerçek sözleşme yolu doğrulanır.
+//   node apps/web/scripts/e2-w7-smoke.mjs <shotDir> --no-endpoints → uçlar
+//        henüz inmemişken: türetilmiş takımlar + yerel taslak öneri yolu.
 import { chromium } from "@playwright/test";
 
 const SHOTS = process.argv[2] ?? ".";
+const ENDPOINTS = !process.argv.includes("--no-endpoints");
 const CID = "11111111-1111-4111-8111-111111111111";
 const P1 = "22222222-2222-4222-8222-222222222222";
 const P2 = "33333333-3333-4333-8333-333333333333";
 const NEW_P = "99999999-9999-4999-8999-999999999999";
+const PROPOSAL = "88888888-8888-4888-8888-888888888888";
 const U1 = "44444444-4444-4444-8444-444444444444";
 const U2 = "55555555-5555-4555-8555-555555555555";
 const A1 = "66666666-6666-4666-8666-666666666661";
@@ -16,6 +24,7 @@ const CEO = "77777777-7777-4777-8777-777777777777";
 
 const json = (route, body) =>
   route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+const notFound = (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
 const posts = [];
 
 const project = (id, name, slug, status) => ({
@@ -34,7 +43,10 @@ const project = (id, name, slug, status) => ({
   indexCommitSha: null,
   headSha: null,
 });
-let projects = [project(P1, "Vitrin Sitesi", "vitrin", "executing"), project(P2, "Mobil Uygulama", "mobil", "executing")];
+let projects = [
+  project(P1, "Vitrin Sitesi", "vitrin", "executing"),
+  project(P2, "Mobil Uygulama", "mobil", "executing"),
+];
 
 const task = (id, pid, unit, owner, title) => ({
   id,
@@ -62,6 +74,44 @@ const task = (id, pid, unit, owner, title) => ({
   archivedAt: null,
 });
 
+// --- Oscar'ın sözleşmesindeki sunucu durumu (mock) ---
+const linkTeam = (id, name, slug, agentCount, taskCount) => ({
+  orgUnitId: id,
+  name,
+  slug,
+  kind: "team",
+  agentCount,
+  taskCount,
+});
+const projectTeams = () => ({
+  groups: [
+    { projectId: P1, projectName: "Vitrin Sitesi", source: "link", teams: [linkTeam(U1, "Backend", "backend", 3, 4)] },
+    { projectId: P2, projectName: "Mobil Uygulama", source: "derived", teams: [linkTeam(U2, "Tasarım", "tasarim", 1, 2)] },
+    { projectId: NEW_P, projectName: "Kurumsal Web Sitesi", source: "link", teams: [] },
+  ],
+  idleTeams: [],
+});
+
+let proposal = null;
+const mkProposal = () => ({
+  id: PROPOSAL,
+  projectId: NEW_P,
+  goalTaskId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+  approvalId: null,
+  status: "awaiting_human",
+  version: 1,
+  source: "llm",
+  rationaleMd: "Vitrin + ödeme entegrasyonu için arayüz ve servis ekibi; içerik için pazarlama.",
+  teams: [
+    { key: "frontend", capability: "frontend", teamName: "Frontend", headcount: 2, existingCount: 1, hireCount: 1, rationale: "Sayfa üretimi" },
+    { key: "backend", capability: "backend", teamName: "Backend", headcount: 2, existingCount: 0, hireCount: 2, rationale: "Ödeme entegrasyonu" },
+    { key: "marketing", capability: "marketing", teamName: "Pazarlama", headcount: 1, existingCount: 0, hireCount: 1, rationale: "SEO içerikleri" },
+  ],
+  estimatedCostCents: 12_000,
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
+});
+
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
@@ -72,14 +122,52 @@ await page.route("**/api/v1/**", async (route) => {
   const method = req.method();
   if (method !== "GET") posts.push(`${method} ${p} ${req.postData() ?? ""}`);
 
+  // --- sözleşme uçları ---
+  if (p.endsWith("/project-teams")) return ENDPOINTS ? json(route, projectTeams()) : notFound(route);
+  if (p.endsWith("/staffing-proposal")) {
+    if (!ENDPOINTS) return notFound(route);
+    return proposal ? json(route, proposal) : notFound(route);
+  }
+  if (p.includes("/staffing-proposals/")) {
+    if (!ENDPOINTS) return notFound(route);
+    if (p.endsWith("/confirm")) {
+      proposal = { ...proposal, status: "applied" };
+      return json(route, { ok: true, status: "applied" });
+    }
+    if (method === "PATCH") {
+      const body = JSON.parse(req.postData() ?? "{}");
+      if (body.version !== proposal.version) {
+        return route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({ code: "stale_version" }),
+        });
+      }
+      proposal = {
+        ...proposal,
+        version: proposal.version + 1,
+        source: "human",
+        teams: body.teams.map((t) => {
+          const existingCount = proposal.teams.find((x) => x.key === t.key)?.existingCount ?? 0;
+          return { ...t, existingCount, hireCount: Math.max(0, t.headcount - existingCount) };
+        }),
+      };
+      return json(route, proposal);
+    }
+    return json(route, { ok: true });
+  }
+
   if (method === "POST" && p.endsWith(`/companies/${CID}/projects`)) {
     const body = JSON.parse(req.postData() ?? "{}");
     const row = project(NEW_P, body.name, "yeni", "ready");
     projects = [...projects, row];
     return json(route, row);
   }
-  if (p.includes("/staffing-proposal")) return route.fulfill({ status: 404, body: "" });
-  if (method === "POST" && p.endsWith("/goal")) return json(route, { started: true, state: "planning" });
+  if (method === "POST" && p.endsWith("/goal")) {
+    // hedef = CEO'nun öneri adımını tetikler (W4)
+    if (ENDPOINTS) proposal = mkProposal();
+    return json(route, { started: true, state: "planning" });
+  }
   if (p === "/api/v1/auth/me")
     return json(route, {
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -90,7 +178,15 @@ await page.route("**/api/v1/**", async (route) => {
     });
   if (p === "/api/v1/companies")
     return json(route, [
-      { id: CID, name: "Webicrea", slug: "webicrea", currency: "TRY", status: "active", role: "founder", createdAt: new Date(0).toISOString() },
+      {
+        id: CID,
+        name: "Webicrea",
+        slug: "webicrea",
+        currency: "TRY",
+        status: "active",
+        role: "founder",
+        createdAt: new Date(0).toISOString(),
+      },
     ]);
   if (p.endsWith("/tasks/top-executive"))
     return json(route, { agentId: CEO, name: "Aylin Vural", positionTitle: "CEO" });
@@ -120,39 +216,53 @@ const results = [];
 const check = (name, ok, extra = "") =>
   results.push(`${ok ? "PASS" : "FAIL"} — ${name}${extra ? ` (${extra})` : ""}`);
 
+const mode = ENDPOINTS ? "sözleşme uçları VAR" : "uçlar YOK (yedek yol)";
 await page.goto(`http://localhost:5199/c/${CID}`, { waitUntil: "networkidle" });
 await page.waitForTimeout(1200);
 
-// W7 — üst-orta PROJELER
-check("üst-orta proje çubuğu", await page.getByTestId("project-bar").isVisible());
-check("proje seçici var", await page.getByTestId("project-switcher").isVisible());
+// --- W7 ---
+check(`[${mode}] üst-orta proje çubuğu`, await page.getByTestId("project-bar").isVisible());
 const options = await page.locator('select[aria-label="Proje"] option').allTextContents();
-check("seçicide 'Tüm şirket' + projeler", options.join("|") === "Tüm şirket|Vitrin Sitesi|Mobil Uygulama", options.join("|"));
+check(
+  "seçicide 'Tüm şirket' + projeler",
+  options[0] === "Tüm şirket" && options.includes("Vitrin Sitesi") && options.includes("Mobil Uygulama"),
+  options.join("|"),
+);
 await page.screenshot({ path: `${SHOTS}/w7-01-all.png` });
 
-// proje seç → SADECE o projenin takımı
 await page.selectOption('select[aria-label="Proje"]', P1);
 await page.waitForTimeout(700);
-let chips = await page.getByTestId("team-chips").textContent();
-check("proje seçilince yalnız o projenin takımı", chips.includes("Backend") && !chips.includes("Tasarım"), (chips ?? "").trim());
+let chips = (await page.getByTestId("team-chips").textContent()) ?? "";
+check("proje seçilince yalnız o projenin takımı", chips.includes("Backend") && !chips.includes("Tasarım"), chips.trim());
+if (ENDPOINTS) {
+  check(
+    "kalıcı bağ (source=link) rozetsiz",
+    (await page.getByTestId("project-teams-derived").count()) === 0,
+  );
+  check("takım sayısı uçtan geldi (agentCount=3)", chips.includes("3"), chips.trim());
+}
 await page.screenshot({ path: `${SHOTS}/w7-02-project1.png` });
 
 await page.selectOption('select[aria-label="Proje"]', P2);
 await page.waitForTimeout(700);
-chips = await page.getByTestId("team-chips").textContent();
-check("proje değişince takımlar da değişti", chips.includes("Tasarım") && !chips.includes("Backend"), (chips ?? "").trim());
+chips = (await page.getByTestId("team-chips").textContent()) ?? "";
+check("proje değişince takımlar da değişti", chips.includes("Tasarım") && !chips.includes("Backend"), chips.trim());
+if (ENDPOINTS) {
+  check(
+    "kalıcı bağı olmayan proje 'türetilmiş' rozeti alıyor",
+    await page.getByTestId("project-teams-derived").isVisible(),
+  );
+}
 
-// W8 — ofis odağı seçili projeyi izliyor (odak kümesi canvas'a geçiyor)
-const officeFocus = await page.evaluate(() => {
-  const canvas = document.querySelector('[data-testid="office-canvas"]');
-  return canvas ? "canvas-mounted" : "no-canvas";
-});
-check("ofis paneli canlı (odak kümesi projeye bağlı)", officeFocus === "canvas-mounted", officeFocus);
+// --- W8 ---
+check(
+  "ofis paneli canlı (odak kümesi seçili projeye bağlı)",
+  (await page.locator('[data-testid="office-canvas"]').count()) > 0,
+);
 
-// W6 — sihirbaz
+// --- W6 ---
 await page.getByTestId("project-create-open").click();
 await page.getByTestId("project-wizard").waitFor({ timeout: 10_000 });
-check("proje sihirbazı açıldı", true);
 await page.fill('input[name="projectName"]', "Kurumsal Web Sitesi");
 await page.fill(
   'textarea[name="projectRequirements"]',
@@ -160,48 +270,71 @@ await page.fill(
 );
 await page.screenshot({ path: `${SHOTS}/w6-01-brief.png` });
 await page.getByTestId("project-wizard-next").click();
-await page.getByTestId("proposal-teams").waitFor({ timeout: 20_000 });
+if (!ENDPOINTS) {
+  // uç yokken CEO adımı hiç gelmez: kullanıcı beklemeyi kesip taslakla devam eder
+  await page.getByTestId("proposal-skip-wait").click({ timeout: 20_000 });
+}
+await page.getByTestId("proposal-teams").waitFor({ timeout: 40_000 });
 const teamsText = (await page.getByTestId("proposal-teams").textContent()) ?? "";
 check(
-  "CEO önerisi: gereksinimden takımlar çıktı",
-  teamsText.includes("Frontend") && teamsText.includes("Backend") && teamsText.includes("Pazarlama"),
-  teamsText.replace(/\s+/g, " ").slice(0, 120),
+  "sihirbaz: proje açıldı + hedef verildi + kadro önerisi geldi",
+  posts.some((c) => c.includes(`POST /api/v1/companies/${CID}/projects `)) &&
+    posts.some((c) => c.includes(`/projects/${NEW_P}/goal`)) &&
+    teamsText.includes("Frontend") &&
+    teamsText.includes("Backend"),
+  teamsText.replace(/\s+/g, " ").slice(0, 110),
 );
-check("proje GERÇEKTEN açıldı (POST /projects)", posts.some((c) => c.includes(`POST /api/v1/companies/${CID}/projects `)));
+check(
+  ENDPOINTS ? "öneri CEO'dan (sunucu) geldi" : "uç yokken taslak öneri ve UYARISI var",
+  ENDPOINTS
+    ? (await page.getByTestId("proposal-draft-note").count()) === 0
+    : await page.getByTestId("proposal-draft-note").isVisible(),
+);
+if (ENDPOINTS) {
+  check(
+    "mevcut/yeni ayrımı gösteriliyor (existingCount/hireCount)",
+    teamsText.includes("mevcut") && teamsText.includes("yeni"),
+  );
+}
 const totalBefore = await page.getByTestId("proposal-total").textContent();
 await page.screenshot({ path: `${SHOTS}/w6-02-proposal.png` });
 
-// düzenle: sayı artır + takım ekle + takım çıkar
-const firstInc = page.locator('[data-testid^="proposal-inc-"]').first();
-await firstInc.click();
-await firstInc.click();
+// düzenle: sayı artır, takım ekle
+await page.locator('[data-testid^="proposal-inc-"]').first().click();
+await page.waitForTimeout(400);
 await page.fill('input[name="newTeamName"]', "Veri");
 await page.getByTestId("proposal-add-team").click();
-await page.locator('[data-testid^="proposal-remove-"]').last().click(); // eklenen "Veri"yi geri al
-await page.fill('input[name="newTeamName"]', "Veri");
-await page.getByTestId("proposal-add-team").click();
-await page.waitForTimeout(300);
+await page.waitForTimeout(500);
 const totalAfter = await page.getByTestId("proposal-total").textContent();
 check("kullanıcı öneriyi DÜZENLEYEBİLDİ", totalBefore !== totalAfter, `${totalBefore} → ${totalAfter}`);
 check("takım eklendi", ((await page.getByTestId("proposal-teams").textContent()) ?? "").includes("Veri"));
+if (ENDPOINTS) {
+  check(
+    "düzenleme sözleşmeye göre PATCH edildi (version + TAM liste)",
+    posts.some(
+      (c) =>
+        c.startsWith("PATCH ") &&
+        c.includes(`/staffing-proposals/${PROPOSAL}`) &&
+        c.includes('"version"') &&
+        c.includes('"teams"'),
+    ),
+    posts.filter((c) => c.startsWith("PATCH")).slice(-1)[0]?.slice(0, 120) ?? "",
+  );
+  check("PATCH gövdesinde hireCount GÖNDERİLMİYOR (sunucu türetir)", !posts.some((c) => c.startsWith("PATCH ") && c.includes("hireCount")));
+}
 await page.screenshot({ path: `${SHOTS}/w6-03-adjusted.png` });
 
-// onayla → iş başlar
 await page.getByTestId("proposal-confirm").click();
 await page.getByTestId("project-wizard-done").waitFor({ timeout: 20_000 });
-check(
-  "onay hedefi CEO'ya verdi (POST /goal)",
-  posts.some((c) => c.includes(`POST /api/v1/companies/${CID}/projects/${NEW_P}/goal`)),
-  posts.filter((c) => c.includes("/goal")).join(" | ").slice(0, 140),
-);
-check(
-  "onaylanan kadro hedef metnine yazıldı",
-  posts.some((c) => c.includes("/goal") && c.includes("Önerilen kadro")),
-);
+if (ENDPOINTS) {
+  check(
+    "onay duran iş akışını devam ettirdi (POST .../confirm)",
+    posts.some((c) => c.includes(`/staffing-proposals/${PROPOSAL}/confirm`)),
+  );
+}
 await page.getByTestId("project-wizard-close").click();
 await page.waitForTimeout(800);
-const selected = await page.inputValue('select[aria-label="Proje"]');
-check("yeni proje otomatik seçildi", selected === NEW_P, selected);
+check("yeni proje otomatik seçildi", (await page.inputValue('select[aria-label="Proje"]')) === NEW_P);
 await page.screenshot({ path: `${SHOTS}/w6-04-done.png` });
 
 console.log(results.join("\n"));

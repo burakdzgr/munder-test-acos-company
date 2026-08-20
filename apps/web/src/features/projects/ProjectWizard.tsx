@@ -3,30 +3,41 @@
 // Founder'ın istediği akış: ad + gereksinim → CEO kadroyu ÖNERİR → kullanıcı
 // DÜZENLER (takım ekle / sayı değiştir / çıkar) → ONAYLA → ajanlar başlar.
 //
-// Bugünkü sistemde proje açılışı zaten şu yolu izliyor: POST /projects →
-// intake READY'de DURUR (P1-1) → POST /projects/:id/goal → planlama →
-// StaffingService boşluk analizi → işe alım ONAYI. Yani "öneri" fikri
-// sunucuda var ama DÜZENLENEBİLİR değil (plan tasks.context içinde donuk) —
-// düzenlenebilir kalıcı öneri Oscar'ın T19'unda geliyor. Sihirbaz o sınırı
-// staffingProposal.ts'te tek noktada tutuyor: uç varsa gerçek öneri, yoksa
-// yerel taslak. Her iki hâlde de ONAY gerçek işi başlatır (setGoal), yani
-// ekran hiçbir zaman "sahte" değildir — yalnız öneri kaynağı değişir.
-import { useEffect, useState } from "react";
+// Sözleşme Oscar tarafından donduruldu (E2-faz2a-contracts.md §2) ve akış
+// birebir onu izler:
+//   1. POST /projects           → proje açılır (intake READY'de durur, P1-1)
+//   2. POST /projects/:id/goal  → Founder hedefi; CEO (LLM) kadroyu önerir
+//   3. GET  .../staffing-proposal → status 'awaiting_human' olana kadar beklenir;
+//      planlama iş akışı bu noktada Temporal sinyalinde DURUYOR
+//   4. PATCH .../staffing-proposals/:id → kullanıcının düzenlediği TAM liste
+//   5. POST  .../confirm        → iş akışı devam eder, applyPlan takımları kurar
+//
+// Uçlar henüz inmediyse (T19) sihirbaz YEREL taslağa düşer ve bunu ekranda
+// söyler; hedef zaten 2. adımda verildiği için iş yine başlar — yalnız kadro
+// düzenlemesi o turda sunucuya işlenmez.
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AcosApiError } from "@acos/contracts/client";
 import { Button, Dialog, Field, Input, Textarea } from "@acos/ui";
 import { api } from "../../lib/api.js";
 import { useFocus } from "../../stores/focus.js";
 import {
+  applyLocalEdit,
   confirmProposal,
   fetchProposal,
   localDraftProposal,
   patchProposal,
-  type ProposalTeam,
+  StaleProposalError,
+  toEdit,
+  type ProposalTeamEdit,
   type StaffingProposal,
 } from "./staffingProposal.js";
 
-type Step = "brief" | "proposal" | "done";
+type Step = "brief" | "thinking" | "proposal" | "done";
+
+/** CEO önerisi için bekleme: sözleşmede status 'awaiting_human' olduğunda hazır. */
+const POLL_MS = 2000;
+const POLL_TIMEOUT_MS = 60_000;
 
 export function ProjectWizard({
   companyId,
@@ -46,19 +57,28 @@ export function ProjectWizard({
   const [proposal, setProposal] = useState<StaffingProposal | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newTeamName, setNewTeamName] = useState("");
+  const cancelled = useRef(false);
+  // kullanıcı beklemeyi kesip taslakla devam edebilir (uç yoksa ya da
+  // CEO adımı uzarsa ekranda çakılı kalmasın)
+  const skipWait = useRef(false);
 
   useEffect(() => {
     if (!open) {
+      cancelled.current = true;
+      skipWait.current = false;
       setStep("brief");
       setName("");
       setRequirements("");
       setProjectId(null);
       setProposal(null);
       setError(null);
+      setNewTeamName("");
+    } else {
+      cancelled.current = false;
     }
   }, [open]);
 
-  /** 1. adım: projeyi aç ve öneriyi getir (yoksa yerel taslak). */
+  /** 1–3. adım: projeyi aç, hedefi ver, CEO'nun önerisini bekle. */
   const start = useMutation({
     mutationFn: async () => {
       setError(null);
@@ -66,37 +86,77 @@ export function ProjectWizard({
         name: name.trim(),
         objective: requirements.trim(),
       });
-      const server = await fetchProposal(companyId, project.id);
-      return { project, proposal: server };
-    },
-    onSuccess: ({ project, proposal: server }) => {
       setProjectId(project.id);
-      setProposal(server ?? { ...localDraftProposal(name, requirements), projectId: project.id });
-      setStep("proposal");
+      setStep("thinking");
       void queryClient.invalidateQueries({ queryKey: [companyId, "projects", "list"] });
+      // hedef = CEO'nun kadro önerisini tetikleyen adım (W4)
+      await api.projects.setGoal(companyId, project.id, requirements.trim());
+
+      const deadline = Date.now() + POLL_TIMEOUT_MS;
+      for (;;) {
+        if (cancelled.current) throw new Error("iptal");
+        const server = await fetchProposal(companyId, project.id);
+        if (server && (server.status === "awaiting_human" || server.status === "draft")) {
+          return { projectId: project.id, proposal: server };
+        }
+        if (server && (server.status === "applied" || server.status === "confirmed")) {
+          // öneri zaten uygulanmış (insan beklemeyen kurulum) — düzenlenecek bir şey yok
+          return { projectId: project.id, proposal: server };
+        }
+        if (skipWait.current || Date.now() > deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      }
+      // uç yok ya da CEO önerisi zamanında gelmedi → yerel taslak
+      return {
+        projectId: project.id,
+        proposal: localDraftProposal(project.id, name, requirements),
+      };
     },
-    onError: (err) =>
+    onSuccess: ({ proposal: next }) => {
+      setProposal(next);
+      setStep("proposal");
+    },
+    onError: (err) => {
+      setStep("brief");
       setError(
         err instanceof AcosApiError ? `${err.problem.code}: ${err.problem.detail}` : String(err),
-      ),
+      );
+    },
   });
 
-  /** 3. adım: onay — kadroyu gönder (uç varsa) ve hedefi CEO'ya ver. */
+  /** 4. adım: düzenlemeyi kalıcılaştır (uç yoksa yerel türetme). */
+  async function editTeams(teams: ProposalTeamEdit[]) {
+    if (!proposal) return;
+    setError(null);
+    const optimistic = applyLocalEdit(proposal, teams);
+    setProposal(optimistic);
+    if (proposal.local) return;
+    try {
+      const saved = await patchProposal(companyId, proposal.id, proposal.version, teams);
+      if (saved) setProposal(saved);
+    } catch (err) {
+      if (err instanceof StaleProposalError && projectId) {
+        // biri (CEO adımı ya da başka bir sekme) araya girdi: taze hâli al
+        const fresh = await fetchProposal(companyId, projectId);
+        if (fresh) setProposal(fresh);
+        setError("Öneri bu arada güncellendi — güncel liste yüklendi, değişikliğinizi tekrar yapın.");
+      } else {
+        setError(String(err));
+      }
+    }
+  }
+
+  /** 5. adım: onay — duran planlama iş akışı devam eder (applyPlan). */
   const confirm = useMutation({
     mutationFn: async () => {
       setError(null);
-      if (!projectId || !proposal) throw new Error("proje yok");
-      const applied = await confirmProposal(companyId, projectId, proposal.teams);
-      // Onay ucu yoksa (T19 inmedi) iş yine BAŞLAR: hedef CEO'ya verilir ve
-      // mevcut planlama/işe-alım zinciri yürür. Kullanıcı için sonuç aynı.
-      const goal = await api.projects.setGoal(
-        companyId,
-        projectId,
-        `${requirements.trim()}\n\nÖnerilen kadro (Founder onayı): ${proposal.teams
-          .map((t) => `${t.name} × ${t.headcount}`)
-          .join(", ")}`,
-      );
-      return { applied: applied?.applied ?? false, state: goal.state };
+      if (!proposal) throw new Error("öneri yok");
+      if (!proposal.local) {
+        const ok = await confirmProposal(companyId, proposal.id);
+        if (!ok) throw new Error("onay ucu yanıt vermedi");
+      }
+      // yerel taslakta hedef zaten verildi; iş mevcut planlama zinciriyle yürür
+      return true;
     },
     onSuccess: () => {
       setStep("done");
@@ -110,15 +170,11 @@ export function ProjectWizard({
       ),
   });
 
-  function editTeams(next: ProposalTeam[]) {
-    setProposal((current) => (current ? { ...current, teams: next, status: "adjusted" } : current));
-    // sunucu önerisi ise düzenlemeyi kalıcılaştır (uç yoksa sessizce yerelde kalır)
-    if (projectId && proposal?.source === "server") void patchProposal(companyId, projectId, next);
-  }
-
   if (!open) return null;
 
-  const headcountTotal = (proposal?.teams ?? []).reduce((sum, t) => sum + t.headcount, 0);
+  const teams = proposal?.teams ?? [];
+  const headcountTotal = teams.reduce((sum, t) => sum + t.headcount, 0);
+  const hireTotal = teams.reduce((sum, t) => sum + t.hireCount, 0);
 
   return (
     <Dialog open onClose={onClose} title="Yeni proje">
@@ -149,7 +205,10 @@ export function ProjectWizard({
               />
             </Field>
             {error && (
-              <p className="rounded bg-danger/10 px-2 py-1 text-xs text-danger" data-testid="project-wizard-error">
+              <p
+                className="rounded bg-danger/10 px-2 py-1 text-xs text-danger"
+                data-testid="project-wizard-error"
+              >
                 {error}
               </p>
             )}
@@ -158,54 +217,87 @@ export function ProjectWizard({
                 Vazgeç
               </Button>
               <Button
-                disabled={name.trim().length < 2 || requirements.trim().length < 4 || start.isPending}
+                disabled={
+                  name.trim().length < 2 || requirements.trim().length < 4 || start.isPending
+                }
                 onClick={() => start.mutate()}
                 data-testid="project-wizard-next"
               >
-                {start.isPending ? "CEO düşünüyor…" : "Devam — kadroyu öner"}
+                Devam — kadroyu öner
               </Button>
             </div>
           </>
         )}
 
+        {step === "thinking" && (
+          <div
+            className="rounded-md border border-acos-line bg-acos-bg2 p-4 text-xs text-acos-fg1"
+            data-testid="project-wizard-thinking"
+          >
+            <p className="font-medium text-acos-fg0">CEO kadroyu değerlendiriyor…</p>
+            <p className="mt-1 text-acos-fg2">
+              Proje açıldı ve hedef CEO&apos;ya verildi. Hangi takımların, kaç kişiyle gerektiğini
+              öneriyor; birazdan burada göreceksiniz ve değiştirebileceksiniz.
+            </p>
+            <div className="mt-3">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  skipWait.current = true;
+                }}
+                data-testid="proposal-skip-wait"
+              >
+                Beklemeden taslakla devam et
+              </Button>
+            </div>
+          </div>
+        )}
+
         {step === "proposal" && proposal && (
           <>
             <div className="rounded-md border border-acos-line bg-acos-bg2 p-2.5">
-              <p className="text-[11.5px] font-medium text-acos-fg0">
-                {name} için önerilen kadro
+              <p className="text-[11.5px] font-medium text-acos-fg0">{name} için önerilen kadro</p>
+              <p className="mt-1 whitespace-pre-wrap text-[10.5px] text-acos-fg2">
+                {proposal.rationaleMd}
               </p>
-              <p className="mt-1 text-[10.5px] text-acos-fg2">{proposal.rationale}</p>
-              {proposal.source === "local-draft" && (
+              {proposal.local && (
                 <p className="mt-1 text-[10px] text-acos-fg2" data-testid="proposal-draft-note">
-                  (taslak öneri — kalıcı CEO önerisi bağlandığında bu liste doğrudan CEO'dan
+                  (taslak öneri — kalıcı CEO önerisi bağlandığında bu liste doğrudan CEO&apos;dan
                   gelecek)
                 </p>
               )}
             </div>
 
             <ul className="space-y-1.5" data-testid="proposal-teams">
-              {proposal.teams.map((team, index) => (
+              {teams.map((team, index) => (
                 <li
                   key={team.key}
                   className="flex items-center gap-2 rounded-md border border-acos-line bg-acos-bg1 px-2.5 py-1.5"
                   data-testid={`proposal-team-${team.key}`}
                 >
                   <span className="min-w-24 truncate text-[11.5px] font-medium text-acos-fg0">
-                    {team.name}
+                    {team.teamName}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-[10px] text-acos-fg2">
                     {team.rationale ?? team.capability}
+                    {team.existingCount > 0 && (
+                      <span className="ml-1 text-acos-fg2">
+                        · {team.existingCount} mevcut, {team.hireCount} yeni
+                      </span>
+                    )}
                   </span>
                   <button
                     onClick={() =>
-                      editTeams(
-                        proposal.teams.map((t, i) =>
-                          i === index ? { ...t, headcount: Math.max(1, t.headcount - 1) } : t,
+                      void editTeams(
+                        teams.map((t, i) =>
+                          i === index
+                            ? { ...toEdit(t), headcount: Math.max(1, t.headcount - 1) }
+                            : toEdit(t),
                         ),
                       )
                     }
                     data-testid={`proposal-dec-${team.key}`}
-                    aria-label={`${team.name} kişi sayısını azalt`}
+                    aria-label={`${team.teamName} kişi sayısını azalt`}
                     className="h-5 w-5 rounded border border-acos-line text-acos-fg1 hover:text-acos-fg0"
                   >
                     −
@@ -218,22 +310,26 @@ export function ProjectWizard({
                   </span>
                   <button
                     onClick={() =>
-                      editTeams(
-                        proposal.teams.map((t, i) =>
-                          i === index ? { ...t, headcount: Math.min(20, t.headcount + 1) } : t,
+                      void editTeams(
+                        teams.map((t, i) =>
+                          i === index
+                            ? { ...toEdit(t), headcount: Math.min(20, t.headcount + 1) }
+                            : toEdit(t),
                         ),
                       )
                     }
                     data-testid={`proposal-inc-${team.key}`}
-                    aria-label={`${team.name} kişi sayısını artır`}
+                    aria-label={`${team.teamName} kişi sayısını artır`}
                     className="h-5 w-5 rounded border border-acos-line text-acos-fg1 hover:text-acos-fg0"
                   >
                     +
                   </button>
                   <button
-                    onClick={() => editTeams(proposal.teams.filter((_, i) => i !== index))}
+                    onClick={() =>
+                      void editTeams(teams.filter((_, i) => i !== index).map(toEdit))
+                    }
                     data-testid={`proposal-remove-${team.key}`}
-                    aria-label={`${team.name} takımını çıkar`}
+                    aria-label={`${team.teamName} takımını çıkar`}
                     className="ml-1 text-[11px] text-acos-fg2 hover:text-danger"
                   >
                     ✕
@@ -254,12 +350,17 @@ export function ProjectWizard({
                 variant="secondary"
                 disabled={!newTeamName.trim()}
                 onClick={() => {
-                  editTeams([
-                    ...proposal.teams,
+                  const label = newTeamName.trim();
+                  const capability = label
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, "-")
+                    .replace(/^-+|-+$/g, "");
+                  void editTeams([
+                    ...teams.map(toEdit),
                     {
-                      key: `added-${proposal.teams.length}-${newTeamName.trim().toLowerCase()}`,
-                      name: newTeamName.trim(),
-                      capability: newTeamName.trim().toLowerCase(),
+                      key: capability || `takim-${teams.length + 1}`,
+                      capability: capability || `takim-${teams.length + 1}`,
+                      teamName: label,
                       headcount: 1,
                       rationale: "Founder ekledi",
                     },
@@ -273,11 +374,17 @@ export function ProjectWizard({
             </div>
 
             <p className="text-[10.5px] text-acos-fg2" data-testid="proposal-total">
-              Toplam {proposal.teams.length} takım · {headcountTotal} kişi
+              Toplam {teams.length} takım · {headcountTotal} kişi
+              {hireTotal > 0 && ` · ${hireTotal} yeni işe alım`}
+              {proposal.estimatedCostCents > 0 &&
+                ` · ~$${(proposal.estimatedCostCents / 100).toFixed(0)}`}
             </p>
 
             {error && (
-              <p className="rounded bg-danger/10 px-2 py-1 text-xs text-danger" data-testid="project-wizard-error">
+              <p
+                className="rounded bg-danger/10 px-2 py-1 text-xs text-danger"
+                data-testid="project-wizard-error"
+              >
                 {error}
               </p>
             )}
@@ -287,7 +394,7 @@ export function ProjectWizard({
                 Sonra
               </Button>
               <Button
-                disabled={proposal.teams.length === 0 || confirm.isPending}
+                disabled={teams.length === 0 || confirm.isPending}
                 onClick={() => confirm.mutate()}
                 data-testid="proposal-confirm"
               >
@@ -304,8 +411,8 @@ export function ProjectWizard({
           >
             <p className="font-medium text-acos-fg0">{name} başladı.</p>
             <p className="mt-1 text-acos-fg2">
-              Hedef CEO&apos;ya verildi; kadro kurulumu ve iş kırılımı ekibiyle birlikte yürüyor.
-              Üst çubuktaki proje seçicisinde artık bu proje seçili.
+              Onayladığınız kadro kuruluyor ve iş kırılımı CEO ile ekibinde. Üst çubuktaki proje
+              seçicisinde artık bu proje seçili.
             </p>
             <div className="mt-3">
               <Button onClick={onClose} data-testid="project-wizard-close">

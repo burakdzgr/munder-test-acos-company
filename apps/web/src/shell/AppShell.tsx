@@ -211,7 +211,7 @@ function GlobalSearch({ companyId }: { companyId: string }) {
 function ProjectBar({ companyId }: { companyId: string }) {
   const [manageOpen, setManageOpen] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
-  const { groups, idleTeams } = useProjectTeams(companyId);
+  const { groups, idleTeams, linked } = useProjectTeams(companyId);
   const projects = useQuery({
     queryKey: [companyId, "projects", "list"],
     queryFn: () => api.projects.list(companyId),
@@ -239,9 +239,15 @@ function ProjectBar({ companyId }: { companyId: string }) {
   const counts = selectedProjectId
     ? (selectedGroup?.taskCountByUnit ?? {})
     : Object.fromEntries(groups.flatMap((g) => Object.entries(g.taskCountByUnit)));
+  // kalıcı bağ ucu takım başına ajan sayısını da veriyor (sözleşme §1);
+  // uç yokken org kenarlarından sayılır
+  const agentCounts = selectedProjectId
+    ? (selectedGroup?.agentCountByUnit ?? {})
+    : Object.fromEntries(groups.flatMap((g) => Object.entries(g.agentCountByUnit)));
 
   const chip = (team: { id: string; name: string }, openTasks: number | undefined) => {
     const active = teamFilter?.unitId === team.id;
+    const members = agentCounts[team.id] ?? headcount(team.id);
     return (
       <button
         key={team.id}
@@ -249,7 +255,7 @@ function ProjectBar({ companyId }: { companyId: string }) {
         onClick={() =>
           setTeamFilter(active ? null : { unitId: team.id, name: team.name })
         }
-        title={`${team.name} — ${headcount(team.id)} üye${
+        title={`${team.name} — ${members} üye${
           openTasks ? ` · ${openTasks} açık iş` : ""
         } · komuta merkezini bu takıma filtrele`}
         className={cn(
@@ -266,7 +272,7 @@ function ProjectBar({ companyId }: { companyId: string }) {
             active ? "bg-dept-engineering text-acos-bg0" : "bg-acos-bg3",
           )}
         >
-          {headcount(team.id)}
+          {members}
         </span>
       </button>
     );
@@ -312,6 +318,17 @@ function ProjectBar({ companyId }: { companyId: string }) {
         {teams.length > 0 ? (
           <>
             <span className="shrink-0 text-[9.5px] text-acos-fg2">takımlar:</span>
+            {/* sözleşme §1: bir projenin KALICI bağı yoksa liste işten
+                türetilmiştir — kullanıcı "bu daha bağlanmadı" görsün */}
+            {linked && selectedGroup?.source === "derived" && (
+              <span
+                className="shrink-0 rounded border border-acos-line px-1 text-[8.5px] text-acos-fg2"
+                title="Bu takımlar projeye kalıcı olarak bağlanmadı — işten (görevlerden) türetildi"
+                data-testid="project-teams-derived"
+              >
+                türetilmiş
+              </span>
+            )}
             {teams.slice(0, 5).map((team) => chip(team, counts[team.id]))}
             {teams.length > 5 && (
               <span className="shrink-0 text-[9.5px] text-acos-fg2">+{teams.length - 5}</span>
