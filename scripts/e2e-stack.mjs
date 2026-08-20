@@ -71,6 +71,14 @@ const stackEnv = {
   // Slot 0 keeps the historical subnet; isolated stacks move into 10.x so they
   // never overlap it or each other (172.16-172.31 has no room above 172.31).
   WORKSPACE_SUBNET: SLOT === 0 ? "172.31.0.0/16" : `10.${200 + SLOT}.0.0/16`,
+  // Tek kullanicili, tek kullanimlik yigin: AUTH_AUTOLOGIN acik ve NODE_ENV
+  // production oldugundan sunucu guvenlik kapisina takilip HIC ACILMIYOR
+  // ("refusing to boot an unauthenticated production server"). Bu sadece
+  // gelistirici makinesindeki infrastructure/docker/.env dosyasi bunu
+  // ayarladigi icin gorunmuyordu — WORKTREE'de .env yok, bu yuzden e2e
+  // yigini bir worktree'den kaldirildiginda sunucu sessizce cikiyordu.
+  // Yigin izole ve gecici oldugundan bilincli olarak burada aciyoruz.
+  AUTH_AUTOLOGIN_ALLOW_PRODUCTION: "true",
   SEED_FOUNDER_PASSWORD: process.env.SEED_FOUNDER_PASSWORD ?? "founder-dev-password",
   // e2e senaryoları demo şirketin kadrosuna ("Acme Technologies", Kerem
   // Yıldız, Backend takımı…) dayanır. SEED_DEMO'nun varsayılanı false
