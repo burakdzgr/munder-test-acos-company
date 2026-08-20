@@ -87,14 +87,29 @@ sql "select s.id, s.agent_id, count(ti.*), count(*) filter (where ti.result_summ
       where s.company_id = :'company' and s.started_at >= :'run_start' \
         and exists (select 1 from llm_calls l where l.agent_session_id = s.id and l.context_telemetry->>'runtime'='cli') \
       group by s.id, s.agent_id order by min(s.started_at)" | tee "$OUT/4a.rows.txt"
-um=$(sql "select count(*) filter (where decision_reason like 'UNMAPPED_BUILTIN%') || '|' || count(*) filter (where result_summary like 'builtin allowed%' and tool_name not in ('terminal.run','fs.read','fs.edit','fs.write','fs.search')) from tool_invocations where company_id = :'company' and created_at >= :'run_start'")
-[ "$um" = "0|0" ] && verdict PASS "builtin audit rows canonical, no UNMAPPED_BUILTIN" "$um" || verdict FAIL "builtin audit rows canonical, no UNMAPPED_BUILTIN" "$um"
-orph=$(sql "select count(*) from agent_sessions s where s.company_id = :'company' and s.started_at >= :'run_start' \
-   and exists (select 1 from llm_calls l where l.agent_session_id = s.id and l.context_telemetry->>'runtime'='cli') \
-   and not exists (select 1 from tool_invocations ti where ti.agent_session_id = s.id) \
-   and not exists (select 1 from events e where e.company_id = s.company_id and e.agent_id = s.agent_id and e.occurred_at between s.started_at and coalesce(s.ended_at, now()) \
-        and e.type in ('task.created','task.delegated','task.status.changed','agent.help.requested','review.requested','agent.escalated','decision.recorded','agent.message.sent'))")
-[ "$orph" = "0" ] && verdict PASS "no CLI session without any audited tool or Family-B effect" "0" || verdict FAIL "sessions with neither audit rows nor Family-B events (work did not progress?)" "$orph"
+# NON-EMPTY rule for 4a too (Jim caught it): on an empty company both checks
+# below are trivially 0 and read as "checked and clean" — a vacuous PASS, the
+# same trap the 4b/4c guards close. Gate on population: no CLI session in the
+# window → NOTHING TO SCAN, and no tool_invocations → the UNMAPPED check has
+# nothing to judge.
+n_cli=$(printf '%s' "$(wc -l < "$OUT/s0.sessions.txt")" | tr -d ' ')
+n_ti=$(sql "select count(*) from tool_invocations where company_id = :'company' and created_at >= :'run_start'")
+if [ "${n_ti:-0}" -eq 0 ]; then
+  verdict SKIP "builtin audit rows canonical, no UNMAPPED_BUILTIN" "NOTHING TO SCAN: 0 tool_invocations in the window"
+else
+  um=$(sql "select count(*) filter (where decision_reason like 'UNMAPPED_BUILTIN%') || '|' || count(*) filter (where result_summary like 'builtin allowed%' and tool_name not in ('terminal.run','fs.read','fs.edit','fs.write','fs.search')) from tool_invocations where company_id = :'company' and created_at >= :'run_start'")
+  [ "$um" = "0|0" ] && verdict PASS "builtin audit rows canonical, no UNMAPPED_BUILTIN" "$um" || verdict FAIL "builtin audit rows canonical, no UNMAPPED_BUILTIN" "$um"
+fi
+if [ "${n_cli:-0}" -eq 0 ]; then
+  verdict SKIP "no CLI session without any audited tool or Family-B effect" "NOTHING TO SCAN: 0 CLI sessions in the window"
+else
+  orph=$(sql "select count(*) from agent_sessions s where s.company_id = :'company' and s.started_at >= :'run_start' \
+     and exists (select 1 from llm_calls l where l.agent_session_id = s.id and l.context_telemetry->>'runtime'='cli') \
+     and not exists (select 1 from tool_invocations ti where ti.agent_session_id = s.id) \
+     and not exists (select 1 from events e where e.company_id = s.company_id and e.agent_id = s.agent_id and e.occurred_at between s.started_at and coalesce(s.ended_at, now()) \
+          and e.type in ('task.created','task.delegated','task.status.changed','agent.help.requested','review.requested','agent.escalated','decision.recorded','agent.message.sent'))")
+  [ "$orph" = "0" ] && verdict PASS "no CLI session without any audited tool or Family-B effect" "0" || verdict FAIL "sessions with neither audit rows nor Family-B events (work did not progress?)" "$orph"
+fi
 
 say "== 4b bypass guard: transcript tool_use vs audit rows (per CLI session)"
 # NON-EMPTY rule (Oscar's vacuum guard): iterate EVERY CLI session (from S0),
