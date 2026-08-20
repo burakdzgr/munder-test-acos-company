@@ -645,6 +645,9 @@ export class DelegationService {
       ctx,
       {
         kind: "task",
+        // parent'siz ama projesiz degil — mudahale, limite carpan gorevin
+        // projesine aittir (uyandirma gorevleri kurali, 2026-08-20).
+        projectId: task.projectId ?? undefined,
         title: `Reassignment limit reached: TASK-${task.number}`,
         objective:
           "The task hit the 3-reassignment limit (hot-potato guard). Review, then move it with an explicit force_reassign override.",

@@ -1000,11 +1000,25 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
                   )
                   .limit(1);
                 if (!liveSession) {
+                  // Uyandirma gorevi is kirilimninin COCUGU degildir — parent'siz
+                  // kalir (07 §2 tur merdiveni: bir 'task'i initiative'in altina
+                  // asmak rollup'lari bozardi). AMA projesiz de kalmamali:
+                  // WorkspaceService.provision task.projectId istiyor ve
+                  // workspaces.project_id NOT NULL, yani projesiz uyandirma
+                  // gorevi yoneticiye workspace ACAMIYOR (canli kanit: TASK-6,
+                  // Kevin E4 kosusu 2026-08-20 — steps-path'e dusup REVIEW'da
+                  // kapandi) ve harcamasi proje rollup'ina islenmiyor. Cozum:
+                  // HAKKINDA oldugu gorevin projesini kalit.
+                  const [aboutTask] = await guardedDb
+                    .select({ projectId: tasks.projectId })
+                    .from(tasks)
+                    .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
                   const helpTask = await tasksService.create(
                     ctx,
                     {
                       id: uuidv5("help-task", input.stepId), // idempotent replay
                       kind: "task",
+                      projectId: aboutTask?.projectId ?? undefined,
                       title: `Yardım talebi: ${action.topic}`.slice(0, 200),
                       objective:
                         `${plan.message.id} numaralı yardım mesajını yanıtla. ` +

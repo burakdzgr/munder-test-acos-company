@@ -344,6 +344,10 @@ describe("reassignment trips exactly at 3 → forced manager intervention (07 §
       .where(sql`${tasks.companyId} = ${companyId} AND ${tasks.context}->>'interventionFor' = ${task.id}`);
     expect(intervention).toHaveLength(1);
     expect(intervention[0]!.priority).toBe("P1");
+    // Mudahale gorevi is kirilimninin cocugu DEGILDIR: parent'siz kalmali
+    // (07 §2 tur merdiveni). 2026-08-20'de bu gorevlere proje kalitimi
+    // eklendi; parent'sizlik o degisiklikte KORUNMASI gereken taraftir.
+    expect(intervention[0]!.parentId).toBeNull();
     const [flagged] = await db
       .select()
       .from(tasks)
