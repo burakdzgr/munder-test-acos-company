@@ -19,7 +19,9 @@ import {
   type GuardedDb,
   type SimilarMemory,
   type TriggerWindow,
+  recordLlmCall,
 } from "@acos/db";
+import { uuidv5 } from "@acos/domain";
 import type { SimilarityBand } from "@acos/domain";
 import { companySettings } from "@acos/db/schema";
 import { eq } from "drizzle-orm";
@@ -181,11 +183,38 @@ export function createMemoryActivities(deps: MemoryActivityDeps) {
       // sürebilir — canlılık Temporal heartbeat'iyle kanıtlanır (workflow
       // tarafı heartbeatTimeout 60s).
       const stopBeat = startTemporalHeartbeat("memory:extract-candidates");
+      // T36: bu pencerenin defter kimliği — çapa (görev ya da ajan) + penceredeki
+      // SON olay. Aktivite yeniden denendiğinde aynı satır, yeni bir pencere
+      // için ise yeni satır; onarım turu kendi satırını yazar (ikinci bir
+      // model çağrısıdır, ayrı maliyettir).
+      const ledgerAnchor =
+        window.task?.id ?? window.agent?.id ?? "00000000-0000-7000-8000-000000000000";
+      const windowKey = window.events[window.events.length - 1]?.id ?? "empty";
+      const ledger = async (
+        attempt: "extract" | "repair",
+        result: { providerId: string; model: string; usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number }; costCents: number; latencyMs: number },
+      ) => {
+        await recordLlmCall(deps.guardedDb, ctx, {
+          id: uuidv5(`memory-${attempt}:${windowKey}`, ledgerAnchor),
+          // routing purpose "fast" ile aynı (llm_calls_purpose_check kanonik)
+          purpose: "fast",
+          providerId: result.providerId,
+          model: result.model,
+          tokensIn: result.usage.inputTokens,
+          tokensOut: result.usage.outputTokens,
+          tokensCached: result.usage.cachedInputTokens ?? 0,
+          costCents: result.costCents,
+          latencyMs: result.latencyMs,
+          ...(anchor.agentId && { agentId: anchor.agentId }),
+          ...(window.task?.id && { taskId: window.task.id }),
+        });
+      };
       try {
         const first = await deps.router.complete(
           { purpose: "fast", messages: [{ role: "user", content: prompt }] },
           routing,
         );
+        await ledger("extract", first);
         try {
           return parseMemoryCandidates(first.text);
         } catch (err) {
@@ -201,6 +230,7 @@ export function createMemoryActivities(deps: MemoryActivityDeps) {
             },
             routing,
           );
+          await ledger("repair", repair);
           return parseMemoryCandidates(repair.text);
         }
       } finally {

@@ -97,6 +97,7 @@ export {
   TEAM_WIP_MULTIPLIER,
   type DelegationResult,
 } from "./delegation.js";
+export { recordLlmCall, type LlmCallRecord } from "./llm-calls.js";
 export {
   ApprovalsService,
   ApprovalError,

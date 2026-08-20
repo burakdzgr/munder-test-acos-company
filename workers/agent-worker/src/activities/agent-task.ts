@@ -20,6 +20,7 @@ import {
   TaskStateService,
   appendEvents,
   companyContext,
+  recordLlmCall,
   deliverMessage,
   type CompanyContext,
   type GuardedDb,
@@ -37,7 +38,6 @@ import {
   artifacts as artifactsTable,
   companySettings,
   environments,
-  llmCalls,
   modelProfiles,
   notifications,
   orgEdges,
@@ -1181,33 +1181,27 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
           ...(input.contextTelemetry && { context: { ...input.contextTelemetry } }),
         },
       });
-      await guardedDb.transaction(async (tx) => {
-        const [existing] = await tx
-          .select({ id: llmCalls.id })
-          .from(llmCalls)
-          .where(and(eq(llmCalls.companyId, ctx.companyId), eq(llmCalls.id, llmCallId)));
-        if (existing) return; // retried activity — cost not double-counted
-        await tx.insert(llmCalls).values({
-          id: llmCallId,
-          companyId: ctx.companyId,
-          agentId: input.agentId,
-          taskId: input.taskId,
-          agentSessionId: input.sessionId,
-          purpose: "reasoning",
-          providerId: result.providerId,
-          model: result.model,
-          tokensIn: result.usage.inputTokens,
-          tokensOut: result.usage.outputTokens,
-          tokensCached: result.usage.cachedInputTokens,
-          costCents: result.costCents,
-          latencyMs: result.latencyMs,
-          status: "ok",
-          // TASK 7: bölüm bazlı input dağılımı — sonraki optimizasyonların
-          // ölçüm kaynağı (Founder/Costs detayına gerek yok; veri burada)
-          ...(input.contextTelemetry && {
-            contextTelemetry: input.contextTelemetry as unknown as Record<string, unknown>,
-          }),
-        });
+      // T36: defter yazımı artık TEK yolda (@acos/db recordLlmCall) — ajan
+      // döngüsü, planlama/intake ve hafıza çıkarımı aynı fonksiyonu çağırır.
+      // Davranış aynı: id deterministik, yeniden deneme maliyeti ikiye
+      // katlamaz. TASK 7 bölüm telemetrisi de aynen taşınır.
+      await recordLlmCall(guardedDb, ctx, {
+        id: llmCallId,
+        agentId: input.agentId,
+        taskId: input.taskId,
+        agentSessionId: input.sessionId,
+        purpose: "reasoning",
+        providerId: result.providerId,
+        model: result.model,
+        tokensIn: result.usage.inputTokens,
+        tokensOut: result.usage.outputTokens,
+        tokensCached: result.usage.cachedInputTokens,
+        costCents: result.costCents,
+        latencyMs: result.latencyMs,
+        status: "ok",
+        ...(input.contextTelemetry && {
+          contextTelemetry: input.contextTelemetry as unknown as Record<string, unknown>,
+        }),
       });
       return {
         text: result.text,

@@ -7,10 +7,12 @@ import {
   ProjectsService,
   MemoryConsolidationService,
   companyContext,
+  recordLlmCall,
   type CompanyContext,
   type GuardedDb,
 } from "@acos/db";
 import { companySettings, tasks } from "@acos/db/schema";
+import { uuidv5 } from "@acos/domain";
 import { eq } from "drizzle-orm";
 import { outputLanguageDirective } from "@acos/llm";
 import type { ModelRouter, RoutingContext } from "@acos/llm";
@@ -152,6 +154,8 @@ export function createIntakeControlActivities(deps: IntakeControlActivityDeps) {
   async function synthesizeReport(
     ctx: CompanyContext,
     input: {
+      /** T36: defter kimliği projeye sabitlenir (rapor proje başına birdir). */
+      projectId: string;
       projectName: string;
       objective: string;
       constraints: string | null;
@@ -204,6 +208,23 @@ export function createIntakeControlActivities(deps: IntakeControlActivityDeps) {
         { purpose: "reasoning", messages: [{ role: "user", content: prompt }] },
         routing,
       );
+      // T36: planlama yolunun harcaması da deftere düşer. Kimlik projeye
+      // sabitlenir — intake raporu proje başına BİR kez üretilir, yani
+      // aktivite yeniden denendiğinde maliyet ikiye katlanmaz.
+      await recordLlmCall(deps.guardedDb, ctx, {
+        id: uuidv5("intake-synthesis", input.projectId),
+        // 20 §: purpose kanonik yönlendirme amacıdır (CHECK ile sabit);
+        // "hangi planlama adımı" bilgisi taşımaz. Bu satırların ajan turundan
+        // ayırt edicisi agent_session_id'nin NULL olmasıdır.
+        purpose: "reasoning",
+        providerId: result.providerId,
+        model: result.model,
+        tokensIn: result.usage.inputTokens,
+        tokensOut: result.usage.outputTokens,
+        tokensCached: result.usage.cachedInputTokens,
+        costCents: result.costCents,
+        latencyMs: result.latencyMs,
+      });
       return parseSynthesis(result.text);
     } catch {
       // degraded exactly like an analyzer failure — the deterministic report
@@ -364,6 +385,19 @@ export function createIntakeControlActivities(deps: IntakeControlActivityDeps) {
           { purpose: "reasoning", messages: [{ role: "user", content: prompt }] },
           routing,
         );
+        // T36: kimlik HEDEF METNİNİ de içerir — aynı projeye ikinci bir hedef
+        // verildiğinde o analiz AYRI bir satırdır, ilkinin üstüne düşmez.
+        await recordLlmCall(deps.guardedDb, ctx, {
+          id: uuidv5(`intake-requirements:${input.objective}`, input.projectId),
+          purpose: "reasoning",
+          providerId: result.providerId,
+          model: result.model,
+          tokensIn: result.usage.inputTokens,
+          tokensOut: result.usage.outputTokens,
+          tokensCached: result.usage.cachedInputTokens,
+          costCents: result.costCents,
+          latencyMs: result.latencyMs,
+        });
         const start = result.text.indexOf("{");
         const end = result.text.lastIndexOf("}");
         if (start < 0 || end <= start) return null;
@@ -450,6 +484,21 @@ export function createIntakeControlActivities(deps: IntakeControlActivityDeps) {
             { purpose: "reasoning", messages: [{ role: "user", content: prompt }] },
             routing,
           );
+          // T36: sihirbazın kendi LLM harcaması — kimliği iş akışına bağlıdır,
+          // yani aynı koşunun yeniden denemesi tek satır kalır ama aynı proje
+          // için YENİ bir sihirbaz koşusu kendi satırını yazar.
+          await recordLlmCall(deps.guardedDb, ctx, {
+            id: uuidv5(`staffing-proposal:${input.workflowId ?? "adhoc"}`, input.projectId),
+            purpose: "reasoning",
+            providerId: result.providerId,
+            model: result.model,
+            tokensIn: result.usage.inputTokens,
+            tokensOut: result.usage.outputTokens,
+            tokensCached: result.usage.cachedInputTokens,
+            costCents: result.costCents,
+            latencyMs: result.latencyMs,
+            ...(input.goalTaskId && { taskId: input.goalTaskId }),
+          });
           const start = result.text.indexOf("{");
           const end = result.text.lastIndexOf("}");
           if (start >= 0 && end > start) {
