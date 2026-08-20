@@ -10,11 +10,18 @@
 //
 //   node scripts/e2e-live-run.mjs --go        # gerçekten ateşler (Founder GO gerekir)
 //   node scripts/e2e-live-run.mjs --dry       # ateşlemez: ön koşulları ve dizilimi gösterir
+//   ... --go --keep-up [--keep-up-minutes 30] # doğrulamadan SONRA yığını açık tutar
+//
+// --keep-up: kanıt zaten diskte olduğu için teardown'ın yok ettiği tek şey
+// Founder'ın İZLEME imkânıdır (1. koşuda pencere ~1 dakika sürdü). Bayrak,
+// doğrulama bittikten sonra yığını ya `<OUT_DIR>/CLOSE` dosyası oluşana kadar
+// ya da bütçe (varsayılan 30 dk) dolana kadar ayakta tutar. SÜRESİZ DEĞİL:
+// canlı slot port ve host kaynağı tutar.
 //
 // ATEŞLEME PAHALIDIR: 4 canlı CLI ajanı = gerçek abonelik tüketimi + host yükü.
 // --go bayrağı olmadan hiçbir şey başlamaz.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const FLAG = (name) => process.argv.includes(`--${name}`);
@@ -23,6 +30,8 @@ const arg = (name, fallback) => {
   return i >= 0 ? process.argv[i + 1] : fallback;
 };
 
+const KEEP_UP = FLAG("keep-up") || process.env.ACOS_E2E_KEEP_UP === "1";
+const KEEP_UP_MINUTES = Math.max(1, Number(arg("keep-up-minutes", process.env.ACOS_E2E_KEEP_UP_MINUTES ?? "30")) || 30);
 const PROJECT = arg("project", "acos-e2e-live");
 const OUT_DIR = arg("out", join(process.cwd(), `live-run-${PROJECT}`));
 const SLOT_WEB = arg("web-port", "16373");
@@ -116,6 +125,9 @@ if (!FLAG("go")) {
   log("  3. live-run-runtime-evidence.sh watch   (background, while agents are alive)");
   log("  4. live-run-runtime-evidence.sh report  (4a/4b/4d/4e + INV-2 scan)");
   log("  5. e2e-live-verify.mjs         (image identity + Oscar's control plane + 1d/409 + CLI session)");
+  log(KEEP_UP
+    ? `  5b. keep the stack up for up to ${KEEP_UP_MINUTES} min (Founder watches; close with ${join(OUT_DIR, "CLOSE")})`
+    : "  5b. (no keep-up: teardown follows verification immediately — pass --keep-up to let the Founder watch)");
   log("  6. e2e-stack.mjs down          (always, pass or fail)");
   // The shape gate needs a STAFFED company, which only exists once a run is
   // under way — so a dry run can only exercise it against an existing one.
@@ -207,7 +219,9 @@ try {
   })();
   if (!companyId) {
     driver.kill();
-    die(
+    // THROW, not die(): process.exit() would skip the finally block and leave a
+    // live slot running. An aborted run must still tear its stack down.
+    throw new Error(
       driverCode === null
         ? `no company with slug ${RUN_SLUG} appeared within 10 minutes — the driver never got started`
         : `the driver exited (code ${driverCode}) without creating company ${RUN_SLUG} — nothing ran, see its output above`,
@@ -278,6 +292,30 @@ try {
   exitCode = verify.status ?? 2;
   log(`\nrun artifacts: ${OUT_DIR}`);
   log(`office window: ${officeUrl}`);
+
+  // KEEP-UP. Evidence is already on disk by now, so the only thing teardown
+  // still destroys is the Founder's ability to WATCH. In run #1 the window
+  // lasted about a minute. With --keep-up the stack stays up until someone
+  // says stop or the budget runs out — never indefinitely, because a live slot
+  // holds ports and host resources.
+  if (KEEP_UP) {
+    const closeFile = join(OUT_DIR, "CLOSE");
+    const deadline = Date.now() + KEEP_UP_MINUTES * 60_000;
+    log(`\n-- 5b. keeping the stack up for up to ${KEEP_UP_MINUTES} minute(s)`);
+    log(`   WATCH:  ${officeUrl}`);
+    log(`   CLOSE:  create ${closeFile}  (or press Ctrl-C, or run: node scripts/e2e-stack.mjs down)`);
+    let closed = false;
+    while (Date.now() < deadline) {
+      if (existsSync(closeFile)) { closed = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      const left = Math.ceil((deadline - Date.now()) / 60_000);
+      if (left > 0 && left % 5 === 0) log(`   still up — ~${left} minute(s) left`);
+    }
+    log(closed ? "\n   close signal received" : `\n   keep-up budget of ${KEEP_UP_MINUTES} minute(s) is spent`);
+  }
+} catch (error) {
+  console.error(`\nRUN ABORTED: ${error?.message ?? error}`);
+  exitCode = 3;
 } finally {
   if (watcher) watcher.kill();
   // Teardown ALWAYS — a live slot left running keeps burning host resources and
