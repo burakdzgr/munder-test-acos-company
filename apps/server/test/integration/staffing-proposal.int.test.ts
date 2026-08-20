@@ -34,6 +34,7 @@ import {
   applyProposal,
   confirmProposal,
   editProposal,
+  getLatestProposal,
   getOpenProposal,
   openDraftProposal,
   ProposalError,
@@ -303,6 +304,34 @@ describe("staffing proposal (E2/W3)", { timeout: 180_000 }, () => {
     });
     expect(late.teams.map((t) => t.capability)).toEqual(["security"]);
     expect(late.source).toBe("human");
+  });
+
+  it("UYGULANAN öneri okuma yüzeyinde görünür kalır (T25/#3)", async () => {
+    // Jim'in canlı koşusu: uygulandıktan sonra GET 404'e dönüyordu ve istemci
+    // "kuruldu" ile "uç yok"u yine ayırt edemiyordu — d2ef2d9'un kapattığı
+    // belirsizliğin aynısı, bu kez zincirin öbür ucunda.
+    const applied = await getLatestProposal(guardedDb, ctx, projectId);
+    expect(applied?.status).toBe("applied");
+    expect(applied?.teams.map((t) => t.capability)).toEqual(["backend"]);
+    // upsert'ün kullandığı AÇIK sorgu ise onu görmemeye devam etmeli, yoksa
+    // uygulanmış bir öneri ikinci hedefin yeni öneri açmasını engellerdi
+    expect(await getOpenProposal(guardedDb, ctx, projectId)).toBeNull();
+  });
+
+  it("İPTAL edilen öneri de görünür kalır, ama yeni öneriyi engellemez", async () => {
+    const other = await mkProject("iptal-gorunur");
+    const draft = await openDraftProposal(guardedDb, ctx, { projectId: other });
+    const { cancelProposal } = await import("../../src/modules/staffing/proposal.js");
+    await cancelProposal(guardedDb, ctx, draft.id);
+    expect((await getLatestProposal(guardedDb, ctx, other))?.status).toBe("cancelled");
+    // ikinci hedef yeni bir öneri açabiliyor
+    const fresh = await upsertProposal(guardedDb, ctx, {
+      projectId: other,
+      source: "llm",
+      teams: [{ capability: "backend", headcount: 1 }],
+    });
+    expect(fresh.id).not.toBe(draft.id);
+    expect((await getLatestProposal(guardedDb, ctx, other))?.id).toBe(fresh.id);
   });
 
   it("boş plan onaylanamaz", async () => {

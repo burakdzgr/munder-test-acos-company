@@ -190,6 +190,74 @@ export async function getOpenProposal(
   return row ? toDto(row) : null;
 }
 
+/**
+ * OKUMA yüzeyi: projenin EN SON önerisi, durumu ne olursa olsun.
+ *
+ * getOpenProposal yalnız açık durumları tarar ve `upsertProposal` için öyle
+ * KALMALI (uygulanmış bir öneri, ikinci bir hedefin yeni öneri açmasını
+ * engellememeli). Ama istemci için 'applied'/'cancelled' de görünür olmalı:
+ * aksi halde GET uygulandıktan sonra 404'e döner ve 404 yine iki şeyi birden
+ * anlatır — d2ef2d9'un kapattığı belirsizliğin aynısı (T25/#3, Jim'in canlı
+ * koşusu). Sihirbaz "kuruldu" ekranını bu satırdan çizer.
+ */
+export async function getLatestProposal(
+  db: GuardedDb,
+  ctx: CompanyContext,
+  projectId: string,
+): Promise<StaffingProposalDto | null> {
+  const [row] = await db
+    .select()
+    .from(staffingProposals)
+    .where(
+      and(
+        eq(staffingProposals.companyId, ctx.companyId),
+        eq(staffingProposals.projectId, projectId),
+      ),
+    )
+    .orderBy(desc(staffingProposals.createdAt))
+    .limit(1);
+  return row ? toDto(row) : null;
+}
+
+/**
+ * T25/#2 (god kararı) — İNSANIN ONAYLADIĞI PLAN KADRONUN TEMELİDİR.
+ *
+ * Canlı kanıt (Jim, 2026-08-20): sihirbazda insan devops takımını BİLEREK
+ * sildi (headcount 0), applyPlan doğru kadroyu kurdu, ama hemen ardından
+ * planlama devamı gereksinim analizi artefaktından yeniden gap çıkardı ve
+ * "eksik kadro: devops x1" diye İKİNCİ bir Founder onayı açtı — yani insana
+ * az önce sildiği takımı tekrar sordu ve iş o onay gelene kadar başlamadı.
+ * Kullanıcının vizyonu net: sihirbaz KARAR NOKTASIDIR, ikinci onay yoktur.
+ *
+ * Bu yüzden onaylanmış öneri, analizci listesini FİLTRELEMEZ — onun YERİNE
+ * geçer. Böylece insanın sildiği takım "eksik" sayılmaz ve insanın EKLEDİĞİ
+ * (analizcinin hiç önermediği) takım da temele dahil olur.
+ *
+ * Öneri yoksa ya da iptal edildiyse null döner: eski yol aynen işler.
+ */
+export async function confirmedStaffingBaseline(
+  db: GuardedDb,
+  ctx: CompanyContext,
+  projectId: string,
+): Promise<string[] | null> {
+  const [row] = await db
+    .select()
+    .from(staffingProposals)
+    .where(
+      and(
+        eq(staffingProposals.companyId, ctx.companyId),
+        eq(staffingProposals.projectId, projectId),
+        inArray(staffingProposals.status, ["confirmed", "applied"]),
+      ),
+    )
+    .orderBy(desc(staffingProposals.createdAt))
+    .limit(1);
+  if (!row) return null;
+  const teams = (row.teams ?? []) as StaffingProposalTeam[];
+  if (teams.length === 0) return null; // boş temel gap'i sessizce kapatmasın
+  return teams.map((t) => `${t.capability} x${t.headcount}`);
+}
+
 export async function getProposal(
   db: GuardedDb,
   ctx: CompanyContext,
