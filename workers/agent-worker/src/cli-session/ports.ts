@@ -114,6 +114,7 @@ export type CliOutcome = "completed" | "review_requested" | "help_requested" | "
 
 export type EndedBy =
   | "cli_exit" // the CLI process ended on its own (print mode, /exit, crash)
+  | "entry_failed" // the CLI process died non-zero within seconds of starting (kit missing, refused identity, exec error) — an environment defect, never the model
   | "task_terminal" // task reached a terminal/handoff state → runtime closed the session
   | "wall_clock"
   | "token_budget"

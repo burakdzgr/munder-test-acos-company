@@ -13,6 +13,7 @@ function harness(over: {
   brokerSaturatedTimes?: number;
   gatewayFails?: boolean;
   totalTokensPerPoll?: number;
+  exitCodeOnExit?: number;
 } = {}) {
   const log: string[] = [];
   let clock = 1_000_000;
@@ -80,7 +81,7 @@ function harness(over: {
     status: async () => {
       statusPolls++;
       if (over.cliExitsAfterPolls !== null && over.cliExitsAfterPolls !== undefined && statusPolls > over.cliExitsAfterPolls) running = false;
-      return { running, exitCode: running ? null : 0 };
+      return { running, exitCode: running ? null : (over.exitCodeOnExit ?? 0) };
     },
     end: async () => {
       calls.push("sandbox.end");
@@ -156,6 +157,16 @@ describe("driveSession — the agent turn as one brokered CLI session (ADR-022)"
     expect(Object.keys(s.openedEnv ?? {})).not.toContain("INTERNAL_API_TOKEN");
     expect(s.released).toBe(1);
     expect(r.usage?.requestCount).toBe(3);
+  });
+
+  it("a CLI that dies non-zero within seconds is reported as entry_failed (environment defect), not a quiet abandon", async () => {
+    const h = harness({ cliExitsAfterPolls: 0, exitCodeOnExit: 127 });
+    const r = await driveSession(h.ports, h.input, h.opts);
+    expect(r.endedBy).toBe("entry_failed");
+    expect(r.exitCode).toBe(127);
+    expect(r.outcome).toBe("guard_stopped");
+    expect(h.state().log.some((l) => l.includes("ENTRY FAILED"))).toBe(true);
+    expect(h.state().revokedBroker).toBe(1);
   });
 
   it("task handoff (REVIEW) while the CLI is still alive → runtime ends the session → review_requested", async () => {

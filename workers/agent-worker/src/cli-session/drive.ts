@@ -55,6 +55,9 @@ export interface DrivePorts {
   readonly task: TaskStatePort;
 }
 
+/** A CLI that dies non-zero faster than this never ran a turn — entry failure. */
+export const ENTRY_FAIL_WINDOW_MS = 5_000;
+
 /** Task statuses after which the agent's turn is over (the MCP tools moved it). */
 const HANDOFF_STATUSES = new Set(["DONE", "REVIEW", "QA", "APPROVAL", "BLOCKED", "WAITING", "FAILED", "CANCELLED"]);
 
@@ -114,6 +117,7 @@ export async function driveSession(ports: DrivePorts, input: DriveInput, opts: D
   }
 
   let brokerToken: string | null = null;
+  let openedAt = 0;
   let gatewayToken: string | null = null;
   let gatewayMcpSessionId: string | null = null;
   let opened = false;
@@ -186,6 +190,7 @@ export async function driveSession(ports: DrivePorts, input: DriveInput, opts: D
       rows: input.rows,
     });
     opened = true;
+    openedAt = opts.nowMs();
     log("cli session opened", { agentSessionId: input.agentSessionId, terminalSessionId: input.terminalSessionId, reused: !o.opened });
 
     // ---- 5. watch
@@ -196,6 +201,20 @@ export async function driveSession(ports: DrivePorts, input: DriveInput, opts: D
       if (!st || !st.running) {
         exitCode = st?.exitCode ?? null;
         endedBy = "cli_exit";
+        // Died non-zero within seconds of exec = the ENTRY failed (no kit in the
+        // image → exec 127; run-session.sh refusals 64/65/66; missing binary),
+        // not the model. Say so loudly — this is a one-line diagnosis, not a
+        // silent 'abandoned'. (2026-08-21 live: the shared image tag had been
+        // rebuilt without the kit and the turn 'failed' in 0.9 s with no trace
+        // outside the PTY log.)
+        if (exitCode !== null && exitCode !== 0 && opts.nowMs() - openedAt < ENTRY_FAIL_WINDOW_MS) {
+          endedBy = "entry_failed";
+          log("cli session: ENTRY FAILED — the CLI process exited non-zero within seconds; check the workspace image has /opt/acos/cli (exec 127), the identity env (64/65/66) and the PTY log", {
+            exitCode,
+            terminalSessionId: input.terminalSessionId,
+            msSinceOpen: opts.nowMs() - openedAt,
+          });
+        }
         break;
       }
       const taskStatus = await ports.task.status();
