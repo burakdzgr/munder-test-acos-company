@@ -57,6 +57,7 @@ export {
   type SignalPort,
   type InboxItem,
 } from "./comms.js";
+export { wakeOnDecidedApproval, type ApprovalWakePort } from "./approval-wake.js";
 export {
   TaskEngineError,
   TasksService,

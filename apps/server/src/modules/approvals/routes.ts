@@ -89,6 +89,13 @@ export async function registerApprovalRoutes(
     guardedDb: () => GuardedDb;
     companiesSvc: () => CompanyService;
     approvalSignal: () => ApprovalSignalPort | null;
+    /** T57 link-3: karar taşınamazsa sahibin turunu yeniden başlatan starter. */
+    agentTurnStarter?: () => ((input: {
+      companyId: string;
+      agentId: string;
+      taskId: string;
+    }) => Promise<unknown>) | null;
+    onWakeError?: (err: unknown, input: { companyId: string; agentId: string; taskId: string }) => void;
   },
 ) {
   const app = rawApp.withTypeProvider<ZodTypeProvider>();
@@ -170,8 +177,27 @@ export async function registerApprovalRoutes(
         })
         .catch(mapApprovalError);
       const port = deps.approvalSignal();
+      let delivered = false;
       if (result.signal && port) {
-        await port({ approvalId: result.row.id, ...result.signal }).catch(() => false);
+        delivered = await port({ approvalId: result.row.id, ...result.signal }).catch(() => false);
+      }
+      // T57 link-3 — KARAR AJANA ULAŞMALI. Sinyal yalnız CANLI bir workflow'a
+      // taşınır; CLI şeridinde ise ajanın turu karar gelmeden çok önce bitmiş
+      // olur (MCP zarfı "bu çağrı çalışmadı, başka işe geç" der ve tur kapanır).
+      // O halde kayıt açılır, Founder onaylar ve ajan bunu HİÇ öğrenmezdi —
+      // T57'nin ilk yarısını düzeltip ikinci yarısını açık bırakmak olurdu.
+      // T38 (mesaj) ve T55 (bağımlılık) ile aynı şekil, üçüncü tetikleyici.
+      if (!delivered) {
+        const starter = deps.agentTurnStarter?.();
+        if (starter) {
+          const { wakeOnDecidedApproval } = await import("@acos/db");
+          await wakeOnDecidedApproval(deps.guardedDb(), ctx, result.row, {
+            startAgentTurn: async (input) => {
+              await starter(input);
+            },
+            ...(deps.onWakeError && { onError: deps.onWakeError }),
+          });
+        }
       }
       // LIVE-CONSOLE TASK 2: karar anı Agent Console'a canlı düşer
       // ("✓ Founder approval received"). Ephemeral rt.* kanalı — truth DB'de.

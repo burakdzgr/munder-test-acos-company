@@ -358,6 +358,11 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
     },
     companiesSvc,
     approvalSignal: () => app.approvalSignalPort,
+    // T57 link-3: karar canlı bir workflow'a taşınamazsa sahibin turunu
+    // yeniden başlat. Kapılar starter'ın içinde (tek oturum + şirket tavanı).
+    agentTurnStarter: () => app.agentWorkflowStarter,
+    onWakeError: (err, input) =>
+      app.log.warn({ err, ...input }, "approval wake could not start the owner's turn"),
   });
 
   // ---------- Tool Gateway (T39; 17 §4, S3 single choke point) ----------

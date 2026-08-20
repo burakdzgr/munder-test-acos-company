@@ -20,6 +20,7 @@ import {
 } from "@acos/db";
 import {
   agents,
+  agentSessions,
   approvals,
   auditLog,
   events,
@@ -300,6 +301,101 @@ describe("approvals engine (T35)", () => {
       payload: { verdict: "rejected", note: "changed my mind" },
     });
     expect(again.statusCode).toBe(409);
+  });
+
+  it("T57 link-3: a decision with NO live workflow restarts the requesting agent's turn", async () => {
+    // Gateway artık kaydı açıyor ve Founder onaylayabiliyor — ama CLI şeridinde
+    // (Decision A) ajanın turu karar gelmeden ÇOK önce biter: MCP zarfı "bu
+    // çağrı çalışmadı, başka işe geç" der ve oturum kapanır. O anda sinyalin
+    // taşınacağı canlı workflow YOKTUR. Uyandırma olmadan kayıt açılır,
+    // Founder onaylar ve ajan bunu HİÇ öğrenmez — T57'nin ilk yarısını
+    // düzeltip ikincisini açık bırakmak tam olarak bu olurdu.
+    const woke: Array<{ companyId: string; agentId: string; taskId: string }> = [];
+    app.agentWorkflowStarter = async (input) => {
+      woke.push(input);
+      return true;
+    };
+    const [task] = await db
+      .insert(tasks)
+      .values({
+        companyId,
+        number: 401,
+        kind: "task",
+        title: "R3 tool blocked on approval",
+        objective: "x",
+        status: "IN_PROGRESS",
+        ownerAgentId: DEV,
+        successCriteria: [],
+      })
+      .returning();
+    // workflowId YOK = tur bitmiş; `verdict` bu yüzden signal ÜRETMEZ
+    // (approvals.ts: `signal: row.workflowId ? … : null`).
+    const { row } = await service.create(ctx, {
+      kind: "tool_execution",
+      brief: validBrief(),
+      requestedByAgentId: DEV,
+      risk: "high",
+      taskId: task!.id,
+    });
+    expect(row.workflowId).toBeNull();
+    expect(woke).toHaveLength(0); // henüz karar yok — vakumlu geçmesin
+
+    const approve = await app.inject({
+      method: "POST",
+      url: `/api/v1/companies/${companyId}/approvals/${row.id}/verdict`,
+      headers: authHeaders(),
+      payload: { verdict: "approved", note: "run it" },
+    });
+
+    expect(approve.statusCode).toBe(200);
+    // KARAR AJANA ULAŞTI: turu yeniden başlatıldı, sahibi ve görevi doğru
+    expect(woke).toEqual([{ companyId, agentId: DEV, taskId: task!.id }]);
+  });
+
+  it("T57 link-3: a CANLI oturum varsa ikinci tur AÇILMAZ (çift yazar olmaz)", async () => {
+    const woke: Array<{ taskId: string }> = [];
+    app.agentWorkflowStarter = async (input) => {
+      woke.push({ taskId: input.taskId });
+      return true;
+    };
+    const [task] = await db
+      .insert(tasks)
+      .values({
+        companyId,
+        number: 402,
+        kind: "task",
+        title: "still working",
+        objective: "x",
+        status: "IN_PROGRESS",
+        ownerAgentId: DEV,
+        successCriteria: [],
+      })
+      .returning();
+    await db.insert(agentSessions).values({
+      companyId,
+      agentId: DEV,
+      taskId: task!.id,
+      status: "running",
+      workflowId: `wf-${task!.id}`,
+      runId: "r1",
+    });
+    const { row } = await service.create(ctx, {
+      kind: "tool_execution",
+      brief: validBrief(),
+      requestedByAgentId: DEV,
+      risk: "high",
+      taskId: task!.id,
+    });
+
+    const approve = await app.inject({
+      method: "POST",
+      url: `/api/v1/companies/${companyId}/approvals/${row.id}/verdict`,
+      headers: authHeaders(),
+      payload: { verdict: "approved", note: "ok" },
+    });
+
+    expect(approve.statusCode).toBe(200);
+    expect(woke).toHaveLength(0);
   });
 
   it("needs_review routes back and a revised brief returns to pending on the SAME id (19 §4)", async () => {
