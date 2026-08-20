@@ -541,12 +541,105 @@ describe("wait_for dependency bekleyişi kaydeder (T55a)", { timeout: 120_000 },
     expect(await statusOf(parent.id)).toBe("WAITING");
   });
 
+  it("halüsinasyonlu refId bekleyişi ÇÖPE ATMAZ: açık çocuklara düşer ve reddi RAPORLAR (F1)", async () => {
+    // Jim'in bulgusu ve haklıydı: `addDependency` uydurma bir id için
+    // `TASK_NOT_FOUND` atıyor, ilk sürümde bu "zaten kayıtlı" sayılıp
+    // `waitingOn`a KONUYORDU. Sonuç: kenar yazılmaz, gözlem "bekliyorum" der,
+    // görev WAITING'e park eder ve çözülecek kenar olmadığı için ASLA uyanmaz —
+    // düzeltmeye çalıştığımız kalıcı WAITING'in ta kendisi, tek bir uydurma
+    // id ile geri geliyordu.
+    const { parent, children } = await parentWithChildren(2);
+    const { createActionDispatcher } = await import("@acos/agent-actions");
+    const bogus = crypto.randomUUID();
+
+    const observation = await createActionDispatcher({ guardedDb }).dispatch({
+      companyId,
+      agentId: OWNER,
+      taskId: parent.id,
+      sessionId: crypto.randomUUID(),
+      stepId: crypto.randomUUID(),
+      action: { type: "wait_for", what: "dependency", refId: bogus, timeoutMinutes: 120 },
+    });
+
+    // uydurma id gözlemde "bekliyorum" diye GÖRÜNMEZ
+    expect(observation.waitingOn).not.toContain(bogus);
+    expect(observation.rejectedRefIds).toEqual([bogus]);
+    // ...ve bütün bekleyiş çöpe gitmez: açık çocuklara düşülür
+    const edges = await edgesOf(parent.id);
+    expect(edges.map((e) => e.dependsOn).sort()).toEqual(children.map((c) => c.id).sort());
+    expect(observation.waitingOnCount).toBe(2);
+  });
+
+  it("İKİ çocuklu ebeveyn BİRİNCİ çocuk çözülünce UYANMAZ (boşa oturum yakmaz)", async () => {
+    // Bu koruma "son bağımlılık çözülünce başlar" testinin İÇİNDE de ölçülüyor;
+    // Jim ayrı bir `it()` göremediği için eksik sandı — haklı olan tarafı şu:
+    // guarantee'nin kendi adı olmalı, yoksa keşfedilemiyor. Ayrı test, aynı
+    // iddia: `pending` yüklemi ters yazılsa bu satır düşer.
+    const { wakeOnResolvedDependency } = await import("@acos/db");
+    const { parent, children } = await parentWithChildren(2);
+    await waitForDependency(parent.id);
+    const started: string[] = [];
+    const port = {
+      startAgentTurn: async (input: { companyId: string; agentId: string; taskId: string }) => {
+        started.push(input.taskId);
+      },
+    };
+
+    await db
+      .update(taskDependencies)
+      .set({ resolvedAt: new Date() })
+      .where(
+        and(
+          eq(taskDependencies.companyId, companyId),
+          eq(taskDependencies.taskId, parent.id),
+          eq(taskDependencies.dependsOnTaskId, children[0]!.id),
+        ),
+      );
+
+    expect(await wakeOnResolvedDependency(guardedDb, ctx, parent.id, port)).toBe(false);
+    expect(started).toEqual([]);
+    // ve hâlâ tam olarak bir çözülmemiş kenar var — yani test vakumlu değil
+    const edges = await edgesOf(parent.id);
+    expect(edges.filter((e) => e.resolvedAt === null)).toHaveLength(1);
+  });
+
+  it("beklenmedik hata SESSİZ yutulmaz — onError çağrılır (F3)", async () => {
+    const { wakeOnResolvedDependency } = await import("@acos/db");
+    const { parent, children } = await parentWithChildren(1);
+    await waitForDependency(parent.id);
+    await db
+      .update(taskDependencies)
+      .set({ resolvedAt: new Date() })
+      .where(
+        and(
+          eq(taskDependencies.companyId, companyId),
+          eq(taskDependencies.taskId, parent.id),
+          eq(taskDependencies.dependsOnTaskId, children[0]!.id),
+        ),
+      );
+    const seen: unknown[] = [];
+
+    const woke = await wakeOnResolvedDependency(guardedDb, ctx, parent.id, {
+      startAgentTurn: async () => {
+        throw new Error("temporal down");
+      },
+      onError: (err) => seen.push(err),
+    });
+
+    expect(woke).toBe(false);
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as Error).message).toBe("temporal down");
+  });
+
   it("aynı wait_for iki kez çağrılırsa edge ÇOĞALMAZ (unique çifti yutulur)", async () => {
     const { parent } = await parentWithChildren(2);
 
     await waitForDependency(parent.id);
-    await waitForDependency(parent.id); // WAITING'den tekrar — idempotent olmalı
+    const second = await waitForDependency(parent.id); // WAITING'den tekrar
 
     expect(await edgesOf(parent.id)).toHaveLength(2);
+    // F1 sonrası: unique çakışması "zaten bekliyorum" demektir, dolayısıyla
+    // ikinci çağrının gözlemi de kümeyi TAM raporlamalı (sessizce boşalmamalı).
+    expect(second.waitingOnCount).toBe(2);
   });
 });

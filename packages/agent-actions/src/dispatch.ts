@@ -727,21 +727,57 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
           // NOT (dürüstlük): bu YALNIZ kayıt tarafıdır. Sinyalin sahibine
           // ULAŞMASI ayrı bir eksik — köprü yalnız CANLI oturuma sinyal atıyor
           // ve CLI şeridinde tur zaten bitmiş oluyor. Teslim tarafı ayrı commit.
-          let waitingOn: string[] = [];
+          const waitingOn: string[] = [];
+          const rejectedRefs: string[] = [];
           if (action.what === "dependency") {
-            const targets = action.refId ? [action.refId] : await openChildIdsOf(ctx, input.taskId);
+            // F1 (Jim review): `waitingOn` bir GÖZLEM YÜZEYİDİR — yazılamamış
+            // bir kenar oraya KONMAZ. İlk sürüm döngü dışındaki her hatayı
+            // "zaten kayıtlı" sayıyordu, ama `addDependency` uydurma/yabancı bir
+            // id için `TASK_NOT_FOUND` da atar: kenar yazılmaz, gözlem yine de
+            // "bunu bekliyorum" der, görev WAITING'e park eder ve çözülecek bir
+            // kenar OLMADIĞI için hiçbir zaman uyanmaz. Yani halüsinasyonlu tek
+            // bir `refId`, düzeltmeye çalıştığımız KALICI WAITING'i geri
+            // getiriyordu (T53/F1 ile aynı sınıf: "başarı" ile "hiç olmadı"nın
+            // ayırt edilememesi).
+            const named = action.refId ? [action.refId] : [];
+            const targets = named.length > 0 ? named : await openChildIdsOf(ctx, input.taskId);
             for (const dependsOn of targets) {
               if (dependsOn === input.taskId) continue;
               try {
                 await tasksService.addDependency(ctx, input.taskId, dependsOn);
                 waitingOn.push(dependsOn);
               } catch (err) {
-                // Aynı çift zaten kayıtlı (unique index) ya da döngü olurdu:
-                // ikisi de "bu bekleyiş zaten ifade edilmiş" demektir, turu
-                // düşürmez. Beklenen küme yine de gözlemde görünür.
-                const code = (err as { code?: string }).code;
+                // Drizzle pg hatasını SARIYOR: `cause`u açmadan `code` okumak
+                // 23505'i hiç görmez. (Testte yakalandı: ikinci `wait_for`
+                // `waitingOnCount:0` diyordu — kenarlar duruyorken gözlem
+                // "hiçbir şey beklemiyorum" der, yani yalan söylerdi.)
+                // apps/server/src/modules/companies/routes.ts:113 ile aynı deyim.
+                const root = (err as { cause?: unknown }).cause ?? err;
+                const code = (root as { code?: string }).code ?? (err as { code?: string }).code;
+                // Aynı çift zaten kayıtlı (unique index 23505): bekleyiş GERÇEKTEN
+                // ifade edilmiş, kenar duruyor — tekrar çağrı idempotent.
+                if (code === "23505") {
+                  waitingOn.push(dependsOn);
+                  continue;
+                }
+                // Döngü olurdu: kenar YOK, bu hedefi beklemiyoruz.
                 if (code === "TASK_DEPENDENCY_CYCLE") continue;
-                waitingOn.push(dependsOn);
+                // Hedef yok / başka şirket / beklenmedik: kenar YAZILMADI.
+                // Sessizce "bekliyorum" demiyoruz — ajana geri bildiriyoruz.
+                rejectedRefs.push(dependsOn);
+              }
+            }
+            // Model bir id uydurduysa bütün bekleyişi çöpe atmayalım: adlandırma
+            // başarısızsa açık çocuklara düş (07 §12'nin asıl kullanımı zaten bu).
+            if (waitingOn.length === 0 && named.length > 0) {
+              for (const child of await openChildIdsOf(ctx, input.taskId)) {
+                try {
+                  await tasksService.addDependency(ctx, input.taskId, child);
+                  waitingOn.push(child);
+                } catch (err) {
+                  const root = (err as { cause?: unknown }).cause ?? err;
+                  if ((root as { code?: string }).code === "23505") waitingOn.push(child);
+                }
               }
             }
           }
@@ -771,7 +807,15 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
           return {
             ok: true,
             waiting: action.what,
-            ...(action.what === "dependency" && { waitingOn, waitingOnCount: waitingOn.length }),
+            ...(action.what === "dependency" && {
+              waitingOn,
+              waitingOnCount: waitingOn.length,
+              // Ajan kendini düzeltebilsin: hangi refId tutmadı, açık söyle.
+              ...(rejectedRefs.length > 0 && {
+                rejectedRefIds: rejectedRefs,
+                note: "named dependency could not be recorded (unknown task) — fell back to this task's open children",
+              }),
+            }),
           };
         }
         case "create_task": {

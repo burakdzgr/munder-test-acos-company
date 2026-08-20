@@ -658,6 +658,8 @@ async function main(): Promise<void> {
               startAgentTurn: async (input) => {
                 await starter(input);
               },
+              onError: (err, input) =>
+                app.log.warn({ err, ...input }, "dependency wake could not start the owner's turn"),
             });
           }
         },

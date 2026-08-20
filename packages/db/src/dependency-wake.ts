@@ -30,6 +30,11 @@ import { agentSessions, taskDependencies, tasks } from "./schema/index.js";
 /** Turu başlatan taraf (server'ın `agentWorkflowStarter`'ı). */
 export interface DependencyWakePort {
   startAgentTurn(input: { companyId: string; agentId: string; taskId: string }): Promise<void>;
+  /** F3 (Jim review): starter'ın REDDİ ile BEKLENMEDİK bir hata dışarıdan aynı
+   *  görünmemeli. Reddi zaten kapı/tavan üretir ve normaldir; beklenmedik hata
+   *  sessizce yutulursa geriye tek dayanak 30 dakikalık sweep kalır ve kimse
+   *  görevin neden beklediğini bilemez. */
+  onError?(err: unknown, input: { companyId: string; agentId: string; taskId: string }): void;
 }
 
 /**
@@ -82,8 +87,13 @@ export async function wakeOnResolvedDependency(
       taskId: task.id,
     });
     return true;
-  } catch {
-    // uyandırma best-effort: sweep backstop olarak duruyor
+  } catch (err) {
+    // uyandırma best-effort: sweep backstop olarak duruyor — ama SESSİZ değil.
+    port.onError?.(err, {
+      companyId: ctx.companyId,
+      agentId: task.ownerAgentId,
+      taskId: task.id,
+    });
     return false;
   }
 }
