@@ -189,6 +189,12 @@ async function main(): Promise<void> {
           return false;
         }
       },
+      // T38: cozulen bekleyis, canli workflow YOKKEN de sahibinin turunu
+      // yeniden baslatir. Starter tek-canli-oturum kapisini ve sirket tavanini
+      // zaten uyguluyor; kapi reddederse gorev ASSIGNED kuyrugunda bekler.
+      async startAgentTurn({ companyId, agentId, taskId }) {
+        await app.agentWorkflowStarter?.({ companyId, agentId, taskId });
+      },
       async signalInbox({ companyId, agentId, item }) {
         await temporalClient.workflow.signalWithStart("agentInboxWorkflow", {
           taskQueue: "agent-tasks",
