@@ -364,11 +364,24 @@ export class OfficeProjector {
           record_decision: "THINKING",
           use_tool: "WORKING",
           send_message: "COMMUNICATING",
+          // Blokajda ilk adres yoneticiye mesajdir: ajan konusuyor.
+          request_help: "COMMUNICATING",
           request_review: "REVIEWING",
           escalate: "ESCALATING",
+          // PARK (08 §6): wait_for = "cevabi/sinyali bekliyorum". Bunu rozete
+          // yansitmayan ofis YANLIS bilgi veriyordu — park eden ajan ekranda
+          // hala WORKING (yazan) gorunuyordu, yani Founder bekleyisi hic
+          // goremiyordu. Veri zaten vardi (agent_sessions.current_activity
+          // WAITING'e cekiliyor); eksik olan yalniz gorunurluktu.
+          wait_for: "WAITING",
         };
-        const badge = badgeByAction[action];
-        if (badge && this.setBadge(state, agentId, badge))
+        // Eslesmeyen her adim yine de bir HAYAT belirtisidir: park etmis
+        // (WAITING) ajan yeni bir adim atinca WORKING'e doner — UYANMA ani
+        // boylece gorunur olur. Onceden rozet WAITING'te kalirdi cunku
+        // uyanma yolu (resumeFromWaitActivity) sistem aktoruyle gecis
+        // yapiyor ve task.status.changed dalinda sahip cozulemiyor.
+        const badge = badgeByAction[action] ?? "WORKING";
+        if (this.setBadge(state, agentId, badge))
           emit({ type: "office.status.changed", agentId, badge, ...cause });
         if (action === "complete_task" && !stale) {
           const managerId = state.reportsTo[agentId];
@@ -449,6 +462,19 @@ export class OfficeProjector {
       case "agent.escalated": {
         if (!actorAgent || !state.agents.has(actorAgent)) break;
         this.escalate(state, envelope, emit, actorAgent);
+        break;
+      }
+      // Guard parki (08 §9a/c/d): butce/adim-tavani/dongu tripledginde gorev
+      // WAITING'e park eder ve ajan durur. Bu, ajanin kendi kararindan degil
+      // SISTEM frenlemesinden dogar; ofiste BLOCKED olarak gorunur ki Founder
+      // "neden kimse kipirdamiyor" diye sormasin. deadline tek istisna: o
+      // park etmez, eskalasyon yolundan gider (zaten ESCALATING cizilir).
+      case "agent.guard.triggered": {
+        const agentId = actorAgent ?? (payload.agentId as string | undefined);
+        const guard = String(payload.guard ?? "");
+        if (!agentId || !state.agents.has(agentId) || guard === "deadline") break;
+        if (this.setBadge(state, agentId, "BLOCKED"))
+          emit({ type: "office.status.changed", agentId, badge: "BLOCKED", ...cause });
         break;
       }
       case "company.settings.updated": {

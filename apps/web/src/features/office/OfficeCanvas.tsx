@@ -72,7 +72,23 @@ const PIXEL = 2;
 function paintBubble(g: Graphics, kind: Bubble, x: number, y: number): void {
   if (kind === "none") return;
   const color =
-    kind === "alert" ? 0xff6b6b : kind === "review" ? 0xffcb47 : kind === "thought" ? 0xa879ff : 0x3fd0a0;
+    kind === "alert"
+      ? 0xff6b6b
+      : kind === "review"
+        ? 0xffcb47
+        : kind === "thought"
+          ? 0xa879ff
+          : kind === "wait"
+            ? 0x4cc2ff
+            : 0x3fd0a0;
+  // Bekleyis: duraklat isareti (⏸). Rengi terminal hucresindeki satirla
+  // ayni (0x4cc2ff) — iki pencerede ayni an, ayni renk.
+  if (kind === "wait") {
+    g.circle(x, y, 7).fill({ color: 0x151a22 }).stroke({ color, width: 1.5 });
+    g.rect(x - 2.4, y - 3.4, 1.8, 6.8).fill({ color });
+    g.rect(x + 0.6, y - 3.4, 1.8, 6.8).fill({ color });
+    return;
+  }
   if (kind === "thought") {
     g.circle(x, y, 7).fill({ color: 0x151a22 }).stroke({ color, width: 1.5 });
     g.circle(x - 3, y - 1, 1.4).fill({ color });

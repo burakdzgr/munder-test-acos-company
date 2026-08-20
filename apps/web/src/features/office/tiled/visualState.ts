@@ -23,7 +23,11 @@ export type Activity =
   | "escalating"
   | "idle"
   | "offline";
-export type Bubble = "none" | "thought" | "speech" | "review" | "alert";
+// "wait" (2026-08-21): PARK EDEN ajanin basinda duran DURAKLAT isareti. Onceden
+// WAITING rozetinin balonu "none" idi — masasinda oturan bekleyen ajan,
+// masasinda oturan calisan ajandan AYIRT EDILEMIYORDU. Canli kosum
+// demosunda Founder'in gormesi gereken an tam da bu.
+export type Bubble = "none" | "thought" | "speech" | "review" | "alert" | "wait";
 
 export interface VisualState {
   posture: Posture;
@@ -44,7 +48,7 @@ const BADGE_ACTIVITY: Record<string, { activity: Activity; bubble: Bubble }> = {
   TESTING: { activity: "reading", bubble: "review" },
   LEARNING: { activity: "thinking", bubble: "thought" },
   COMMUNICATING: { activity: "talking", bubble: "speech" },
-  WAITING: { activity: "waiting", bubble: "none" },
+  WAITING: { activity: "waiting", bubble: "wait" },
   BLOCKED: { activity: "blocked", bubble: "alert" },
   ESCALATING: { activity: "escalating", bubble: "alert" },
   IDLE: { activity: "idle", bubble: "none" },
