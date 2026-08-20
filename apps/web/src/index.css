@@ -11,6 +11,42 @@
   }
 }
 
+/* T27 — native <select> açılır listeleri (insan raporu 2026-08-20).
+   Kabuktaki ŞİRKET ve PROJE seçicileri bg-transparent üzerinde açık renk
+   metin kullanıyor; Chromium açılır listeyi select'in kendi arka planından
+   türettiği için liste BEYAZ zeminde AÇIK metin çıkıyordu — yalnız o an
+   seçili satır (mavi) okunabiliyordu. <option> üzerinde background-color ve
+   color Windows Chromium'da (masaüstü hedefimiz) UYGULANIR; kapalı kontrolün
+   görünümüne dokunmadan yalnız liste okunur hâle getiriliyor.
+   Renkler acosDark tokenlarıyla birebir (theme/acosDark.ts). */
+@layer base {
+  select {
+    color-scheme: dark;
+    /* Chromium açılır listeyi/liste kutusunu SELECT'İN KENDİ zemininden
+       türetiyor: zemin 'transparent' kalırsa liste UA'nın BEYAZ zeminine
+       düşüyor ve açık renk metin okunamıyor. Bu yüzden zemin burada
+       açıkça veriliyor (kapalı kontrol zaten bg-2 kapsayıcının içinde,
+       görünüm değişmiyor). */
+    background-color: #151a22; /* acos bg-2 */
+    color: #e6edf3; /* acos fg-0 */
+  }
+  select option,
+  select optgroup {
+    background-color: #151a22; /* acos bg-2 (raised) */
+    color: #e6edf3; /* acos fg-0 */
+  }
+  select option:disabled {
+    color: #5c6773; /* acos fg-2 */
+  }
+  /* seçili/vurgulu satır: dark temada da belirgin kalsın */
+  select option:checked,
+  select option:hover,
+  select option:focus {
+    background-color: #1c232d; /* acos bg-3 (hover) */
+    color: #e6edf3;
+  }
+}
+
 /* new memories fade in on memory.created (36 §5) */
 @keyframes memFade {
   from {
