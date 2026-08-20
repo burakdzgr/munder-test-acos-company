@@ -20,6 +20,7 @@ import {
   editProposal,
   getOpenProposal,
   getProposal,
+  openDraftProposal,
   ProposalError,
   upsertProposal,
 } from "./proposal.js";
@@ -236,13 +237,47 @@ export async function registerProposalRoutes(
         ...(request.body.rationaleMd !== undefined && { rationaleMd: request.body.rationaleMd }),
         teams: request.body.teams,
       });
-      // proje İNSANI bekler — durum bunu dürüstçe söylesin
-      await new ProjectsService(db)
-        .transition(ctx, projectId, "waiting_for_founder" as never, { kind: "system", id: null })
-        .catch(() => {
-          /* zaten o durumdaysa ya da geçiş yasaksa öneri yine de duruyor */
-        });
+      // Proje YALNIZCA gerçekten insan kararı beklerken parklanır. Boş
+      // taslak ("CEO düşünüyor") ya da önerisiz kapanış (cancelled) projeyi
+      // Founder beklemesine sokmamalı — o durumda akış deterministik yoldan
+      // kendi kendine sürer.
+      if (proposal.status === "awaiting_human") {
+        await new ProjectsService(db)
+          .transition(ctx, projectId, "waiting_for_founder" as never, { kind: "system", id: null })
+          .catch(() => {
+            /* zaten o durumdaysa ya da geçiş yasaksa öneri yine de duruyor */
+          });
+      }
       return proposal;
+    },
+  );
+
+  // Akışın BAŞINDA boş taslak: "CEO düşünüyor". Böylece GET'in 404'ü tek
+  // anlama gelir (proje/uç yok) ve sihirbaz dürüst bir ilerleme gösterir.
+  typed.post(
+    "/internal/v1/staffing/proposal/open",
+    {
+      schema: {
+        body: z.object({
+          companyId: z.uuid(),
+          projectId: z.uuid(),
+          workflowId: z.string().max(200).nullish(),
+        }),
+        tags: ["staffing"],
+        hide: true,
+      },
+    },
+    async (request, reply) => {
+      if (request.headers.authorization !== `Bearer ${deps.internalApiToken()}`) {
+        return reply
+          .status(401)
+          .send({ code: "unauthenticated", message: "internal token required" });
+      }
+      const { companyId, projectId } = request.body;
+      return openDraftProposal(deps.guardedDb(), companyContext(companyId), {
+        projectId,
+        workflowId: request.body.workflowId ?? null,
+      });
     },
   );
 

@@ -31,12 +31,16 @@ interface Recorder {
   applied: string[];
 }
 
-function makeStub(opts: { proposal: boolean }): {
+function makeStub(opts: { proposal: boolean; teamCount?: number }): {
   activities: Record<string, unknown>;
   calls: Recorder;
 } {
   const calls: Recorder = { order: [], proposalId: null, applied: [] };
   const activities = {
+    async openStaffingProposalActivity() {
+      calls.order.push("open");
+      return { proposalId: "draft-row" };
+    },
     async analyzeRequirementsActivity() {
       calls.order.push("analyze");
       return { requiredCapabilities: ["backend x2", "qa"] };
@@ -45,7 +49,7 @@ function makeStub(opts: { proposal: boolean }): {
       calls.order.push("propose");
       if (!opts.proposal) return null;
       calls.proposalId = uuidv7();
-      return { proposalId: calls.proposalId, teamCount: 2 };
+      return { proposalId: calls.proposalId, teamCount: opts.teamCount ?? 2 };
     },
     async applyStaffingProposalActivity(input: { proposalId: string }) {
       calls.order.push("apply");
@@ -96,7 +100,7 @@ describe("projectGoalWorkflow insan duraklaması (E2/W5)", { timeout: 300_000 },
 
       // öneri yazıldı → akış İNSANI bekliyor: ne uygulama ne devam
       await vi_waitFor(() => stub.calls.order.includes("propose"));
-      expect(stub.calls.order).toEqual(["analyze", "propose"]);
+      expect(stub.calls.order).toEqual(["open", "analyze", "propose"]);
 
       await handle.signal("staffingProposalDecided", {
         proposalId: stub.calls.proposalId,
@@ -106,7 +110,7 @@ describe("projectGoalWorkflow insan duraklaması (E2/W5)", { timeout: 300_000 },
 
       expect(result.state).toBe("executing");
       // SIRA önemli: kadro kurulmadan planlama devam etmez
-      expect(stub.calls.order).toEqual(["analyze", "propose", "apply", "continue"]);
+      expect(stub.calls.order).toEqual(["open", "analyze", "propose", "apply", "continue"]);
       expect(stub.calls.applied).toEqual([stub.calls.proposalId]);
     });
   });
@@ -133,7 +137,7 @@ describe("projectGoalWorkflow insan duraklaması (E2/W5)", { timeout: 300_000 },
         decision: "confirmed",
       });
       await new Promise((r) => setTimeout(r, 300));
-      expect(stub.calls.order).toEqual(["analyze", "propose"]); // hâlâ bekliyor
+      expect(stub.calls.order).toEqual(["open", "analyze", "propose"]); // hâlâ bekliyor
 
       await handle.signal("staffingProposalDecided", {
         proposalId: stub.calls.proposalId,
@@ -165,7 +169,7 @@ describe("projectGoalWorkflow insan duraklaması (E2/W5)", { timeout: 300_000 },
       });
       const result = (await handle.result()) as { state: string };
       expect(result.state).toBe("waiting_for_founder");
-      expect(stub.calls.order).toEqual(["analyze", "propose"]); // apply YOK
+      expect(stub.calls.order).toEqual(["open", "analyze", "propose"]); // apply YOK
     });
   });
 
@@ -184,7 +188,28 @@ describe("projectGoalWorkflow insan duraklaması (E2/W5)", { timeout: 300_000 },
         args: [INPUT],
       })) as { state: string };
       expect(result.state).toBe("executing");
-      expect(stub.calls.order).toEqual(["analyze", "propose", "continue"]);
+      expect(stub.calls.order).toEqual(["open", "analyze", "propose", "continue"]);
+    });
+  });
+
+  it("önerilecek takım çıkmazsa (teamCount 0) DURMAZ — sihirbaz yoksa akış sürer", async () => {
+    // taslak satırı sunucuda `cancelled` olarak kapanır; akış eski
+    // deterministik gap yolundan devam eder
+    const stub = makeStub({ proposal: true, teamCount: 0 });
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: "intake",
+      workflowsPath: intakeWorkflowsPath,
+      activities: stub.activities as never,
+    });
+    await worker.runUntil(async () => {
+      const result = (await env.client.workflow.execute("projectGoalWorkflow", {
+        taskQueue: "intake",
+        workflowId: `goal-empty-${uuidv7()}`,
+        args: [INPUT],
+      })) as { state: string };
+      expect(result.state).toBe("executing");
+      expect(stub.calls.order).toEqual(["open", "analyze", "propose", "continue"]);
     });
   });
 });

@@ -265,6 +265,17 @@ export interface ProjectGoalInput {
 const PROPOSAL_HUMAN_TIMEOUT = "7 days";
 
 export async function projectGoalWorkflow(input: ProjectGoalInput): Promise<{ state: string }> {
+  // Sihirbaz ilerlemesi ilk saniyeden görünür olsun: satır BURADA açılır,
+  // iki LLM turunun sonunda değil (T20 geri bildirimi — 404 hem "uç yok" hem
+  // "CEO çalışıyor" demek zorunda kalıyordu).
+  await control
+    .openStaffingProposalActivity({
+      companyId: input.companyId,
+      projectId: input.projectId,
+      workflowId: workflowInfo().workflowId,
+    })
+    .catch(() => null);
+
   const analysis = await control
     .analyzeRequirementsActivity({
       companyId: input.companyId,
@@ -299,7 +310,9 @@ export async function projectGoalWorkflow(input: ProjectGoalInput): Promise<{ st
     })
     .catch(() => null);
 
-  if (proposal) {
+  // teamCount 0 = önerilecek bir şey çıkmadı (satır `cancelled` olarak kapandı).
+  // O zaman DURMAYIZ: akış eski deterministik gap yolundan sürer.
+  if (proposal && proposal.teamCount > 0) {
     let decision: "confirmed" | "cancelled" | null = null;
     setHandler(staffingProposalDecidedSignal, (payload) => {
       // yalnız BU önerinin kararı — eski bir önerinin geç sinyali akışı

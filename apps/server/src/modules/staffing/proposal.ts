@@ -206,9 +206,56 @@ export async function getProposal(
 }
 
 /**
- * Öneriyi açar ya da mevcut AÇIK öneriyi döner (idempotent replay: intake
- * yeniden girerse ikinci öneri üretilmez — kısmi unique index de bunu fiziksel
- * olarak garanti eder).
+ * BOŞ TASLAK açar — "CEO düşünüyor" hali.
+ *
+ * Neden ayrı bir adım: öneri satırı, planlama akışının SONUNDA yazılıyordu
+ * (önce gereksinim analizi, sonra öneri; canlı sağlayıcıda iki LLM turu =
+ * dakikalar). O süre boyunca GET 404 dönüyordu ve 404 arayüz için İKİ ayrı
+ * şeyi aynı anda anlatıyordu: "uç yok" ve "CEO hâlâ çalışıyor" (T20 geri
+ * bildirimi, 2026-08-20). Satır artık akışın BAŞINDA açılır:
+ *   404                  = proje yok / uç yok
+ *   200 + draft, teams:[] = CEO çalışıyor
+ *   200 + awaiting_human  = öneri hazır, düzenlenebilir
+ *   200 + cancelled       = önerilecek bir şey çıkmadı, akış deterministik yola düştü
+ * Sözleşme DEĞİŞMEDİ: `draft` zaten ilan edilmiş bir durumdu ve GET onu zaten
+ * AÇIK sayıyordu — eksik olan yalnız satırı erken yaratmaktı.
+ *
+ * Idempotent: açık öneri varsa (taslak ya da hazır) onu döner.
+ */
+export async function openDraftProposal(
+  db: GuardedDb,
+  ctx: CompanyContext,
+  input: { projectId: string; workflowId?: string | null },
+): Promise<StaffingProposalDto> {
+  const existing = await getOpenProposal(db, ctx, input.projectId);
+  if (existing) return existing;
+  const [row] = await db
+    .insert(staffingProposals)
+    .values({
+      companyId: ctx.companyId,
+      projectId: input.projectId,
+      workflowId: input.workflowId ?? null,
+      status: "draft",
+      source: "deterministic",
+      teams: [],
+      estimatedCostCents: 0,
+    })
+    .returning();
+  return toDto(row!);
+}
+
+/**
+ * Öneriyi açar, ya da AÇIK olanı doldurur/döner.
+ *
+ * Üç yol:
+ *  - açık öneri yok            → yeni satır (klasik yol)
+ *  - açık satır BOŞ TASLAK     → doldurulur (CEO düşünmeyi bitirdi). Yalnız
+ *                                insan HENÜZ dokunmadıysa: `source: "human"`
+ *                                bir taslak, kullanıcının kendi planıdır.
+ *  - açık öneri zaten dolu     → olduğu gibi döner (idempotent replay: intake
+ *                                yeniden girerse ikinci öneri üretilmez;
+ *                                kısmi unique index de bunu fiziksel olarak
+ *                                garanti eder)
  */
 export async function upsertProposal(
   db: GuardedDb,
@@ -229,9 +276,41 @@ export async function upsertProposal(
   },
 ): Promise<StaffingProposalDto> {
   const existing = await getOpenProposal(db, ctx, input.projectId);
-  if (existing) return existing;
+  if (existing && !(existing.status === "draft" && existing.teams.length === 0 && existing.source !== "human")) {
+    return existing;
+  }
 
   const { teams, costCents } = await normalize(db, ctx, input.teams);
+
+  if (existing) {
+    // boş taslağı doldur. Önerilecek hiçbir şey çıkmadıysa taslak KAPANIR —
+    // arayüz sonsuza kadar "CEO düşünüyor" göstermesin; akış zaten eski
+    // deterministik gap yoluna düşecek.
+    const [filled] = await db
+      .update(staffingProposals)
+      .set({
+        teams,
+        estimatedCostCents: costCents,
+        source: input.source,
+        status: teams.length === 0 ? "cancelled" : (input.status ?? "awaiting_human"),
+        ...(input.rationaleMd !== undefined && { rationaleMd: input.rationaleMd }),
+        ...(input.workflowId !== undefined && input.workflowId !== null
+          ? { workflowId: input.workflowId }
+          : {}),
+        ...(input.goalTaskId ? { goalTaskId: input.goalTaskId } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(staffingProposals.companyId, ctx.companyId),
+          eq(staffingProposals.id, existing.id),
+          eq(staffingProposals.version, existing.version), // yarışta düzenleme kazanır
+        ),
+      )
+      .returning();
+    return filled ? toDto(filled) : (await getProposal(db, ctx, existing.id));
+  }
+
   const [row] = await db
     .insert(staffingProposals)
     .values({
@@ -239,7 +318,7 @@ export async function upsertProposal(
       projectId: input.projectId,
       goalTaskId: input.goalTaskId ?? null,
       workflowId: input.workflowId ?? null,
-      status: input.status ?? "awaiting_human",
+      status: teams.length === 0 ? "cancelled" : (input.status ?? "awaiting_human"),
       source: input.source,
       rationaleMd: input.rationaleMd ?? "",
       teams,

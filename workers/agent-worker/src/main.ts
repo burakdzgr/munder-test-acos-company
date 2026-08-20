@@ -378,6 +378,19 @@ async function run(): Promise<void> {
       router,
       routingFor,
       // TASK 9: planning devamı sunucuda (staffing gap + onay + CEO start)
+      // E2/W4: "CEO düşünüyor" taslağı — sihirbaz 404 yerine ilerleme görsün
+      openStaffingProposal: async (input) => {
+        const res = await fetch(`${serverInternalUrl}/internal/v1/staffing/proposal/open`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${config.security.internalApiToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(input),
+        });
+        if (!res.ok) throw new Error(`staffing proposal open failed (${res.status})`);
+        return (await res.json()) as { id: string; status: string };
+      },
       // E2/W4 (T19): CEO'nun önerdiği kadro planı server'a yazılır
       proposeStaffing: async (input) => {
         const res = await fetch(`${serverInternalUrl}/internal/v1/staffing/proposal`, {
