@@ -135,16 +135,6 @@ async function waitForHealthz(url: string, attempts = 60): Promise<void> {
   throw new Error("sandbox-manager child not healthy");
 }
 
-async function pollUntil<T>(probe: () => Promise<T | null>, what: string, timeoutMs = 120_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 500));
-  }
-}
-
 beforeAll(async () => {
   if (!runnable) return;
   // the analysis image (git + node) — cached after the first build
@@ -367,8 +357,16 @@ afterAll(async () => {
   await temporal?.container.stop();
 });
 
+// P1-1 (cfd4125, 2026-08-19, Founder-approved): intake ends at READY for EVERY
+// source — no GOAL is created, nobody is routed, `goalTaskId` is null. Planning
+// enters through ONE gate, POST /projects/:id/goal → projectGoalWorkflow, which
+// apps/server/test/integration/project-goal-lifecycle.int.test.ts covers. These
+// tests therefore assert the intake CONTRACT (ingest → analyzers → report →
+// events → memories → READY) and stop where intake stops. (Until 2026-08-21
+// they still asserted the pre-P1-1 GOAL/CEO cascade and had been red since
+// cfd4125 landed.)
 describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () => {
-  it("imports the fixture repo: report artifact with the 16 sections + tasks for CTO/leads", async () => {
+  it("imports the fixture repo: report artifact with the 16 sections, memories seeded, project parked at READY (P1-1)", async () => {
     const project = await projectsService.create(ctx, {
       name: "Fixture Shop",
       objective: "Analyze this project and implement feature X",
@@ -385,13 +383,20 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
           source: { kind: "git_url", url: `${fixtureBaseUrl}/fixture-shop.git` },
         },
       ],
-    })) as { reportArtifactId: string; goalTaskId: string; analyzersOk: number; analyzersFailed: number };
+    })) as {
+      outcome: string;
+      founderApproved: boolean;
+      reportArtifactId: string;
+      goalTaskId: string | null;
+      analyzersOk: number;
+      analyzersFailed: number;
+    };
 
     // every analyzer succeeded on the clean fixture
     expect(result.analyzersFailed).toBe(0);
     expect(result.analyzersOk).toBeGreaterThanOrEqual(8);
 
-    // repo ingested into the platform origin (P1) + project active
+    // repo ingested into the platform origin (P1) + project parked at READY (P1-1)
     const [repo] = await db
       .select()
       .from(repositories)
@@ -399,7 +404,7 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
     expect(repo!.barePath).toBe(`/data/repos/${project.id}.git`);
     expect(repo!.originUrl).toContain("fixture-shop.git");
     const [after] = await db.select().from(projects).where(eq(projects.id, project.id));
-    expect(after!.status).toBe("active");
+    expect(after!.status).toBe("ready");
     expect(after!.intakeReportArtifactId).toBe(result.reportArtifactId);
 
     // P6/14 §3.2: one artifact, all 16 canonical headings, fixture facts inside
@@ -409,76 +414,34 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
       .where(eq(artifacts.id, result.reportArtifactId));
     expect(artifact!.kind).toBe("intake_report");
     const md = artifact!.contentMd!;
-    for (const heading of INTAKE_REPORT_SECTIONS) expect(md).toContain(`## `);
     INTAKE_REPORT_SECTIONS.forEach((heading, i) => expect(md).toContain(`## ${i + 1}. ${heading}`));
     expect(md).toContain("fixture-shop"); // dependency analyzer saw the manifest
     expect(md).toContain("fastify");
     expect(md).toContain("DATABASE_URL"); // env NAMES only (S2)
     expect(md).toContain(".ts"); // language histogram
 
-    // events: imported + artifact.created + analysis.completed
+    // events: imported + artifact.created + the lifecycle steps up to READY.
+    // `project.analysis.completed` is emitted by routeIntake, i.e. at the
+    // Founder goal gate (P1-1) — intake itself no longer routes, so it is not
+    // expected here.
     const eventTypes = (
       await db.select().from(events).where(eq(events.companyId, companyId))
     ).map((e) => e.type);
-    for (const t of ["project.imported", "artifact.created", "project.analysis.completed"]) {
+    for (const t of ["project.imported", "artifact.created", "project.status.changed"]) {
       expect(eventTypes).toContain(t);
     }
 
-    // routing (demo step 7, T42/T48): GOAL created in PLANNED state, awaiting
-    // Founder consultation before assignment to CEO. This gives Founder a
-    // chance to approve/adjust the objective before the cascade begins.
-    const [goal] = await db.select().from(tasks).where(eq(tasks.id, result.goalTaskId));
-    expect(goal!.kind).toBe("goal");
-    expect(goal!.status).toBe("PLANNED"); // T48: Founder consultation pending
-    expect(goal!.ownerAgentId).toBeNull(); // Not assigned yet
-    expect((goal!.context as { artifactIds?: string[] }).artifactIds).toEqual([
-      result.reportArtifactId,
-    ]);
-
-    // T48: CEO consultation — GOAL is PLANNED. Simulate Founder approval
-    // by transitioning GOAL to ASSIGNED (like Founder button press in UI).
-    // This unblocks ceoConsultFounder polling, and workflow continues.
-    const ceoId = agentId["Aylin Vural"];
-    const founder = { kind: "founder" } as const;
-
-    // Simulate Founder approval: transition GOAL to ASSIGNED, assign to CEO
-    await db
-      .update(tasks)
-      .set({ status: "ASSIGNED", ownerAgentId: ceoId })
-      .where(eq(tasks.id, result.goalTaskId));
-
-    // Verify GOAL is ASSIGNED
-    const [goalAfterApproval] = await db
+    // P1-1: intake STOPS at READY — no GOAL, no routing, no cascade. The
+    // Founder gives the goal explicitly later (POST /projects/:id/goal →
+    // projectGoalWorkflow; see project-goal-lifecycle.int.test.ts).
+    expect(result.outcome).toBe("ready");
+    expect(result.founderApproved).toBe(false);
+    expect(result.goalTaskId).toBeNull();
+    const projectTasks = await db
       .select()
       .from(tasks)
-      .where(eq(tasks.id, result.goalTaskId));
-    expect(goalAfterApproval!.status).toBe("ASSIGNED");
-    expect(goalAfterApproval!.ownerAgentId).toBe(ceoId);
-
-    // T48: ceoConsultFounder polling interval is 2s; give it time to resume
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-
-    // Wait for CEO to decompose & cascade to begin (T48 cascade)
-    // CEO workflow should now be running (startAgentWorkflow called after approval)
-    // Expect: initiative (CTO), epic (EM), dev tasks
-    await pollUntil(async () => {
-      const rows = await db
-        .select()
-        .from(tasks)
-        .where(and(eq(tasks.companyId, companyId), eq(tasks.projectId, project.id)));
-      const initiative = rows.find((t) => t.kind === "initiative");
-      const epic = rows.find((t) => t.kind === "epic");
-      const devs = rows.filter((t) => t.kind === "task");
-      
-      // Scripted mode: CEO creates initiative, delegates to CTO (Mert Aksoy)
-      // CTO creates epic, delegates to EM (Selin Koç)
-      // EM creates 2 dev tasks
-      return initiative?.ownerAgentId === agentId["Mert Aksoy"] &&
-        epic?.ownerAgentId === agentId["Selin Koç"] &&
-        devs.length === 2
-        ? rows
-        : null;
-    }, "CTO initiative + EM epic + dev tasks from the cascade");
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.projectId, project.id)));
+    expect(projectTasks, "intake must not create tasks — planning starts only at the Founder goal gate").toEqual([]);
 
     // Stage 4 (14 §3.1): project-scope memories created from analyzer findings
     // (previously deferred to T44). Agents learn codebase structure/patterns
@@ -494,9 +457,17 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
         ),
       );
 
-    // Çok sayıda memory: 8 standart analyzer + 1 summary + code_graph (1 overview + N modules)
-    // Fixture'da en az birkaç .ts dosyası var, dolayısıyla code_graph modül memory'leri olmalı
-    expect(projectMemories.length).toBeGreaterThanOrEqual(15);
+    // Composition: one memory per non-code_graph analyzer (8) + 1 Intake Summary
+    // + code_graph = 1 overview + one per source module. The fixture has three
+    // .ts files (index, cart, cart.test) → ≥ 1 module memory; 12 in practice.
+    // (The old "≥ 15" was never reachable with this fixture.)
+    expect(projectMemories.length).toBeGreaterThanOrEqual(8 + 1 + 1 + 1);
+    const analyzerKeys = new Set(
+      projectMemories.map((m) => (m.entities as { analyzerKey?: string }).analyzerKey).filter(Boolean),
+    );
+    for (const key of ["repo_profile", "languages", "structure", "dependencies", "tests", "docs", "config_env", "security_smells", "code_graph"]) {
+      expect(analyzerKeys, `no memory seeded from analyzer ${key}`).toContain(key);
+    }
 
     // High-importance memories: structure, repo_profile, languages
     const structureMemory = projectMemories.find((m) => m.title.includes("structure"));
@@ -551,7 +522,7 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
   // B4 (14 §3.1): repo'suz bir proje fikri de rapor almalı. Önceden bu yolda
   // HİÇ artefakt üretilmiyordu — CEO'ya çıplak bir hedef cümlesi gidiyor,
   // içeri alınan bir projeye ise on beş bölüm veriliyordu.
-  it("repo'suz proje fikri de 16 bölümlük rapor alır ve CEO'ya yönlenir", async () => {
+  it("repo'suz proje fikri de 16 bölümlük rapor alır ve READY'de durur (P1-1)", async () => {
     const project = await projectsService.create(ctx, {
       name: "Greenfield Idea",
       objective: "Küçük işletmeler için abonelik takip aracı",
@@ -562,7 +533,7 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
       taskQueue: TASK_QUEUES.intake,
       workflowId: `intake.${project.id}`,
       args: [{ companyId, projectId: project.id, source: { kind: "empty" } }],
-    })) as { reportArtifactId: string | null; goalTaskId: string };
+    })) as { outcome: string; reportArtifactId: string | null; goalTaskId: string | null };
 
     // rapor GERÇEKTEN üretildi
     expect(result.reportArtifactId, "repo'suz projede rapor üretilmedi").not.toBeNull();
@@ -578,18 +549,21 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
     // …ve rapor hedefi taşıyor
     expect(md).toContain("Küçük işletmeler için abonelik takip aracı");
 
-    // proje aktif + rapor projeye bağlı + GOAL CEO'ya yönlendi
+    // proje READY'de durur + rapor projeye bağlı; GOAL YOK — P1-1: create-time
+    // objective planlamayı başlatmaz, yalnız hedefin ilk taslağı olarak saklanır
     const [after] = await db.select().from(projects).where(eq(projects.id, project.id));
-    expect(after!.status).toBe("active");
+    expect(after!.status).toBe("ready");
     expect(after!.intakeReportArtifactId).toBe(result.reportArtifactId);
-    const [goal] = await db.select().from(tasks).where(eq(tasks.id, result.goalTaskId));
-    expect(goal!.kind).toBe("goal");
-    expect((goal!.context as { artifactIds?: string[] }).artifactIds).toEqual([
-      result.reportArtifactId,
-    ]);
+    expect(result.outcome).toBe("ready");
+    expect(result.goalTaskId).toBeNull();
+    const goals = await db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.projectId, project.id), eq(tasks.kind, "goal")));
+    expect(goals).toEqual([]);
   }, 600_000);
 
-  it("HOSTILE fixture: degraded sections, redacted secrets — report + routing still happen", async () => {
+  it("HOSTILE fixture: degraded sections, redacted secrets — the report still lands and the project still reaches READY", async () => {
     const project = await projectsService.create(ctx, {
       name: "Hostile Import",
       objective: "Assess this repository",
@@ -606,7 +580,7 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
           source: { kind: "git_url", url: `${fixtureBaseUrl}/hostile.git` },
         },
       ],
-    })) as { reportArtifactId: string; goalTaskId: string; analyzersFailed: number };
+    })) as { outcome: string; reportArtifactId: string; goalTaskId: string | null; analyzersFailed: number };
 
     // the broken manifest degrades ≥1 analyzer, the report still exists (P6)
     expect(result.analyzersFailed).toBeGreaterThanOrEqual(1);
@@ -622,10 +596,10 @@ describe.skipIf(!runnable)("projectIntakeWorkflow (T42, demo steps 6–7)", () =
     expect(md).not.toContain("AKIAABCDEFGHIJKLMNOP");
     expect(md).not.toContain("hunter2secret");
 
-    // …and creation was never blocked: project active, GOAL routed
+    // …and creation was never blocked: the project reaches READY (P1-1 — no GOAL is routed at intake)
     const [after] = await db.select().from(projects).where(eq(projects.id, project.id));
-    expect(after!.status).toBe("active");
-    const [goal] = await db.select().from(tasks).where(eq(tasks.id, result.goalTaskId));
-    expect(goal!.status).toBe("ASSIGNED");
+    expect(after!.status).toBe("ready");
+    expect(result.outcome).toBe("ready");
+    expect(result.goalTaskId).toBeNull();
   }, 600_000);
 });
