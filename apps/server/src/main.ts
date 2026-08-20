@@ -629,17 +629,36 @@ async function main(): Promise<void> {
                 rawSql`${agentSessions.status} IN ('starting','running','waiting')`,
               ),
             );
+          let delivered = false;
           for (const session of sessions) {
             if (!session.workflowId) continue;
             await temporalClient.workflow
               .getHandle(session.workflowId)
               .signal("dependencyResolved", { dependsOnTaskId, result })
+              .then(() => {
+                delivered = true;
+              })
               // fire-and-forget (09 §9): the dependency row is already
               // resolved in the DB, and the stuck-task sweep picks up a task
               // whose workflow is gone
               .catch((err: unknown) =>
                 app.log.debug({ err, taskId }, "dependencyResolved signal undeliverable"),
               );
+          }
+          // T55(b): sinyal taşınamadıysa — ki CLI şeridinde NORMAL hal budur,
+          // `wait_for` turu bitirir ve ortada sinyallenecek workflow kalmaz —
+          // sahibinin turunu yeniden BAŞLAT. Yoksa çocuklar bittiği halde
+          // ebeveyni hiçbir şey uyandırmaz (canlı run #2: epic'ler WAITING'de
+          // kaldı, 0 DONE) ve 2 saatlik sweep onu ilerletmez, BLOCKED'a taşır.
+          // Kapılar starter'ın içinde: tek canlı oturum + şirket tavanı.
+          if (!delivered && app.agentWorkflowStarter) {
+            const { wakeOnResolvedDependency, companyContext } = await import("@acos/db");
+            const starter = app.agentWorkflowStarter;
+            await wakeOnResolvedDependency(guardedDb, companyContext(companyId), taskId, {
+              startAgentTurn: async (input) => {
+                await starter(input);
+              },
+            });
           }
         },
         onError: (err) => app.log.error({ err }, "dependency signal bridge error"),

@@ -471,6 +471,76 @@ describe("wait_for dependency bekleyişi kaydeder (T55a)", { timeout: 120_000 },
     expect(edges[0]!.resolvedAt).toBeNull();
   });
 
+  it("son bağımlılık çözülünce sahibinin turu BAŞLAR — canlı workflow YOKKEN de (T55b)", async () => {
+    // Köprü sinyali yalnız CANLI oturuma taşıyor; CLI şeridinde `wait_for` turu
+    // bitirdiği için taşınacak workflow zaten yok. Uyandırma olmadan (a) tek
+    // başına hiçbir şeyi değiştirmez — canlı run #2'de tam olarak bu oldu.
+    const { wakeOnResolvedDependency } = await import("@acos/db");
+    const { parent, children } = await parentWithChildren(2);
+    await waitForDependency(parent.id);
+    const started: Array<{ agentId: string; taskId: string }> = [];
+    const port = {
+      startAgentTurn: async (input: { companyId: string; agentId: string; taskId: string }) => {
+        started.push({ agentId: input.agentId, taskId: input.taskId });
+      },
+    };
+
+    // İLK çocuk çözülür — bekleyiş BİTMEDİ, uyandırma OLMAMALI (yoksa ajan
+    // uyanır, hâlâ beklediğini görür, bir oturum + LLM turu boşa yanar)
+    await db
+      .update(taskDependencies)
+      .set({ resolvedAt: new Date() })
+      .where(
+        and(
+          eq(taskDependencies.companyId, companyId),
+          eq(taskDependencies.taskId, parent.id),
+          eq(taskDependencies.dependsOnTaskId, children[0]!.id),
+        ),
+      );
+    expect(await wakeOnResolvedDependency(guardedDb, ctx, parent.id, port)).toBe(false);
+    expect(started).toHaveLength(0);
+
+    // SON çocuk da çözülür — şimdi uyanmalı
+    await db
+      .update(taskDependencies)
+      .set({ resolvedAt: new Date() })
+      .where(
+        and(
+          eq(taskDependencies.companyId, companyId),
+          eq(taskDependencies.taskId, parent.id),
+          eq(taskDependencies.dependsOnTaskId, children[1]!.id),
+        ),
+      );
+    expect(await wakeOnResolvedDependency(guardedDb, ctx, parent.id, port)).toBe(true);
+    expect(started).toEqual([{ agentId: OWNER, taskId: parent.id }]);
+  });
+
+  it("kapı reddederse (starter throw) görev WAITING'de kalır — tur düşmez, sweep backstop (T55b)", async () => {
+    // Tek canlı oturum kapısı / şirket tavanı starter'ın İÇİNDE. Reddedilme bir
+    // HATA değil, kuyruğa alınmadır: uyandırma best-effort, görev yerinde kalır.
+    const { wakeOnResolvedDependency } = await import("@acos/db");
+    const { parent, children } = await parentWithChildren(1);
+    await waitForDependency(parent.id);
+    await db
+      .update(taskDependencies)
+      .set({ resolvedAt: new Date() })
+      .where(
+        and(
+          eq(taskDependencies.companyId, companyId),
+          eq(taskDependencies.taskId, parent.id),
+          eq(taskDependencies.dependsOnTaskId, children[0]!.id),
+        ),
+      );
+
+    const refusing = {
+      startAgentTurn: async () => {
+        throw new Error("session gate refused");
+      },
+    };
+    expect(await wakeOnResolvedDependency(guardedDb, ctx, parent.id, refusing)).toBe(false);
+    expect(await statusOf(parent.id)).toBe("WAITING");
+  });
+
   it("aynı wait_for iki kez çağrılırsa edge ÇOĞALMAZ (unique çifti yutulur)", async () => {
     const { parent } = await parentWithChildren(2);
 
