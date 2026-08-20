@@ -48,6 +48,7 @@ import { useNotifications } from "../stores/notifications.js";
 import { usePanelBus } from "../stores/panels.js";
 import { DirectiveDialog } from "../features/office/DirectiveDialog.js";
 import { useProjectTeams } from "../features/organization/useProjectTeams.js";
+import { ProjectWizard } from "../features/projects/ProjectWizard.js";
 import { Toasts } from "./Toasts.js";
 
 function formatTokens(n: number): string {
@@ -195,43 +196,59 @@ function GlobalSearch({ companyId }: { companyId: string }) {
 }
 
 /**
- * Proje bazlı takım şeridi (E1 gereksinim 4) — düz takım çipleri yerine.
+ * E2/W7 — ÜST-ORTA ARTIK PROJELER (2026-08-20, Founder kararı).
  *
- * Founder'ın sorusu "hangi takım hangi projede çalışıyor" idi; eski şerit
- * şirketteki TÜM takımları tek düzlemde gösteriyordu. Bağ veriden türetilir
- * (useProjectTeams: tasks.projectId × tasks.orgUnitId) — şemaya yeni bir
- * ilişki eklenmedi, backend'e dokunulmadı. Çip tıklaması eski davranışı
- * korur: komuta merkezini o takıma filtreler (P1-A).
+ * E1'de burada düz bir "proje başlıklı takım şeridi" vardı; şirket büyüyünce
+ * okunmaz oluyordu ve "hangi projedeyim" sorusunun cevabı ekranda yoktu.
+ * Artık merkez bir PROJE SEÇİCİ (şirket seçicinin birebir deseni) ve seçili
+ * projenin takımları onun ALTINDA/yanında. Seçim useFocus.selectedProjectId'e
+ * yazılır — ofis odağı (W8) ve paneller aynı mercekten bakar.
+ *
+ * Proje→takım bağı hâlâ İŞTEN türetiliyor (useProjectTeams: tasks.projectId ×
+ * tasks.orgUnitId). Oscar'ın T17 kalıcı bağı indiğinde yalnız o hook'un
+ * kaynağı değişecek; bu bileşen aynı kalır.
  */
-function ProjectTeams({ companyId }: { companyId: string }) {
+function ProjectBar({ companyId }: { companyId: string }) {
   const [manageOpen, setManageOpen] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
   const { groups, idleTeams } = useProjectTeams(companyId);
+  const projects = useQuery({
+    queryKey: [companyId, "projects", "list"],
+    queryFn: () => api.projects.list(companyId),
+  });
   const edges = useQuery({
     queryKey: keys.orgEdges(companyId),
     queryFn: () => api.org.listEdges(companyId),
   });
   const teamFilter = useFocus((s2) => s2.teamFilter);
   const setTeamFilter = useFocus((s2) => s2.setTeamFilter);
+  const selectedProjectId = useFocus((s2) => s2.selectedProjectId);
+  const setSelectedProject = useFocus((s2) => s2.setSelectedProject);
+
   const headcount = (unitId: string) =>
     (edges.data ?? []).filter(
       (e) => e.kind === "member_of" && e.toUnitId === unitId && e.endedAt === null,
     ).length;
 
-  function toggle(team: { id: string; name: string }) {
-    setTeamFilter(teamFilter?.unitId === team.id ? null : { unitId: team.id, name: team.name });
-  }
+  const projectItems = projects.data?.items ?? [];
+  const selectedGroup = groups.find((g) => g.projectId === selectedProjectId) ?? null;
+  // "Tüm şirket" seçiliyken eski davranış: her projenin takımları arka arkaya
+  const teams = selectedProjectId
+    ? (selectedGroup?.teams ?? [])
+    : [...new Map(groups.flatMap((g) => g.teams).map((t) => [t.id, t])).values()];
+  const counts = selectedProjectId
+    ? (selectedGroup?.taskCountByUnit ?? {})
+    : Object.fromEntries(groups.flatMap((g) => Object.entries(g.taskCountByUnit)));
 
-  const chip = (
-    team: { id: string; name: string },
-    key: string,
-    openTasks: number | undefined,
-  ) => {
+  const chip = (team: { id: string; name: string }, openTasks: number | undefined) => {
     const active = teamFilter?.unitId === team.id;
     return (
       <button
-        key={key}
+        key={team.id}
         data-testid={`team-chip-${team.id}`}
-        onClick={() => toggle(team)}
+        onClick={() =>
+          setTeamFilter(active ? null : { unitId: team.id, name: team.name })
+        }
         title={`${team.name} — ${headcount(team.id)} üye${
           openTasks ? ` · ${openTasks} açık iş` : ""
         } · komuta merkezini bu takıma filtrele`}
@@ -255,60 +272,86 @@ function ProjectTeams({ companyId }: { companyId: string }) {
     );
   };
 
-  const populated = groups.filter((g) => g.teams.length > 0);
-
   return (
-    // ORTADA: iki yanı flex-1 olan kapsayıcının içinde ortalanır (E1 §4).
     <div
-      className="hidden min-w-0 items-center justify-center gap-3 overflow-x-auto lg:flex"
-      data-testid="team-chips"
+      className="hidden min-w-0 items-center justify-center gap-2.5 overflow-x-auto lg:flex"
+      data-testid="project-bar"
     >
-      {populated.slice(0, 3).map((group) => (
-        <span
-          key={group.projectId ?? "loose"}
-          className="flex shrink-0 items-center gap-1.5 rounded-md border border-acos-line/60 bg-acos-bg1 px-1.5 py-0.5"
-          data-testid={`project-teams-${group.projectId ?? "none"}`}
-          title={`${group.projectName} — bu projede iş yapan takımlar`}
-        >
-          <span className="max-w-28 truncate text-[10px] font-semibold text-acos-fg2">
-            {group.projectName}
-          </span>
-          {group.teams.slice(0, 4).map((team) =>
-            chip(team, `${group.projectId}-${team.id}`, group.taskCountByUnit[team.id]),
-          )}
-          {group.teams.length > 4 && (
-            <span className="text-[9.5px] text-acos-fg2">+{group.teams.length - 4}</span>
-          )}
-        </span>
-      ))}
-      {populated.length > 3 && (
-        <span className="shrink-0 text-[10px] text-acos-fg2">+{populated.length - 3} proje</span>
-      )}
-      {populated.length === 0 && idleTeams.length > 0 && (
-        <span className="flex shrink-0 items-center gap-1.5" data-testid="project-teams-idle">
-          <span className="text-[10px] text-acos-fg2">iş bekleyen takımlar:</span>
-          {idleTeams.slice(0, 4).map((team) => chip(team, `idle-${team.id}`, undefined))}
-        </span>
-      )}
-      {teamFilter && (
-        <button
-          data-testid="team-filter-clear"
-          onClick={() => setTeamFilter(null)}
-          className="shrink-0 text-[10px] text-acos-fg2 hover:text-acos-fg0"
-          title="takım filtresini kaldır"
-        >
-          ✕ filtre
-        </button>
-      )}
-      <button
-        onClick={() => setManageOpen(true)}
-        className="shrink-0 text-[11px] text-acos-fg2 hover:text-acos-fg1"
-        title="Takımları yönet — oluştur (tekli/toplu) ve arşivle"
-        data-testid="team-manage-open"
+      {/* proje seçici — şirket seçicinin aynı deseni, bir seviye aşağıda */}
+      <span
+        className="flex shrink-0 items-center gap-1 rounded-md border border-acos-line bg-acos-bg2 pl-2"
+        data-testid="project-switcher"
       >
-        + Takım
-      </button>
+        <span className="text-[9.5px] uppercase tracking-wide text-acos-fg2">proje</span>
+        <select
+          aria-label="Proje"
+          value={selectedProjectId ?? ""}
+          onChange={(e) => setSelectedProject(e.target.value || null)}
+          className="max-w-44 rounded-md border-0 bg-transparent px-1 py-0.5 text-[11.5px] font-semibold text-acos-fg0 focus:outline-none"
+        >
+          <option value="">Tüm şirket</option>
+          {projectItems.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => setWizardOpen(true)}
+          data-testid="project-create-open"
+          aria-label="Yeni proje ekle"
+          title="Yeni proje — CEO kadroyu önersin, siz onaylayın"
+          className="border-l border-acos-line px-1.5 py-0.5 text-[13px] leading-none text-acos-fg2 hover:text-acos-fg0"
+        >
+          +
+        </button>
+      </span>
+
+      {/* seçili projenin TAKIMLARI (bağ işten türetilir) */}
+      <div className="flex min-w-0 items-center gap-1.5" data-testid="team-chips">
+        {teams.length > 0 ? (
+          <>
+            <span className="shrink-0 text-[9.5px] text-acos-fg2">takımlar:</span>
+            {teams.slice(0, 5).map((team) => chip(team, counts[team.id]))}
+            {teams.length > 5 && (
+              <span className="shrink-0 text-[9.5px] text-acos-fg2">+{teams.length - 5}</span>
+            )}
+          </>
+        ) : (
+          <span className="shrink-0 text-[10px] text-acos-fg2" data-testid="project-teams-empty">
+            {selectedProjectId
+              ? "bu projede henüz takım yok — kadro kurulunca burada görünür"
+              : idleTeams.length > 0
+                ? `iş bekleyen ${idleTeams.length} takım`
+                : "takım yok"}
+          </span>
+        )}
+        {teamFilter && (
+          <button
+            data-testid="team-filter-clear"
+            onClick={() => setTeamFilter(null)}
+            className="shrink-0 text-[10px] text-acos-fg2 hover:text-acos-fg0"
+            title="takım filtresini kaldır"
+          >
+            ✕ filtre
+          </button>
+        )}
+        <button
+          onClick={() => setManageOpen(true)}
+          className="shrink-0 text-[11px] text-acos-fg2 hover:text-acos-fg1"
+          title="Takımları yönet — oluştur (tekli/toplu) ve arşivle"
+          data-testid="team-manage-open"
+        >
+          + Takım
+        </button>
+      </div>
+
       {manageOpen && <TeamManageModal companyId={companyId} onClose={() => setManageOpen(false)} />}
+      <ProjectWizard
+        companyId={companyId}
+        open={wizardOpen}
+        onClose={() => setWizardOpen(false)}
+      />
     </div>
   );
 }
@@ -429,7 +472,7 @@ export function AppShell() {
         <PanelLauncher />
         </div>
         {/* orta sütun: takım şeridi (dar ekranda gizlenir) */}
-        <ProjectTeams companyId={companyId} />
+        <ProjectBar companyId={companyId} />
         <div className="flex min-w-0 items-center justify-end gap-2.5">
         {/* Layout presets (36 §3): saved Command Center arrangements. */}
         <span className="hidden items-center gap-1 xl:flex" data-testid="layout-presets">

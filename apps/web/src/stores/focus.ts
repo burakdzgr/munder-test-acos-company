@@ -15,6 +15,14 @@ interface FocusState {
   setSelectedAgent: (agentId: string | null) => void;
   teamFilter: TeamFilter | null;
   setTeamFilter: (filter: TeamFilter | null) => void;
+  /**
+   * E2/W7 (2026-08-20): ekranın ÜST-ORTASI artık takımlar değil PROJELER.
+   * Seçili proje bütün panellerin ortak merceğidir — takım şeridi o projenin
+   * takımlarını gösterir, ofis o projenin ajanlarına odaklanır. null = "tüm
+   * şirket" (eski davranış), böylece tek projeli/projesiz şirket bozulmaz.
+   */
+  selectedProjectId: string | null;
+  setSelectedProject: (projectId: string | null) => void;
 }
 
 export const useFocus = create<FocusState>((set) => ({
@@ -22,4 +30,8 @@ export const useFocus = create<FocusState>((set) => ({
   setSelectedAgent: (agentId) => set({ selectedAgentId: agentId }),
   teamFilter: null,
   setTeamFilter: (filter) => set({ teamFilter: filter }),
+  selectedProjectId: null,
+  // proje değişince takım filtresi düşer: başka projenin takımına kilitli
+  // kalmış bir ekran, kullanıcının "boş" sandığı paneller üretiyordu
+  setSelectedProject: (projectId) => set({ selectedProjectId: projectId, teamFilter: null }),
 }));
