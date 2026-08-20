@@ -214,7 +214,12 @@ export class DelegationService {
         .sort((a, b) => b.name.length - a.name.length)[0];
       if (named) return named.id;
     }
-    const scored = await this.scoreDelegateCandidates(ctx, managerAgentId, taskId ?? null);
+    // capabilityFallback YALNIZ burada: TASK 12'nin bypass korumasi
+    // (acikca verilen hedefi adaylarla karsilastiran yol) filtreyi AYNEN
+    // gormeye devam eder.
+    const scored = await this.scoreDelegateCandidates(ctx, managerAgentId, taskId ?? null, {
+      capabilityFallback: true,
+    });
     // T29: the pool now contains the manager itself, whose WIP fills up like
     // anyone's. Handing back a candidate that cannot take the work would turn
     // a routine "this one is busy" into a failed delegation, so the top
@@ -250,6 +255,7 @@ export class DelegationService {
     ctx: CompanyContext,
     managerAgentId: string,
     taskId: string | null,
+    opts: { capabilityFallback?: boolean } = {},
   ): Promise<Array<{ agentId: string; score: number }>> {
     const result = await this.db.execute(sql`
       WITH t AS (
@@ -341,9 +347,36 @@ export class DelegationService {
     // would never be built. Self only competes once a team actually exists.
     const hasReports = rows.some((r) => r.id !== managerAgentId);
     const pool = hasReports ? rows : rows.filter((r) => r.id !== managerAgentId);
-    const filtered = pool.filter(
+    const capMatched = pool.filter(
       (r) => Number(r.cap_total) === 0 || Number(r.cap_hits) > 0,
     );
+    // T40 (2026-08-20, Kevin'in E4 kosusundaki STALL'un kok nedeni): yetenek
+    // filtresi HERKESI elediginde havuzu bos birakmak, "kimse tam uymuyor"u
+    // "kimse YOK"a cevirir. Canli kanit: TASK-5'in requiredCapabilities'i
+    // model tarafindan ["backend","nodejs","testing"] yazilmisti; sirketin
+    // eslesme yuzeyi ise yalnizca org_unit slug'i ("engineering"), pozisyon
+    // basligi ("Fullstack Lideri"/"Fullstack Uzmani") ve agent_skills'ti —
+    // Agent Factory ile kurulan sirkette agent_skills BOS. Yani hicbir aday
+    // hicbir etiketi tutturamadi, havuz bosaldi, resolveDelegateTarget null
+    // dondu ve lead'e "once ekibi kur" (agent.hire) denildi — OYSA ekibi
+    // vardi. Sonuc: is delege edilemedi, request_help'e dusuldu, epic DRAFT'ta
+    // kaldi. Eleme yalnizca BIRILERI uyarken anlamlidir; kimse uymuyorsa
+    // siralama zaten cap_hits'i +1.5 ile odullendiriyor, yani en iyi aday yine
+    // basa gelir. Kadrosuz yonetici hali DEGISMEDI: raporu olmayanin havuzu
+    // yukarida zaten bos kaliyor ve "once ekibi kur" anlamini koruyor.
+    const relaxed = opts.capabilityFallback && capMatched.length === 0 && pool.length > 0;
+    if (relaxed) {
+      console.warn(
+        JSON.stringify({
+          msg: "delegate pool: no candidate matched requiredCapabilities; ranking all reports instead",
+          companyId: ctx.companyId,
+          managerAgentId,
+          taskId,
+          poolSize: pool.length,
+        }),
+      );
+    }
+    const filtered = relaxed ? pool : capMatched;
     return filtered
       .map((r) => ({
         agentId: r.id,

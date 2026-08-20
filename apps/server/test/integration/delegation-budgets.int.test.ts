@@ -362,6 +362,36 @@ describe("reassignment trips exactly at 3 → forced manager intervention (07 §
       stateSvc.assign(ctx, task.id, { agentId: PETE }, agentActor(OWEN), { force: true }),
     ).rejects.toMatchObject({ code: "TASK_REASSIGNMENT_LIMIT" });
   });
+
+  it("T40: requiredCapabilities nobody matches must not empty the delegate pool", async () => {
+    // Kevin'in E4 kosusundaki STALL'un birebir modeli: model gorevin
+    // yeteneklerini kendi sozcukleriyle yaziyor ("backend","nodejs",...) ama
+    // sirketin eslesme yuzeyi org_unit slug'i + pozisyon basligi + agent_skills
+    // ve Agent Factory ile kurulan sirkette agent_skills BOS. Hicbir aday
+    // hicbir etiketi tutturamiyor. Eskiden bu, havuzu bosaltip
+    // NO_ELIGIBLE_DELEGATE veriyordu; yani ekibi OLAN bir lead'e "once ekibi
+    // kur" deniyor ve is hic delege edilmiyordu.
+    const root = await tasksSvc.create(
+      ctx,
+      { kind: "task", title: "T40 root", objective: "x" },
+      { kind: "founder" },
+    );
+    const impossible = await delegation.createChildTask(ctx, MIRA, {
+      parentTaskId: root.id,
+      kind: "subtask",
+      title: "Nobody matches these",
+      objective: "x",
+      requiredCapabilities: ["quantum-cryogenics", "cobol-on-cogs"],
+    });
+    const target = await delegation.resolveDelegateTarget(ctx, MIRA, "", impossible.id);
+    expect(target).not.toBeNull();
+    expect([OWEN, PETE, RITA, MIRA]).toContain(target);
+
+    // KORUNAN taraf: raporu OLMAYAN bir yoneticinin havuzu hala bos — "once
+    // ekibi kur" (agent.hire) anlamini yalnizca gercekten kadrosuz hal tasir.
+    const orphanTarget = await delegation.resolveDelegateTarget(ctx, OWEN, "", impossible.id);
+    expect(orphanTarget).toBeNull();
+  });
 });
 
 describe("company circuit breaker (26 §5) — the policy hook", () => {
