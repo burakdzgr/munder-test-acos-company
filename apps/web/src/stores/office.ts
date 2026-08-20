@@ -26,6 +26,8 @@ interface OfficeStoreState {
   snapshotCount: number;
   /** koltuk eşlemesi için unvan/tepe-yönetici bilgisi (panelden gelir) */
   setRoster: (roster: Map<string, RosterEntry>) => void;
+  /** FAZ 2B/2B-4: proje katı — yalnız bu ajanlar oturur (null = tüm şirket) */
+  setFloorFilter: (ids: ReadonlySet<string> | null) => void;
   enqueue: (instruction: unknown) => void;
   applySnapshot: (state: PresenceState, layout?: OfficeLayout | null) => void;
   setLayout: (layout: OfficeLayout) => void;
@@ -38,6 +40,9 @@ export const useOfficeStore = create<OfficeStoreState>()((set, get) => ({
   snapshotCount: 0,
   setRoster: (roster) => {
     if (get().projector.setRoster(roster)) set((s) => ({ snapshotCount: s.snapshotCount + 1 }));
+  },
+  setFloorFilter: (ids) => {
+    if (get().projector.setFloorFilter(ids)) set((s) => ({ snapshotCount: s.snapshotCount + 1 }));
   },
   enqueue: (instruction) => {
     const causeEventId = (instruction as { causeEventId?: unknown } | null)?.causeEventId;

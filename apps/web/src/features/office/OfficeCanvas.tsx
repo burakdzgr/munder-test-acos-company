@@ -22,7 +22,9 @@ import { useOfficeStore } from "../../stores/office.js";
 import { useFocus } from "../../stores/focus.js";
 import type { OfficeSceneEngine } from "./sceneState.js";
 import { officeMap, type OfficeMap } from "./tiled/tiledMap.js";
-import { tileArt } from "./tiled/tileset.js";
+import type { FloorProjector } from "./tiled/project.js";
+import { tileArt, type TileArtSpec } from "./tiled/tileset.js";
+import { themeForProject, type OfficeTheme } from "./tiled/theme.js";
 import type { SeatedFloor } from "./tiled/seatPool.js";
 import {
   typingOffset,
@@ -61,9 +63,6 @@ const BG = 0x0b0e13;
  * Piksel sanatının "chunky" okunması bu katsayıdan geliyor.
  */
 const PIXEL = 2;
-
-/** döşeme anahtarı → sanat (FAZ 2B: kendi piksellerimiz, LimeZu yok) */
-const TILE_ART = tileArt();
 
 /**
  * FAZ 2B / 2B-3 — baş üstü balonu. İÇERİĞİ UYDURMUYORUZ: yalnız durumun
@@ -109,12 +108,20 @@ declare global {
       readonly agentCount: number;
       readonly interactionCount: number;
       readonly snapshotCount: number;
+      /** FAZ 2B: KATTA oturan ajan sayısı (proje filtresi bunu düşürür) */
+      readonly floorSeats: number;
+      /** kat bir projeye filtreli mi */
+      readonly floorFiltered: boolean;
       readonly debugRing: unknown[];
     };
   }
 }
 
-function installDebugHook(engine: OfficeSceneEngine, getSnapshotCount: () => number): void {
+function installDebugHook(
+  engine: OfficeSceneEngine,
+  getSnapshotCount: () => number,
+  getProjector: () => FloorProjector,
+): void {
   window.__acosOffice = {
     get lastAppliedEventId() {
       return engine.lastAppliedEventId;
@@ -127,6 +134,12 @@ function installDebugHook(engine: OfficeSceneEngine, getSnapshotCount: () => num
     },
     get snapshotCount() {
       return getSnapshotCount();
+    },
+    get floorSeats() {
+      return getProjector().floor.seats.size;
+    },
+    get floorFiltered() {
+      return getProjector().filtered;
     },
     get debugRing() {
       return [...engine.debugRing.slice(-20)];
@@ -191,6 +204,7 @@ function paintTiledFloor(
   floor: SeatedFloor,
   cell: number,
   tiles: TileSet,
+  spec: Record<string, TileArtSpec>,
 ): void {
   layer.removeChildren();
   const place = (key: string, cx: number, cy: number, terrain: boolean) => {
@@ -208,15 +222,38 @@ function paintTiledFloor(
     layer.addChild(sprite);
   };
 
-  const spec = TILE_ART;
-  for (const item of map.draw) place(item.key, item.cx, item.cy, spec[item.key]?.terrain ?? false);
+  const grown = floor.usedHeight > map.height;
+  const openRow = map.height - 1; // büyüme varken alt duvar açılır (geçiş)
 
-  // kat büyüdüyse: yeni masalar + altlarındaki zemin
-  for (const desk of floor.extraDesks) {
-    place("floor-open", desk.deskCell.x, desk.deskCell.y, true);
-    place("floor-open", desk.standCell.x, desk.standCell.y, true);
-    place("desk", desk.deskCell.x, desk.deskCell.y, false);
+  for (const item of map.draw) {
+    // Kat büyüdüyse binanın ALT DUVARI kapı gibi açılır ve yeni bölüm oraya
+    // eklenir. Duvarı olduğu gibi bıraktığımızda yeni masalar binanın
+    // DIŞINDA, boşlukta duruyor gibi görünüyordu (ekran görüntüsünde
+    // yakalandı) — "kat büyüdü" değil "kat bozuldu" okunuyordu.
+    if (
+      grown &&
+      item.layer === "walls" &&
+      item.cy === openRow &&
+      item.cx > 0 &&
+      item.cx < map.width - 1
+    ) {
+      place("floor-open", item.cx, item.cy, true);
+      continue;
+    }
+    place(item.key, item.cx, item.cy, spec[item.key]?.terrain ?? false);
   }
+
+  if (!grown) return;
+
+  // --- BÜYÜYEN BÖLÜM: zemin + yan duvarlar + alt duvar + yeni masalar ---
+  const bottom = floor.usedHeight;
+  for (let y = map.height; y < bottom; y += 1) {
+    for (let x = 0; x < map.width; x += 1) {
+      const edge = x === 0 || x === map.width - 1 || y === bottom - 1;
+      place(edge ? "wall" : "floor-open", x, y, true);
+    }
+  }
+  for (const desk of floor.extraDesks) place("desk", desk.deskCell.x, desk.deskCell.y, false);
 }
 
 /** Masa isim plakaları — koltuk sahibinin adı masasının önünde. */
@@ -263,6 +300,8 @@ export function OfficeCanvas({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const engine = useOfficeStore((s) => s.engine);
   const projector = useOfficeStore((s) => s.projector);
+  const projectorRef = useRef(projector);
+  projectorRef.current = projector;
   const snapshotCount = useOfficeStore((s) => s.snapshotCount);
   const [fallback, setFallback] = useState(false);
   const snapshotCountRef = useRef(snapshotCount);
@@ -296,12 +335,16 @@ export function OfficeCanvas({
    */
   const onSelectAgentRef = useRef(onSelectAgent);
   onSelectAgentRef.current = onSelectAgent;
+  // FAZ 2B/2B-4: kat teması seçili projeye göre (aynı düzen, kendi tonu).
+  const selectedProjectId = useFocus((s) => s.selectedProjectId);
+  const themeRef = useRef<OfficeTheme>(themeForProject(selectedProjectId));
+  themeRef.current = themeForProject(selectedProjectId);
   const selectedAgentId = useFocus((s) => s.selectedAgentId);
   const selectedRef = useRef(selectedAgentId);
   selectedRef.current = selectedAgentId;
 
   useEffect(() => {
-    installDebugHook(engine, () => snapshotCountRef.current);
+    installDebugHook(engine, () => snapshotCountRef.current, () => projectorRef.current);
   }, [engine]);
 
   useEffect(() => {
@@ -380,10 +423,23 @@ export function OfficeCanvas({
       // Piksel döşemeleri ÖMÜRDE BİR KEZ pişirilir; her plan değişiminde
       // yeniden üretilseydi büyük org'da her yeniden yerleşimde görünür bir
       // takılma olurdu.
-      const tiles: TileSet = { art: new Map<string, Texture>() };
-      for (const [key, spec] of Object.entries(TILE_ART)) {
-        tiles.art.set(key, bakeArt(app, spec.art, PIXEL));
+      // Tema başına döşeme seti TEMBEL pişirilir: proje değişince yeni ton
+      // bir kez üretilir, sonra önbellekten gelir (her karede pişirmek büyük
+      // katta görünür takılma demekti).
+      const bakedThemes = new Map<string, { tiles: TileSet; spec: Record<string, TileArtSpec> }>();
+      function themeTiles(theme: OfficeTheme): { tiles: TileSet; spec: Record<string, TileArtSpec> } {
+        const cached = bakedThemes.get(theme.id);
+        if (cached) return cached;
+        const spec = tileArt(theme);
+        const tiles: TileSet = { art: new Map<string, Texture>() };
+        for (const [key, entry] of Object.entries(spec)) {
+          tiles.art.set(key, bakeArt(app, entry.art, PIXEL));
+        }
+        const baked = { tiles, spec };
+        bakedThemes.set(theme.id, baked);
+        return baked;
       }
+      let tiles: TileSet = themeTiles(themeRef.current).tiles;
 
       // 2026-08-18 (Founder kararı): pan/zoom TAMAMEN kalktı — ofis her
       // zaman panele CONTAIN-fit sığar ve panel boyutu değişince kendini
@@ -434,12 +490,17 @@ export function OfficeCanvas({
         // Kat SABİT; yeniden çizilmesi yalnız KADRO değişince gerekir
         // (koltuk dağıtımı değişir, kat büyüyebilir).
         const floor = projector.floor;
-        const floorSig = `${floor.seats.size}:${floor.usedHeight}:${[...floor.seats.values()]
+        const theme = themeRef.current;
+        const floorSig = `${theme.id}:${floor.seats.size}:${floor.usedHeight}:${[
+          ...floor.seats.values(),
+        ]
           .map((s) => `${s.agentId}@${s.seat}`)
           .join(",")}`;
         if (floorSig !== renderedFloorSig) {
           renderedFloorSig = floorSig;
-          paintTiledFloor(zoneLayer, map, floor, CELL, tiles);
+          const baked = themeTiles(theme);
+          tiles = baked.tiles;
+          paintTiledFloor(zoneLayer, map, floor, CELL, tiles, baked.spec);
           const names = new Map<string, string>();
           for (const [id, a] of engine.avatars) names.set(id, a.name);
           paintSeatPlates(plateLayer, floor, CELL, names);
@@ -672,7 +733,15 @@ export function OfficeCanvas({
             paintBubble(node.bubble, node.visual.bubble, 0, -50);
           }
 
-          const focusSet = focusAgentIdsRef.current;
+          // FAZ 2B/2B-4: PROJE KATI. Filtre varken katta olmayan ajan
+          // GÖRÜNMEZ — soluk değil, hiç yok (kat o projenin katı). Filtre
+          // yokken eski davranış: takım filtresi solukluk yapar.
+          if (projector.filtered && !projector.onFloor(agentId)) {
+            node.root.visible = false;
+            continue;
+          }
+          node.root.visible = true;
+          const focusSet = projector.filtered ? null : focusAgentIdsRef.current;
           const focusAlpha = focusSet && !focusSet.has(agentId) ? 0.22 : 1;
           node.root.alpha = node.visual?.dim ? focusAlpha * 0.45 : focusAlpha;
         }

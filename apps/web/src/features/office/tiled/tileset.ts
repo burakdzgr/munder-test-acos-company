@@ -6,6 +6,7 @@
 // FAZ 2B sözleşmesi §1).
 //
 // Saf veri: Pixi yok. Köprü bu sanatı bir kez dokuya pişirir.
+import { DEFAULT_THEME, type OfficeTheme } from "./theme.js";
 import {
   BOOKSHELF_ART,
   CABINET_ART,
@@ -17,8 +18,6 @@ import {
   SOFA_ART,
   WATERCOOLER_ART,
   WHITEBOARD_ART,
-  cafeTileArt,
-  corridorTileArt,
   floorTileArt,
   meetingTableArt,
   wallFaceArt,
@@ -32,16 +31,20 @@ export interface TileArtSpec {
   terrain: boolean;
 }
 
-/** Anahtar → sanat. Harita yeni bir anahtar kullanırsa burada karşılığı olmalı. */
-export function tileArt(): Record<string, TileArtSpec> {
+/**
+ * Anahtar → sanat. Harita yeni bir anahtar kullanırsa burada karşılığı olmalı.
+ * Tema yalnız ZEMİN TONLARINI değiştirir; oda/masa düzeni her temada aynıdır
+ * (insan "tam Munder katı" istedi — kompozisyon sabit).
+ */
+export function tileArt(theme: OfficeTheme = DEFAULT_THEME): Record<string, TileArtSpec> {
   return {
     // Açık ofis zemini AYDINLIK: duvarlar (0x32..0x5a bandı) koyu, zemin
     // onlardan belirgin biçimde açık olmalı — ilk turda ikisi de koyu
     // griydi ve ekran görüntüsünde duvar/zemin ayırt edilemiyordu.
-    "floor-open": { art: floorTileArt(0x7f8798, 1), terrain: true },
-    "floor-corridor": { art: corridorTileArt(), terrain: true },
-    "floor-wood": { art: woodPlankArt(), terrain: true },
-    "floor-cafe": { art: cafeTileArt(), terrain: true },
+    "floor-open": { art: floorTileArt(theme.floorOpen, 1), terrain: true },
+    "floor-corridor": { art: floorTileArt(theme.floorCorridor, 3), terrain: true },
+    "floor-wood": { art: woodPlankArt(theme.floorWood), terrain: true },
+    "floor-cafe": { art: floorTileArt(theme.floorCafe, 7), terrain: true },
     wall: { art: wallFaceArt(), terrain: true },
     desk: { art: DESK_ART, terrain: false },
     table: { art: meetingTableArt(), terrain: false },

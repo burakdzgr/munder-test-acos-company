@@ -27,6 +27,8 @@
 //        hatası (app.stage null → addChild) çıkmamalı.
 //   ... --office-shot → FAZ 2B: WS mock'uyla gerçek bir kadro düşürülür,
 //        sabit kat + koltuk dağıtımı ekran görüntüsüne alınır.
+//   ... --office-grow → 24 kişilik kadro (13 koltuk): kat BÜYÜR, herkes oturur.
+//   ... --office-project → seçili projenin ekibi katta, kalanı KATTA DEĞİL.
 //   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
 //        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
 //   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
@@ -43,7 +45,14 @@ const SELECT_PROOF = process.argv.includes("--select-proof");
 // kuruluyor; ucusta kalan varlik yuklemesi yok edilmis app.stage'e dokunuyordu.
 const OFFICE_REMOUNT = process.argv.includes("--office-remount");
 // FAZ 2B: sabit Munder-duzeni kat + koltuk dagitimi gorsel kaniti
-const OFFICE_SHOT = process.argv.includes("--office-shot");
+const OFFICE_SHOT =
+  process.argv.includes("--office-shot") ||
+  process.argv.includes("--office-grow") ||
+  process.argv.includes("--office-project");
+// FAZ 2B/2B-4: kat buyumesi gorsel kaniti (koltuk sayisindan fazla ajan)
+const OFFICE_GROW = process.argv.includes("--office-grow");
+// FAZ 2B/2B-4: PROJE KATI — secili projenin ekibi oturur, kalani katta yok
+const OFFICE_PROJECT = process.argv.includes("--office-project");
 // yarış durumu: proje READY görünüyor ama ilk /goal yine de 409 yiyor
 const GOAL_409_ONCE = process.argv.includes("--goal-409-once");
 const STATE_MODE = process.argv.includes("--draft-then-ready")
@@ -168,6 +177,10 @@ const mkProposal = () => ({
 });
 
 // --- FAZ 2B görsel kanıt fikstürleri ---
+const EXTRA_ROLES = Array.from({ length: 14 }, (_, i) => [
+  "Yazılım Mühendisi",
+  `Ekip Üyesi ${i + 1}`,
+]);
 const ROLES = [
   ["CEO", "Aylin Vural"],
   ["Takım Lideri", "Emre Kaya"],
@@ -180,9 +193,10 @@ const ROLES = [
   ["Yazılım Mühendisi", "Onur Çelik"],
   ["QA Mühendisi", "Zeynep Ay"],
 ];
+const ALL_ROLES = OFFICE_GROW || OFFICE_PROJECT ? [...ROLES, ...EXTRA_ROLES] : ROLES;
 const shotId = (i) => `aaaaaaaa-aaaa-4aaa-8aaa-bbbbbbbb${String(i).padStart(4, "0")}`;
 const posId = (i) => `cccccccc-cccc-4ccc-8ccc-dddddddd${String(i).padStart(4, "0")}`;
-const SHOT_POSITIONS = ROLES.map(([title], i) => ({
+const SHOT_POSITIONS = ALL_ROLES.map(([title], i) => ({
   id: posId(i),
   title,
   seniorityTrack: ["expert"],
@@ -190,7 +204,7 @@ const SHOT_POSITIONS = ROLES.map(([title], i) => ({
   description: title,
   orgUnitId: U1,
 }));
-const SHOT_AGENTS = ROLES.map(([title, name], i) => ({
+const SHOT_AGENTS = ALL_ROLES.map(([title, name], i) => ({
   id: shotId(i),
   employeeNumber: i + 1,
   displayNumber: `EMP-${String(i + 1).padStart(3, "0")}`,
@@ -223,7 +237,7 @@ const PRESENCE = {
       "WAITING",
       "OFFLINE",
       "ESCALATING",
-    ][i],
+    ][i % 10],
     deskId: `desk-${i}`,
     sessionId: null,
   })),
@@ -396,10 +410,27 @@ await page.route("**/api/v1/**", async (route) => {
     ]);
   if (p.endsWith("/projects")) return json(route, { items: projects });
   if (p.endsWith("/tasks"))
-    return json(route, [
-      task("99999999-9999-4999-8999-999999999991", P1, U1, A1, "Anasayfa"),
-      task("99999999-9999-4999-8999-999999999992", P2, U2, A2, "Ekranlar"),
-    ]);
+    return json(
+      route,
+      OFFICE_PROJECT
+        ? [
+            // P1 ekibi: 5 ajan (kat yalnız bunlarla dolacak)
+            ...[0, 1, 2, 3, 4].map((i) =>
+              task(
+                `99999999-9999-4999-8999-99999999900${i}`,
+                P1,
+                U2, // takım filtresi devreye girmesin diye başka birim
+                shotId(i),
+                `P1 işi ${i}`,
+              ),
+            ),
+            task("99999999-9999-4999-8999-999999999992", P2, U2, shotId(9), "Ekranlar"),
+          ]
+        : [
+            task("99999999-9999-4999-8999-999999999991", P1, U1, A1, "Anasayfa"),
+            task("99999999-9999-4999-8999-999999999992", P2, U2, A2, "Ekranlar"),
+          ],
+    );
   if (p.endsWith("/agents")) return json(route, OFFICE_SHOT ? SHOT_AGENTS : []);
   if (p.endsWith("/org/positions")) return json(route, OFFICE_SHOT ? SHOT_POSITIONS : []);
   if (p.includes("/approvals")) return json(route, []);
@@ -514,6 +545,50 @@ if (SELECT_PROOF) {
   process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
 }
 
+if (OFFICE_PROJECT) {
+  // Betiğin önceki adımları seçiciyi kurcaladı; ölçüme TEMİZ başla.
+  await page.selectOption('select[aria-label="Proje"]', "");
+  await page.waitForTimeout(2500);
+  const before = await page.evaluate(() => ({
+    seats: window.__acosOffice?.floorSeats ?? -1,
+    filtered: window.__acosOffice?.floorFiltered ?? null,
+    avatars: window.__acosOffice?.agentCount ?? -1,
+  }));
+  check(
+    "proje seçilmeden ŞİRKETİN TAMAMI katta",
+    before.filtered === false && before.seats === before.avatars && before.avatars === 24,
+    `koltuk ${before.seats} / avatar ${before.avatars}`,
+  );
+  await page.screenshot({ path: `${SHOTS}/2b-kat-tum-sirket.png` });
+
+  await page.selectOption('select[aria-label="Proje"]', P1);
+  await page.waitForTimeout(2000);
+  const after = await page.evaluate(() => ({
+    seats: window.__acosOffice?.floorSeats ?? -1,
+    filtered: window.__acosOffice?.floorFiltered ?? null,
+    avatars: window.__acosOffice?.agentCount ?? -1,
+  }));
+  check(
+    "proje seçilince kat O PROJENİN katı oldu",
+    after.filtered === true && after.seats > 0 && after.seats < after.avatars,
+    `koltuk ${after.seats} / avatar ${after.avatars}`,
+  );
+  check(
+    "katta olmayan ekip SAHNEDEN çıktı (soluk değil, yok)",
+    after.seats === 5,
+    `beklenen 5, gelen ${after.seats}`,
+  );
+  await page.screenshot({ path: `${SHOTS}/2b-kat-proje.png` });
+
+  await page.selectOption('select[aria-label="Proje"]', "");
+  await page.waitForTimeout(1500);
+  const back = await page.evaluate(() => window.__acosOffice?.floorSeats ?? -1);
+  check("'Tüm şirket'e dönünce herkes geri oturuyor", back === 24, `koltuk ${back}`);
+  console.log(results.join(String.fromCharCode(10)));
+  await browser.close();
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
+}
+
 if (OFFICE_SHOT) {
   // Ayrık ofis penceresi: kat tam ekran çizilir, oturma/balon ayrıntısı okunur
   // (panel içinde harita 0.37 ölçeğe iniyor ve ayrıntı kayboluyor).
@@ -522,11 +597,15 @@ if (OFFICE_SHOT) {
   });
   await page.waitForTimeout(3000); // sahne + varlıklar + WS anlık görüntüsü
   const seatCount = await page.evaluate(() => window.__acosOffice?.agentCount ?? -1);
-  check("kadro sahneye indi (WS anlık görüntüsü)", seatCount > 0, `avatar: ${seatCount}`);
+  check(
+    OFFICE_GROW ? "24 kişilik kadronun TAMAMI sahnede (koltuk 13)" : "kadro sahneye indi (WS anlık görüntüsü)",
+    OFFICE_GROW ? seatCount === 24 : seatCount > 0,
+    `avatar: ${seatCount}`,
+  );
   const box = await page.getByTestId("office-canvas").boundingBox();
   if (box) {
     await page.screenshot({
-      path: `${SHOTS}/2b-kat.png`,
+      path: `${SHOTS}/${OFFICE_GROW ? "2b-buyuyen-kat" : "2b-kat"}.png`,
       clip: { x: box.x, y: box.y, width: box.width, height: box.height },
     });
   }

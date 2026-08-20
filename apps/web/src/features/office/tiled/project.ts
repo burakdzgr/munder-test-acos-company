@@ -27,6 +27,12 @@ export class FloorProjector {
   private serverCell = new Map<string, Cell>();
   private roster = new Map<string, RosterEntry>();
   private order: string[] = [];
+  /**
+   * FAZ 2B/2B-4 — PROJE KATI: doluysa yalnız bu ajanlar kata oturur, geri
+   * kalanı katta HİÇ yoktur (soluk değil, yok). İnsan kararı: ofis proje
+   * bazlı bir kat; "şirketin tamamı" görünümü seçici 'Tüm şirket'te.
+   */
+  private filter: ReadonlySet<string> | null = null;
   floor: SeatedFloor = { seats: new Map(), extraDesks: [], usedHeight: 0 };
 
   constructor(private readonly map: OfficeMap) {
@@ -43,8 +49,28 @@ export class FloorProjector {
     return true;
   }
 
+  /** Proje filtresi. Değiştiyse kadro yeniden oturtulur. */
+  setFloorFilter(filter: ReadonlySet<string> | null): boolean {
+    const before = this.filter ? [...this.filter].sort().join(",") : "";
+    const after = filter ? [...filter].sort().join(",") : "";
+    if (before === after) return false;
+    this.filter = filter;
+    this.reseat();
+    return true;
+  }
+
+  /** Bu ajan katta mı? (filtre yokken herkes kattadır) */
+  onFloor(agentId: string): boolean {
+    return this.floor.seats.has(agentId);
+  }
+
+  get filtered(): boolean {
+    return this.filter !== null;
+  }
+
   private reseat(): void {
-    const candidates: SeatCandidate[] = this.order.map((agentId) => {
+    const order = this.filter ? this.order.filter((id) => this.filter?.has(id)) : this.order;
+    const candidates: SeatCandidate[] = order.map((agentId) => {
       const entry = this.roster.get(agentId);
       return {
         agentId,
@@ -115,6 +141,9 @@ export class FloorProjector {
     if (instruction.type === "office.avatar.moved") {
       const agentId = instruction.agentId;
       const serverTo = instruction.toCell;
+      // Katta olmayan ajan (başka projenin ekibi) HİÇ oynatılmaz: onun için
+      // ne koltuk ne güzergâh var; uydurma bir yere yürütmektense hiç yok.
+      if (this.filter && !this.onFloor(agentId)) return null;
       const from = this.seatCell(agentId) ?? this.translate(instruction.fromCell, agentId);
       const to =
         instruction.reason === "return_home" || instruction.reason === "desk_assign"

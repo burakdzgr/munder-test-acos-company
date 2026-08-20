@@ -419,8 +419,8 @@ export function corridorTileArt(): PixelArt {
   return floorTileArt(0x8d94a1, 3);
 }
 
-/** Toplantı odası zemini: yatay ahşap tahta dokusu. */
-export function woodPlankArt(): PixelArt {
+/** Toplantı odası zemini: yatay ahşap tahta dokusu (tema tonu verilebilir). */
+export function woodPlankArt(base = 0x7a5a3d): PixelArt {
   const rows: string[] = [];
   for (let y = 0; y < 16; y += 1) {
     let row = "";
@@ -434,7 +434,12 @@ export function woodPlankArt(): PixelArt {
   }
   return {
     rows,
-    palette: { b: 0x7a5a3d, l: 0x8d6b4a, d: 0x64482f, s: 0x543c27 },
+    palette: {
+      b: base,
+      l: shiftColor(base, 18),
+      d: shiftColor(base, -22),
+      s: shiftColor(base, -38),
+    },
   };
 }
 
