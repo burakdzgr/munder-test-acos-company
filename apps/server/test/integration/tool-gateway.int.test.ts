@@ -20,6 +20,7 @@ import {
 } from "@acos/db";
 import {
   agents,
+  approvals,
   auditLog,
   costEntries,
   events,
@@ -383,6 +384,52 @@ describe("authorize suite (17 §4; accept: allow / deny×2 / require_approval)",
     expect(allowed.status).toBe("succeeded");
   });
 
+  it("R3 (agent.hire): the gateway OPENS the approval it waits for — record, link and response (T57)", async () => {
+    // Canlı P0 (T54 koşusu 21:33:05): `agent.hire` R3 olduğu için
+    // `awaiting_approval` yazıldı, ama `approvals` 0 SATIRDI ve
+    // `tool_invocations.approval_id` NULL'du. Founder'ın onaylayacağı bir kayıt
+    // olmadığı için CEO kalıcı olarak dondu; o saniyeden sonra şirkette tek bir
+    // tool_invocation bile yok. R3'ün onay istemesi TASARIM — eksik olan KAYIT.
+    await grant("agent.hire", "agent", CEO);
+
+    // VAKUMLULUK NÖBETÇİSİ: önce boş olduğunu KANITLA, yoksa aşağıdaki
+    // "1 satır var" iddiası önceden var olan bir satırdan geçebilirdi.
+    const before = await db
+      .select({ id: approvals.id })
+      .from(approvals)
+      .where(eq(approvals.companyId, companyId));
+    expect(before).toHaveLength(0);
+
+    const hire = await gateway.invoke(ctx, {
+      agentId: CEO,
+      toolName: "agent.hire",
+      input: { capability: "frontend", count: 1 },
+    });
+
+    expect(hire.decision).toBe("require_approval");
+    expect(hire.status).toBe("awaiting_approval");
+    // 1) KAYIT açıldı — ve tam olarak BİR tane
+    const after = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.companyId, companyId));
+    expect(after).toHaveLength(1);
+    expect(after[0]!.status).toBe("pending");
+    expect(after[0]!.requestedByAgentId).toBe(CEO);
+    // 2) BAĞ kuruldu: çağrı ile kaydı birbirine bağlayan kolon dolu
+    expect((await invocationRow(hire.invocationId!)).approvalId).toBe(after[0]!.id);
+    // 3) YANIT taşıyor: MCP zarfı `awaiting_approval` kurabilsin diye
+    //    (actions.ts string bir approvalId + 'pending' arar)
+    expect(hire.approvalId).toBe(after[0]!.id);
+    expect(hire.approvalStatus).toBe("pending");
+    // 4) Founder'ın gördüğü brief ANLAMLI: hangi araç, kim istedi
+    const brief = JSON.parse(after[0]!.requestMd) as { title: string; attempted: string[] };
+    expect(brief.title).toContain("agent.hire");
+    expect(brief.attempted[0]).toContain("policy decision");
+    // 5) Araç HÂLÂ çalışmadı — kapı duruyor, kaldırılmadı
+    expect(hire.output).toBeUndefined();
+  });
+
   it("REQUIRE_APPROVAL: R2 above an L2 agent's cap escalates to the manager; L5 executes", async () => {
     await grant("git.merge", "agent", DEV);
     await grant("git.merge", "agent", CEO);
@@ -394,6 +441,14 @@ describe("authorize suite (17 §4; accept: allow / deny×2 / require_approval)",
     expect(dev.decision).toBe("require_approval");
     expect(dev.approver).toBe("manager");
     expect((await invocationRow(dev.invocationId!)).status).toBe("awaiting_approval");
+    // T57: bu satır 2026-08-22'ye kadar YOKTU ve eksikligi bir P0'a mal oldu.
+    // Test `status='awaiting_approval'`i doğruluyordu ama ONAY KAYDININ VAR
+    // OLDUĞUNU hiç sormuyordu — yani "bekliyor" durumunu kanıtlıyor, "bekleneni
+    // birinin onaylayabildiğini" kanıtlamıyordu. Canlı koşuda CEO tam burada
+    // kalıcı olarak dondu (approvals 0 satır, approval_id NULL).
+    expect(dev.approvalId).toBeTruthy();
+    expect(dev.approvalStatus).toBe("pending");
+    expect((await invocationRow(dev.invocationId!)).approvalId).toBe(dev.approvalId);
 
     const ceo = await gateway.invoke(ctx, {
       agentId: CEO,

@@ -45,6 +45,7 @@ import {
 import { parseEventPayload } from "@acos/events";
 import {
   agents,
+  agentSessions,
   auditLog,
   budgets,
   costEntries,
@@ -664,6 +665,50 @@ export class ToolGateway {
           costCents: reservedCents,
         })
         .returning({ id: toolInvocations.id });
+      // T57 — CANLI KANIT (T54 koşusu, 21:33:05): `agent.hire` R3 olduğu için
+      // burada `awaiting_approval` YAZILIYORDU ama ONAY KAYDI HİÇ AÇILMIYORDU
+      // (`approvals` 0 satır, `tool_invocations.approval_id` NULL). Founder'ın
+      // onaylayacağı bir şey yoktu ve CEO o saniyede KALICI olarak dondu.
+      // R3'ün onay istemesi TASARIM — eksik olan KAYITTI.
+      let approvalRef: { id: string; status: string } | null = null;
+      if (decision.verdict === "require_approval") {
+        // 19 §7: verdict YALNIZ `workflowId` doluysa sinyale dönüşür
+        // (`approvals.ts`: `signal: row.workflowId ? … : null`). Boş bırakmak
+        // kaydı açıp kararı hiçbir yere ULAŞTIRMAMAK olurdu.
+        const [liveSession] = await tx
+          .select({ workflowId: agentSessions.workflowId })
+          .from(agentSessions)
+          .where(
+            and(
+              eq(agentSessions.companyId, ctx.companyId),
+              eq(agentSessions.agentId, agent.id),
+              isNull(agentSessions.endedAt),
+            ),
+          )
+          .limit(1);
+        const { row: approval } = await this.approvals.createInTx(tx, ctx, {
+          // Aynı çağrı yeniden denenirse aynı kayıt: invocation başına bir onay.
+          id: uuidv5("tool-approval", row!.id),
+          kind: "tool_execution",
+          requestedByAgentId: agent.id,
+          risk: APPROVAL_RISK_FOR[effectiveRisk],
+          urgency: "normal",
+          ...(req.taskId && { taskId: req.taskId }),
+          ...(liveSession?.workflowId && { workflowId: liveSession.workflowId }),
+          brief: buildToolApprovalBrief({
+            toolName: def.name,
+            riskClass: effectiveRisk,
+            agentName: agent.name,
+            reason: detailReason,
+            approver: decision.verdict === "require_approval" ? decision.approver : "founder",
+          }),
+        });
+        approvalRef = { id: approval.id, status: approval.status };
+        await tx
+          .update(toolInvocations)
+          .set({ approvalId: approval.id })
+          .where(and(eq(toolInvocations.companyId, ctx.companyId), eq(toolInvocations.id, row!.id)));
+      }
       await emitDomainEvent(tx, ctx, {
         type: "tool.invocation.requested",
         actor,
@@ -698,9 +743,9 @@ export class ToolGateway {
           meta: { toolName: def.name, riskClass: effectiveRisk, reason: detailReason },
         });
       }
-      return { invocationId: row!.id, detailReason, status };
+      return { invocationId: row!.id, detailReason, status, approvalRef };
     });
-    const { invocationId, detailReason, status } = audited;
+    const { invocationId, detailReason, status, approvalRef } = audited;
 
     const base: ToolInvokeResponse = {
       invocationId,
@@ -710,6 +755,7 @@ export class ToolGateway {
       riskClass: effectiveRisk,
       ...(elevatedFrom && { elevatedFrom }),
       ...(decision.verdict === "require_approval" && { approver: decision.approver }),
+      ...(approvalRef && { approvalId: approvalRef.id, approvalStatus: approvalRef.status }),
       ...(retryAfterSec !== undefined && { retryAfterSec }),
     };
     if (decision.verdict !== "allow") {
