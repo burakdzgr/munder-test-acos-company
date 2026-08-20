@@ -67,6 +67,17 @@ const stackEnv = {
   // lane must run on the Claude bridge or fail LOUDLY — silently degrading a
   // proof run to a 3B model is worse than not running it.
   OLLAMA_BASE_URL: "",
+  // EMPTY-STRING LANDMINE, second of its family (2026-08-20). compose passes
+  // `CLAUDE_CLI_BRIDGE_URL: ${CLAUDE_CLI_BRIDGE_URL:-}`, so an unset variable
+  // does not arrive ABSENT — it arrives as "". The schema is
+  // `z.string().url().optional()`, and `.optional()` does not save a value that
+  // is present-but-empty: `.url()` rejects it and the SERVER REFUSES TO BOOT.
+  // Same shape as the OLLAMA_BASE_URL trap above, opposite direction: there an
+  // empty value had to be forced, here it has to be prevented. Always hand the
+  // stack a real URL — the scripted lane never calls it, and the live lane
+  // needs exactly this one.
+  CLAUDE_CLI_BRIDGE_URL:
+    process.env.CLAUDE_CLI_BRIDGE_URL || "http://host.docker.internal:3777",
   WORKSPACE_NET_NAME: `${PROJECT}-workspaces`,
   // Slot 0 keeps the historical subnet; isolated stacks move into 10.x so they
   // never overlap it or each other (172.16-172.31 has no room above 172.31).
