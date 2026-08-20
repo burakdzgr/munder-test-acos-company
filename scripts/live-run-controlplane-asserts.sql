@@ -1,3 +1,15 @@
+-- VENDORED COPY — do not edit here.
+--   source : hive/agents/oscar-mt0b6hjy/E4-LIVE-RUN-CONTROLPLANE-ASSERTS.sql (Oscar)
+--   vendored: 2026-08-20
+--   sha256  : fc72741830be9158 (of everything below this header)
+--
+-- Why a copy at all: the harness must be versioned WITH the code it
+-- checks, so "which assert set proved this run" has an answer. Why the
+-- hash: this copy went stale once and the stale part (4d requiring
+-- cost_cents > 0) would have failed a CORRECT run — a rotting assert set
+-- is worse than none, because it fails honest work. Oscar notifies on
+-- change; this line is the check that does not rely on anyone remembering.
+
 -- E4 CANLI WORKLOAD RUN — KONTROL DÜZLEMİ DOĞRULAMA SETİ (Oscar)
 -- Yerleşim Jim'in lane'i (scripts/e2e-*). Bu dosya ASSERT KAYNAĞIDIR.
 --
