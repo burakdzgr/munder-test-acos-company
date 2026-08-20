@@ -13,6 +13,12 @@
 //        beklemeyi keser ve SUNUCUDAKİ taslak satırını düzenler (yerel taslak
 //        UYDURULMAZ; Oscar'ın "source human'a dönünce LLM üzerine yazmaz"
 //        garantisi yalnız o satır için geçerli).
+//   ... --indexing → yeni proje 'draft' doğar, GET'lerde repository_setup →
+//        indexing → ready ilerler ve READY'den ÖNCE gelen /goal 409 yer
+//        (canlı sunucunun davranışı; Jim'in T24 kırılması). Sihirbaz beklemeli,
+//        sonra hedefi vermeli.
+//   ... --goal-409-once → proje READY görünse de ilk /goal 409 döner (durum
+//        okuma ile POST arasındaki yarış): sihirbaz sessizce yeniden denemeli.
 //   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
 //        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
 //   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
@@ -21,6 +27,9 @@ import { chromium } from "@playwright/test";
 
 const SHOTS = process.argv[2] ?? ".";
 const ENDPOINTS = !process.argv.includes("--no-endpoints");
+const INDEXING = process.argv.includes("--indexing");
+// yarış durumu: proje READY görünüyor ama ilk /goal yine de 409 yiyor
+const GOAL_409_ONCE = process.argv.includes("--goal-409-once");
 const STATE_MODE = process.argv.includes("--draft-then-ready")
   ? "draft"
   : process.argv.includes("--draft-hold")
@@ -112,6 +121,9 @@ const projectTeams = () => ({
 
 let proposal = null;
 let proposalGets = 0;
+let newProjectStatus = "ready";
+let newProjectGets = 0;
+let earlyGoal = 0;
 /** satır baştan açılır ama CEO henüz düşünüyor: teams BOŞ. */
 const draftRow = () => ({
   ...mkProposal(),
@@ -192,11 +204,35 @@ await page.route("**/api/v1/**", async (route) => {
 
   if (method === "POST" && p.endsWith(`/companies/${CID}/projects`)) {
     const body = JSON.parse(req.postData() ?? "{}");
-    const row = project(NEW_P, body.name, "yeni", "ready");
+    // canlı sunucu: yeni proje ÖNCE draft doğar, depo kurulur, indekslenir
+    const row = project(NEW_P, body.name, "yeni", INDEXING ? "draft" : "ready");
     projects = [...projects, row];
     return json(route, row);
   }
+  // tek proje okuması — indeksleme ilerlemesi buradan görünür
+  if (INDEXING && method === "GET" && p.endsWith(`/projects/${NEW_P}`)) {
+    const seq = ["repository_setup", "indexing", "indexing", "ready"];
+    newProjectStatus = seq[Math.min(newProjectGets, seq.length - 1)];
+    newProjectGets += 1;
+    projects = projects.map((r) => (r.id === NEW_P ? { ...r, status: newProjectStatus } : r));
+    return json(route, project(NEW_P, "Kurumsal Web Sitesi", "yeni", newProjectStatus));
+  }
   if (method === "POST" && p.endsWith("/goal")) {
+    // READY'den önce hedef → sunucu 409 (projects/routes.ts GOAL_ACCEPTING)
+    if ((INDEXING && newProjectStatus !== "ready") || (GOAL_409_ONCE && earlyGoal === 0)) {
+      earlyGoal += 1;
+      return route.fulfill({
+        status: 409,
+        contentType: "application/problem+json",
+        body: JSON.stringify({
+          type: "https://acos.dev/errors/conflict",
+          title: "conflict",
+          status: 409,
+          code: "conflict",
+          detail: "proje henüz indekslenmedi — READY olunca hedef verilir",
+        }),
+      });
+    }
     // hedef = CEO'nun öneri adımını tetikler (W4)
     if (ENDPOINTS) {
       proposal =
@@ -310,6 +346,18 @@ await page.fill(
 );
 await page.screenshot({ path: `${SHOTS}/w6-01-brief.png` });
 await page.getByTestId("project-wizard-next").click();
+if (INDEXING) {
+  await page.getByTestId("project-wizard-indexing").waitFor({ timeout: 15_000 });
+  check(
+    "yeni proje READY olmadan hedef VERİLMİYOR — indeksleme ekranı çıktı",
+    ((await page.getByTestId("project-wizard-index-status").textContent()) ?? "").length > 0,
+    (await page.getByTestId("project-wizard-index-status").textContent()) ?? "",
+  );
+  check(
+    "indeksleme sırasında /goal'a hiç POST atılmadı",
+    !posts.some((c) => c.includes(`/projects/${NEW_P}/goal`)),
+  );
+}
 if (!ENDPOINTS) {
   // uç yokken CEO adımı hiç gelmez: kullanıcı beklemeyi kesip taslakla devam eder
   await page.getByTestId("proposal-skip-wait").click({ timeout: 20_000 });
@@ -403,6 +451,24 @@ if (ENDPOINTS) {
   check(
     "mevcut/yeni ayrımı gösteriliyor (existingCount/hireCount)",
     teamsText.includes("mevcut") && teamsText.includes("yeni"),
+  );
+}
+if (INDEXING) {
+  check("READY olunca hedef verildi (409 yenmedi)", earlyGoal === 0, `409 sayısı: ${earlyGoal}`);
+  check(
+    "indeksleme beklendikten sonra CEO önerisi geldi",
+    ((await page.getByTestId("proposal-teams").textContent()) ?? "").includes("Frontend"),
+  );
+}
+if (GOAL_409_ONCE) {
+  check("geçici 409 sessizce yeniden denendi (akış kırılmadı)", earlyGoal === 1, `409 sayısı: ${earlyGoal}`);
+  check(
+    "yeniden denemeden sonra öneri ekranı açıldı",
+    ((await page.getByTestId("proposal-teams").textContent()) ?? "").includes("Frontend"),
+  );
+  check(
+    "kullanıcıya hata gösterilmedi",
+    (await page.getByTestId("project-wizard-error").count()) === 0,
   );
 }
 const totalBefore = await page.getByTestId("proposal-total").textContent();
