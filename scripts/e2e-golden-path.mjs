@@ -613,14 +613,31 @@ async function main() {
 
   await stage("13-worker-idle", "session settles instead of leaking a live runner", async () => {
     if (!state.sessionId) return SKIP("no session");
+    // /agent-sessions is a LIVE view (service.ts): running sessions plus those
+    // that ended within the last 10 minutes. Demanding a row for our session
+    // was wrong — after a long stage 10 the session has aged out of the window,
+    // and this stage then spent its whole budget to report "worker still
+    // running after close" about a worker that settled twenty minutes earlier,
+    // which is the opposite of the truth. Absence from a live view IS the
+    // proof; what would falsify it is a runner still ON our task.
     const settled = await until(async () => {
       const sessions = await get(`/api/v1/companies/${state.companyId}/agent-sessions`);
-      const session = (list(sessions.body)).find((s) => s.id === state.sessionId);
-      return session && ["completed", "waiting", "failed", "cancelled"].includes(session.status) ? session : null;
+      const items = list(sessions.body);
+      const leaked = items.find(
+        (s) => s.taskId === state.workTaskId && ["starting", "running"].includes(s.status),
+      );
+      if (leaked) return null; // a live runner on our task is exactly the leak
+      const session = items.find((s) => s.id === state.sessionId);
+      if (!session) return { status: "ended and aged out of the live window", aged: true };
+      return ["completed", "waiting", "failed", "cancelled"].includes(session.status) ? session : null;
     }, T.medium, 3000);
-    if (!settled) return BREAK(`session ${state.sessionId} never settled - worker still running after close`, "worker:session lifecycle");
+    if (!settled) return BREAK(`a runner is still live on ${state.workTaskId} after ${T.medium / 1000}s - session leaked`, "worker:session lifecycle");
     if (settled.status === "failed") return BREAK("session settled as failed", "worker:agentTaskWorkflow");
-    return PASS(`session ${settled.status}, steps=${settled.stepsCount}, cost=${settled.costCents}c`);
+    return PASS(
+      settled.aged
+        ? "session ended and aged out of the live window; no runner left on the task"
+        : `session ${settled.status}, steps=${settled.stepsCount}, cost=${settled.costCents}c`,
+    );
   });
 
   await stage("14-second-task-is-faster", "a 2nd goal reuses index+memory+session - no re-discovery", async () => {
