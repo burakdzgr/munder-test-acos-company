@@ -13,8 +13,14 @@ export function deadlinePassed(now: Date, deadline: Date | null): boolean {
 }
 
 // ---------- (c) step cap ----------
-export const STEP_SOFT_WARN = 40;
-export const STEP_HARD_CAP = 50;
+// Live tuning (2026-08-14, "raised for live LLM"): a real turn needs more than
+// the 40/50 first cut. These are NOT the `continueAsNew` boundary — _DECISIONS
+// fixes THAT at 50 steps (CONTINUE_EVERY_STEPS) and it is unchanged; the hard
+// cap is deliberately left unnumbered by the spec. The values used to live as
+// private constants inside agentTaskWorkflow, so the shared policy and its
+// tests still advertised 40/50 while production ran 60/120. One home now.
+export const STEP_SOFT_WARN = 60;
+export const STEP_HARD_CAP = 120;
 
 export type StepCapState = "ok" | "warn" | "hard";
 
@@ -29,21 +35,48 @@ export function stepCapState(stepNo: number): StepCapState {
 export const LOOP_WINDOW = 6;
 export const LOOP_THRESHOLD = 3;
 
-const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Volatility that must NOT hide a loop: a fresh uuid or a wall-clock stamp
+// makes two identical actions look different. Both are matched ANYWHERE in a
+// string (not just as the whole value) — an agent re-running
+// `curl /tasks/<fresh-uuid>` is repeating one action, not doing new work.
+const UUID_ANYWHERE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const ISO_TS_ANYWHERE = /\d{4}-\d{2}-\d{2}t[\d:.]+z?/gi;
 const VOLATILE_KEY = /(_at|At|timestamp|Timestamp)$/;
+// The same file addressed as `./src/a.ts`, `/work/src/a.ts` or `src/a.ts`.
+const PATH_PREFIX = /(\.\/|\/work\/)/g;
+// Long free text: two messages that agree for 100 chars are the same move.
+// Bounds an evasion where a loop hides behind a late, cosmetic edit.
+const CONTENT_KEY = /^(body|note|summary|content|message)$/i;
+const CONTENT_PREFIX = 100;
 
-/** Lowercase strings, drop timestamps and uuid values (08 §9d normalization). */
+/**
+ * Lowercase strings, drop timestamps and uuid values (08 §9d normalization).
+ *
+ * Deliberately does NOT collapse digits wholesale. `src/file-1.ts` and
+ * `src/file-2.ts` are DIFFERENT actions — writing a numbered series of files
+ * is ordinary productive work, and a normalizer that folds every digit to a
+ * placeholder reports it as a loop and stops the agent. Numbers that really
+ * are incidental (line offsets, byte counts) ride along in fields whose whole
+ * value is a number, and repeating those IS the loop we want to catch.
+ */
 export function normalizeActionArgs(value: unknown): unknown {
   if (typeof value === "string") {
-    const lowered = value.toLowerCase();
-    return UUID_LIKE.test(lowered) ? "<uuid>" : lowered;
+    return value
+      .toLowerCase()
+      .replace(UUID_ANYWHERE, "<uuid>")
+      .replace(ISO_TS_ANYWHERE, "<ts>")
+      .replace(PATH_PREFIX, "");
   }
   if (Array.isArray(value)) return value.map(normalizeActionArgs);
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       if (VOLATILE_KEY.test(key)) continue;
-      out[key] = normalizeActionArgs((value as Record<string, unknown>)[key]);
+      const normalized = normalizeActionArgs((value as Record<string, unknown>)[key]);
+      out[key] =
+        CONTENT_KEY.test(key) && typeof normalized === "string" && normalized.length > CONTENT_PREFIX
+          ? `${normalized.slice(0, CONTENT_PREFIX)}<...>`
+          : normalized;
     }
     return out;
   }
