@@ -23,6 +23,7 @@
     "gen:histories": "tsx scripts/gen-histories.ts"
   },
   "dependencies": {
+    "@acos/agent-actions": "workspace:*",
     "@acos/config": "workspace:*",
     "@acos/contracts": "workspace:*",
     "@acos/db": "workspace:*",

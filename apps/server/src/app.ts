@@ -12,7 +12,7 @@ import {
   type ZodTypeProvider,
 } from "fastify-type-provider-zod";
 import { problemFor, type ErrorCode } from "@acos/contracts";
-import { ProjectsService } from "@acos/db";
+import { ProjectsService, companyContext } from "@acos/db";
 import type { Db, GuardedDb } from "@acos/db";
 import { registerHealthRoutes, type HealthCheckers } from "./modules/health/index.js";
 import { moduleStubs } from "./modules/index.js";
@@ -113,6 +113,10 @@ export interface BuildAppOptions {
   internalApiToken?: string;
   /** sandbox-manager internal API — terminal ring/log source (22 §5.2, T41). */
   sandboxManagerUrl?: string;
+  /** E4/A (T30): konteynerdeki CLI'ın çağıracağı MCP adresi (workspace ağı). */
+  mcpPublicUrl?: string;
+  /** E4/A (T30): şirket başına eşzamanlı canlı oturum tavanı. */
+  maxLiveSessionsPerCompany?: number;
   /** Single-user mode (AUTH_AUTOLOGIN): mint a Founder session for cookie-less GETs. */
   autologinFounder?: boolean;
 }
@@ -465,6 +469,62 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
       return options.internalApiToken;
     },
     starter: () => app.agentWorkflowStarter,
+  });
+
+  // ---------- E4/A: MCP tool-gateway (T30) ----------
+  const { createActionDispatcher } = await import("@acos/agent-actions");
+  let mcpDispatcher: import("@acos/agent-actions").ActionDispatcher | null = null;
+  // Konteynerdeki `claude` oturumu ACOS'a BURADAN ulaşır — Tool Gateway'in
+  // üstüne oturur, yanına değil. Kimlik oturum jetonundan türer.
+  const { registerMcpRoutes } = await import("./modules/mcp/routes.js");
+  await registerMcpRoutes(app, {
+    guardedDb: () => {
+      if (!options.guardedDb) throw new ApiError("internal", "mcp not wired");
+      return options.guardedDb;
+    },
+    gateway: toolGatewaySvc,
+    internalApiToken: () => {
+      if (!options.internalApiToken) throw new ApiError("internal", "internal token not wired");
+      return options.internalApiToken;
+    },
+    publicMcpUrl: () => options.mcpPublicUrl ?? "http://server:3000/mcp/v1",
+    maxLiveSessionsPerCompany: () => options.maxLiveSessionsPerCompany ?? 3,
+    // Family B: worker ile AYNI dağıtıcı (INV-13 tek yazar). Portlar sunucunun
+    // kendi kancalarına bağlanır: atama sonrası sahibin workflow'u başlar,
+    // araç çağrıları yine Tool Gateway'den geçer.
+    dispatcher: () => {
+      if (!mcpDispatcher) {
+        if (!options.guardedDb) throw new ApiError("internal", "mcp not wired");
+        mcpDispatcher = createActionDispatcher({
+          guardedDb: options.guardedDb,
+          startAgentWorkflow: async (input) => {
+            await app.agentWorkflowStarter?.(input);
+          },
+          ...(app.commsSignalPort && { signalPort: app.commsSignalPort }),
+          invokeTool: async (req) => {
+            const response = await toolGatewaySvc().invoke(companyContext(req.companyId), {
+              agentId: req.agentId,
+              toolName: req.toolName,
+              input: req.input,
+              taskId: req.taskId,
+              idempotencyKey: req.idempotencyKey,
+              ...(req.agentSessionId && { agentSessionId: req.agentSessionId }),
+            });
+            return {
+              invocationId: response.invocationId,
+              decision: response.decision,
+              status: response.status,
+              reason: response.reason,
+              ...(response.output !== undefined && { output: response.output }),
+              ...(response.error !== undefined && { error: response.error }),
+              ...(response.costCents !== undefined && { costCents: response.costCents }),
+              ...(response.retryAfterSec !== undefined && { retryAfterSec: response.retryAfterSec }),
+            };
+          },
+        });
+      }
+      return mcpDispatcher;
+    },
   });
 
   // ---------- E2/W3+W5: düzenlenebilir kadro önerisi (T19) ----------

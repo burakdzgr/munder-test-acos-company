@@ -93,6 +93,8 @@ async function main(): Promise<void> {
     internalApiToken: config.security.internalApiToken,
     autologinFounder: config.security.autologinFounder,
     sandboxManagerUrl: config.sandbox.managerUrl,
+    mcpPublicUrl: config.agentRuntime.mcpPublicUrl,
+    maxLiveSessionsPerCompany: config.agentRuntime.maxLiveSessionsPerCompany,
     healthCheckers: buildCheckers({
       pool,
       natsUrl: config.nats.url,
@@ -214,6 +216,7 @@ async function main(): Promise<void> {
       temporalClient,
       (err, input) => app.log.warn({ err, ...input }, "agentTaskWorkflow start failed"),
       guardedDb, // ajan başına tek canlı oturum kapısı (kuyruk)
+      config.agentRuntime.maxLiveSessionsPerCompany, // E4/A: şirket eşzamanlılık tavanı
     );
     // project creation → projectIntakeWorkflow on the intake queue (T42)
     app.intakeStarter = async ({ companyId, projectId, source }) => {
@@ -459,10 +462,28 @@ async function main(): Promise<void> {
           const agentId = envelope.subject?.agentId;
           const companyId = envelope.companyId;
           if (!agentId || !companyId || !app.agentWorkflowStarter) continue;
+          // Önce kapanan ajanın KENDİ kuyruğu (2026-08-18 davranışı aynen).
           const nextId = await pickNextQueuedTaskId(guardedDb, companyId, agentId);
           if (nextId) {
             const started = await app.agentWorkflowStarter({ companyId, agentId, taskId: nextId });
             if (started) app.log.info({ agentId, taskId: nextId }, "queued task drained");
+          }
+          // E4/A (T30): şirket tavanı altında boşalan kapasite SADECE bu ajanın
+          // kuyruğuna gitmemeli — tavanı dolduranların arkasında bekleyen iş
+          // yoksa süresiz bekler. Kalan kapasite kadar, öncelik/yaş sırasıyla,
+          // canlı oturumu olmayan ajanların işleri başlatılır.
+          const { pickCompanyQueuedTasks } = await import("@acos/db");
+          const liveNow = await guardedDb.execute(
+            rawSql`SELECT count(*)::int AS n FROM agent_sessions
+                    WHERE company_id = ${companyId} AND status IN ('starting','running')`,
+          );
+          const live = Number((liveNow.rows[0] as { n: number }).n);
+          const free = config.agentRuntime.maxLiveSessionsPerCompany - live;
+          for (const queued of await pickCompanyQueuedTasks(guardedDb, companyId, free)) {
+            const started = await app.agentWorkflowStarter({ companyId, ...queued });
+            if (started) {
+              app.log.info({ ...queued, live, free }, "company capacity drained");
+            }
           }
         } catch (err) {
           app.log.warn({ err }, "session-ended drain failed");

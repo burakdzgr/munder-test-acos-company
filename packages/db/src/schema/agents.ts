@@ -209,3 +209,35 @@ export const orgEdges = pgTable(
     check("org_edges_strength_check", sql`${t.strength} BETWEEN 0 AND 1`),
   ],
 );
+
+/**
+ * E4/A (T30) — MCP oturum jetonu.
+ *
+ * Konteynerde koşan `claude` oturumu ACOS eylemlerine MCP ile ulaşır; kimliğini
+ * ARGÜMANDA taşımaz, bu satırdan türetir. Jeton (şirket, ajan, görev, oturum)
+ * dörtlüsüne mühürlüdür, düz metni yalnız basım cevabında görünür (tabloda
+ * SHA-256 özeti), kısa ömürlüdür ve sahibi oturum kapanınca iptal edilir.
+ * Şirket çapındaki INTERNAL_API_TOKEN hiçbir koşulda konteynere girmez.
+ */
+export const mcpSessions = pgTable(
+  "mcp_sessions",
+  {
+    id: id(),
+    companyId: companyId(),
+    createdAt: createdAt(),
+    agentId: uuid("agent_id").notNull(),
+    taskId: uuid("task_id"),
+    agentSessionId: uuid("agent_session_id"),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    callCount: integer("call_count").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("mcp_sessions_token_hash_uq").on(t.tokenHash),
+    index("mcp_sessions_live_idx")
+      .on(t.companyId, t.agentSessionId)
+      .where(sql`${t.revokedAt} IS NULL`),
+  ],
+);

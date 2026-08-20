@@ -77,6 +77,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@acos/agent-actions':
+        specifier: workspace:*
+        version: link:../../packages/agent-actions
       '@acos/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -266,6 +269,30 @@ importers:
         specifier: ^8.2.1
         version: 8.2.1(@types/node@26.2.0)(esbuild@0.28.2)(jiti@1.21.7)(terser@5.49.2)(tsx@4.23.12)(yaml@2.9.0)
 
+  packages/agent-actions:
+    dependencies:
+      '@acos/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@acos/db':
+        specifier: workspace:*
+        version: link:../db
+      '@acos/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@acos/events':
+        specifier: workspace:*
+        version: link:../events
+      '@acos/llm':
+        specifier: workspace:*
+        version: link:../llm
+      '@acos/tools':
+        specifier: workspace:*
+        version: link:../tools
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(@opentelemetry/api@1.9.0)(@types/pg@8.21.0)(pg@8.23.0)
+
   packages/config:
     dependencies:
       zod:
@@ -398,6 +425,9 @@ importers:
 
   workers/agent-worker:
     dependencies:
+      '@acos/agent-actions':
+        specifier: workspace:*
+        version: link:../../packages/agent-actions
       '@acos/config':
         specifier: workspace:*
         version: link:../../packages/config
