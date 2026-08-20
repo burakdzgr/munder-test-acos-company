@@ -28,6 +28,10 @@ const LABEL_CREATED = "acos.created_at";
  *  read-only rootfs (the tmpfs /tmp is noexec, S8). */
 const KEEPALIVE = ["/bin/sh", "-c", "while true; do sleep 3600; done"];
 const DEFAULT_IMAGE = "alpine:3.20"; // real workspace images land with T38
+/** T47: how long a 409 loser keeps polling for the name's owner before giving up. */
+export const CREATE_ADOPT_WINDOW_MS = 8_000;
+/** T47: poll interval while waiting for the conflicting container to become usable/free. */
+export const CREATE_ADOPT_POLL_MS = 200;
 /** The in-container session entry (baked read-only into acos/workspace-node, E4/T31). */
 export const AGENT_SESSION_ENTRY = "/opt/acos/cli/run-session.sh";
 
@@ -79,11 +83,15 @@ export interface DockerSandboxDeps {
   nowMs: () => number;
   /** Fixed clock injection stays deterministic in tests. */
   log?: (msg: string, meta?: Record<string, unknown>) => void;
+  /** Injectable wait (tests run the adopt poll on a fake clock). Defaults to setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export class DockerSandbox {
   private readonly docker: Docker;
   private readonly pulled = new Set<string>();
+  /** T47: in-flight creates per workspaceId — concurrent callers share one. */
+  private readonly creating = new Map<string, Promise<Workspace>>();
   /** Live terminal sessions — ring source for late WS subscribers (22 §5.2). */
   private readonly terminals = new Map<string, TerminalSession>();
   /** Long-lived bidirectional PTY shells (REVISION TASK 2). */
@@ -99,22 +107,104 @@ export class DockerSandbox {
     this.docker = deps.docker;
   }
 
-  /** create → start; idempotent on workspaceId (a live container is reused). */
+  /**
+   * create → start; IDEMPOTENT on workspaceId (T47). The container name is the
+   * deterministic `acos-ws-<workspaceId>` (R1/T50 idempotent replay), so the
+   * same workspace is routinely created more than once: a Temporal activity
+   * retry, the intake analyzer fan-out (N activities, one workspace), a second
+   * process. Contract: every concurrent or repeated create for one workspaceId
+   * resolves to the SAME live container — never a 409 surfaced as a 500.
+   *
+   * Two layers:
+   *  1. in-process coalescing — concurrent callers share one in-flight create;
+   *  2. adopt-on-conflict — a 409 from Docker means someone else owns the
+   *     name; the loser polls (bounded) until the winner is visible and
+   *     running and adopts it. Docker reserves the NAME before the container
+   *     becomes listable/inspectable (live finding 2026-08-21: the immediate
+   *     lookup after a 409 found nothing, 250 ms later it was there), so a
+   *     single lookup is not enough — hence the poll. A name held by a
+   *     container that is being removed frees up; the poll then re-creates.
+   */
   async createWorkspace(req: CreateWorkspaceRequest): Promise<Workspace> {
-    const existing = await this.findContainer(req.workspaceId);
-    if (existing) {
-      const info = await existing.inspect();
-      if (info.State.Running) return this.toWorkspace(info);
-      // INVARIANT 15 (retry idempotency): durmuş aynı-adlı konteyner yeniden
-      // başlatılır; başlatılamıyorsa kaldırılıp temiz yaratılır — 409 yok.
-      try {
-        await existing.start();
-        return this.toWorkspace(await existing.inspect());
-      } catch {
-        await existing.remove({ force: true }).catch(() => {});
-      }
-    }
+    const inflight = this.creating.get(req.workspaceId);
+    if (inflight) return inflight;
+    const p = this.createWorkspaceUncoalesced(req).finally(() => {
+      this.creating.delete(req.workspaceId);
+    });
+    this.creating.set(req.workspaceId, p);
+    return p;
+  }
 
+  private async createWorkspaceUncoalesced(req: CreateWorkspaceRequest): Promise<Workspace> {
+    const deadline = this.deps.nowMs() + CREATE_ADOPT_WINDOW_MS;
+    let lastErr: unknown = null;
+    for (;;) {
+      const existing = await this.adoptExisting(req.workspaceId);
+      if (existing) return existing;
+
+      try {
+        return await this.createFresh(req);
+      } catch (err) {
+        lastErr = err;
+        // TOCTOU on the idempotency check: a concurrent create (another
+        // process, a retry racing the original) owns the name → adopt it.
+        // Anything else is a real Docker error.
+        if ((err as { statusCode?: number }).statusCode !== 409) {
+          throw new SandboxError("DOCKER_ERROR", `create/start failed: ${String(err)}`);
+        }
+      }
+      if (this.deps.nowMs() >= deadline) break;
+      await this.sleep(CREATE_ADOPT_POLL_MS);
+    }
+    throw new SandboxError(
+      "DOCKER_ERROR",
+      `create/start failed: the name acos-ws-${req.workspaceId} stayed in conflict for ${CREATE_ADOPT_WINDOW_MS} ms without a usable container to adopt: ${String(lastErr)}`,
+    );
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return this.deps.sleep ? this.deps.sleep(ms) : new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * The container holding this workspace's name, if any, made usable: running
+   * → reuse; created/exited/paused → start; being removed / dead → null after
+   * best-effort removal (the caller re-creates once the name is free). Looks
+   * up by label first (the normal path) and by NAME second — a container that
+   * is reserved-but-not-yet-registered, or foreign-labeled, is only visible
+   * by name.
+   */
+  private async adoptExisting(workspaceId: string): Promise<Workspace | null> {
+    const container = (await this.findContainer(workspaceId)) ?? this.docker.getContainer(`acos-ws-${workspaceId}`);
+    let info: Docker.ContainerInspectInfo;
+    try {
+      info = await container.inspect();
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 404) return null;
+      throw new SandboxError("DOCKER_ERROR", `inspect failed: ${String(err)}`);
+    }
+    if (info.State.Running) return this.toWorkspace(info);
+    const status = info.State.Status;
+    if (status === "removing" || status === "dead" || info.State.Dead) {
+      // the name frees itself when removal completes; nudge a dead one along
+      await container.remove({ force: true }).catch(() => {});
+      return null;
+    }
+    // INVARIANT 15 (retry idempotency): a stopped same-name container is
+    // restarted; if it cannot start it is removed and created clean — no 409.
+    try {
+      await container.start();
+      const after = await container.inspect();
+      if (after.State.Running) return this.toWorkspace(after);
+    } catch {
+      /* fall through to removal */
+    }
+    await container.remove({ force: true }).catch(() => {});
+    return null;
+  }
+
+  /** One create → start attempt. Throws the raw Docker error (409 = name owned by someone else). */
+  private async createFresh(req: CreateWorkspaceRequest): Promise<Workspace> {
     const level: IsolationLevel = req.isolation;
     const image = req.image ?? DEFAULT_IMAGE;
     await this.ensureImage(image);
@@ -130,49 +220,41 @@ export class DockerSandbox {
       })),
     );
 
-    let container: Docker.Container;
+    // WorkingDir only when a mount provides it — on a read-only rootfs
+    // Docker cannot create a missing WorkingDir, so default to "/". The
+    // worktree volume mounts rw at /work (15 §3.1, T38).
+    const workMount = req.mounts.find((m) => m.target === "/work");
+    const container = await this.docker.createContainer({
+      name: `acos-ws-${req.workspaceId}`,
+      Image: image,
+      Cmd: KEEPALIVE,
+      Tty: false,
+      // O10: agent code runs UNPRIVILEGED inside the workspace. The rest of
+      // the stack already assumed this — provisionWorktree hands the
+      // worktree over with `chown -R 1000:1000 /work` and calls the image
+      // "unprivileged (uid 1000, S8)" — but the container spec never said
+      // so, so every workspace ran as root on top of a volume owned by
+      // 1000. CapDrop ALL + no-new-privileges + a read-only rootfs limited
+      // the blast radius; this closes the gap they were compensating for.
+      User: "1000:1000",
+      ...(workMount && { WorkingDir: "/work" }),
+      Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+      Labels: {
+        [LABEL_MANAGED]: "true",
+        [LABEL_WORKSPACE]: req.workspaceId,
+        [LABEL_ISOLATION]: level,
+        [LABEL_CREATED]: String(this.deps.nowMs()),
+        ...req.labels,
+      },
+      HostConfig: hostConfig as unknown as Docker.ContainerCreateOptions["HostConfig"],
+    });
     try {
-      // WorkingDir only when a mount provides it — on a read-only rootfs
-      // Docker cannot create a missing WorkingDir, so default to "/". The
-      // worktree volume mounts rw at /work (15 §3.1, T38).
-      const workMount = req.mounts.find((m) => m.target === "/work");
-      container = await this.docker.createContainer({
-        name: `acos-ws-${req.workspaceId}`,
-        Image: image,
-        Cmd: KEEPALIVE,
-        Tty: false,
-        // O10: agent code runs UNPRIVILEGED inside the workspace. The rest of
-        // the stack already assumed this — provisionWorktree hands the
-        // worktree over with `chown -R 1000:1000 /work` and calls the image
-        // "unprivileged (uid 1000, S8)" — but the container spec never said
-        // so, so every workspace ran as root on top of a volume owned by
-        // 1000. CapDrop ALL + no-new-privileges + a read-only rootfs limited
-        // the blast radius; this closes the gap they were compensating for.
-        User: "1000:1000",
-        ...(workMount && { WorkingDir: "/work" }),
-        Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
-        Labels: {
-          [LABEL_MANAGED]: "true",
-          [LABEL_WORKSPACE]: req.workspaceId,
-          [LABEL_ISOLATION]: level,
-          [LABEL_CREATED]: String(this.deps.nowMs()),
-          ...req.labels,
-        },
-        HostConfig: hostConfig as unknown as Docker.ContainerCreateOptions["HostConfig"],
-      });
       await container.start();
     } catch (err) {
-      // TOCTOU on the idempotency check: concurrent creates for the same
-      // workspaceId race past findContainer — the 409 loser adopts the winner
-      if ((err as { statusCode?: number }).statusCode === 409) {
-        const winner = await this.findContainer(req.workspaceId);
-        if (winner) {
-          const info = await winner.inspect();
-          if (!info.State.Running) await winner.start().catch(() => {});
-          return this.toWorkspace(await winner.inspect());
-        }
-      }
-      throw new SandboxError("DOCKER_ERROR", `create/start failed: ${String(err)}`);
+      // a create that cannot start must not leave a dead name behind for the
+      // next attempt to trip over
+      await container.remove({ force: true }).catch(() => {});
+      throw err;
     }
     const info = await container.inspect();
     this.deps.log?.("workspace created", { workspaceId: req.workspaceId, isolation: level });
