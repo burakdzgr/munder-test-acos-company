@@ -598,11 +598,20 @@ export class DelegationService {
 export { ACTIVE_WIP_STATUSES };
 
 /**
- * Scheduler queue pick (REVISION TASK 1): the next ASSIGNED task for an
- * agent, priority-first (P0 < P1 < P2 < P3 sorts lexically) then FIFO, and
- * dependency-aware — a task whose unresolved `blocks` predecessor is still
+ * Scheduler queue pick (REVISION TASK 1): the next task WAITING ON ITS OWNER
+ * for an agent, priority-first (P0 < P1 < P2 < P3 sorts lexically) then FIFO,
+ * and dependency-aware — a task whose unresolved `blocks` predecessor is still
  * open is skipped so the agent never burns its single session on work that
  * cannot proceed yet.
+ *
+ * T14 (A7 canlı koşumu, 2026-08-20): kuyruk yalnız ASSIGNED'a bakıyordu, ama
+ * 07 §5'te SAHİBİNİN sırası olan durum bir değil DÖRT tane: ASSIGNED ve
+ * yeniden-giriş üçlüsü CHANGES_REQUESTED / QA_FAILED / REJECTED (üçünün de
+ * tek çıkışı owner|manager ile IN_PROGRESS). İnceleme changes_requested
+ * verdiğinde yeniden-giriş workflow'u BİR KEZ başlatılır; o koşum ölürse
+ * (canlı kanıt: 'model llama3.2:3b not found') görev CHANGES_REQUESTED'ta
+ * kalır ve HİÇBİR mekanizma onu geri almaz — drain görmez, sweep taramaz.
+ * Şirket, sahibi boşta otururken kilitlenir. Kuyruk artık dördünü de görür.
  */
 export async function pickNextQueuedTaskId(
   db: GuardedDb,
@@ -612,7 +621,7 @@ export async function pickNextQueuedTaskId(
   const result = await db.execute(sql`
     SELECT t.id FROM tasks t
     WHERE t.company_id = ${companyId} AND t.owner_agent_id = ${agentId}
-      AND t.status = 'ASSIGNED'
+      AND t.status IN ('ASSIGNED','CHANGES_REQUESTED','QA_FAILED','REJECTED')
       AND NOT EXISTS (
         SELECT 1 FROM task_dependencies td
         JOIN tasks dep ON dep.id = td.depends_on_task_id AND dep.company_id = td.company_id

@@ -47,6 +47,8 @@ describe("agent loop status contract (07 §5)", () => {
   let OTHER: string;
   let ownedTaskId: string;
   let foreignTaskId: string;
+  let reworkTaskId: string;
+  let crashedReworkTaskId: string;
   let activities: ReturnType<typeof createAgentTaskActivities>;
 
   beforeAll(async () => {
@@ -117,6 +119,18 @@ describe("agent loop status contract (07 §5)", () => {
     };
     ownedTaskId = await mkTask(911, OWNER);
     foreignTaskId = await mkTask(912, OWNER);
+    // T14 fikstürü: düzeltme turu bekleyen görev. Durum yeterli — inceleme
+    // zincirinin kendisi bu dosyanın konusu değil.
+    reworkTaskId = await mkTask(913, OWNER);
+    crashedReworkTaskId = await mkTask(914, OWNER);
+    await db
+      .update(tasks)
+      .set({ status: "CHANGES_REQUESTED" })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, reworkTaskId)));
+    await db
+      .update(tasks)
+      .set({ status: "CHANGES_REQUESTED" })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, crashedReworkTaskId)));
 
     activities = createAgentTaskActivities({
       guardedDb,
@@ -195,5 +209,37 @@ describe("agent loop status contract (07 §5)", () => {
     });
     expect(result.ok).toBe(true);
     expect(result.replayed).toBe(true);
+  });
+
+  // ------------------------------------------------------------------
+  // T14 — düzeltme turu (rework re-entry). A7 canlı koşumu, 2026-08-20.
+  // ------------------------------------------------------------------
+
+  it("oturum açılışı CHANGES_REQUESTED görevi de IN_PROGRESS'e alır", async () => {
+    const sessionId = crypto.randomUUID();
+    await activities.startAgentSessionActivity({
+      companyId,
+      agentId: OWNER,
+      taskId: reworkTaskId,
+      sessionId,
+      workflowId: `wf-${sessionId}`,
+      runId: `run-${sessionId}`,
+      attempt: 1,
+    });
+    expect(await statusOf(reworkTaskId)).toBe("IN_PROGRESS");
+  });
+
+  it("düzeltme turu çökerse görev BLOCKED'a parklanır (yardım mesajı artık doğru söylüyor)", async () => {
+    // canlı kanıt: CHANGES_REQUESTED hiçbir dala girmiyordu; olay defterinde
+    // agent.escalated + 'görev BLOCKED durumda bekliyor' yazıyor ama görev
+    // CHANGES_REQUESTED'ta kalıyordu
+    await activities.reportWorkflowCrashActivity({
+      companyId,
+      agentId: OWNER,
+      taskId: crashedReworkTaskId,
+      sessionId: crypto.randomUUID(),
+      reason: "Activity task failed <- model 'llama3.2:3b' not found",
+    });
+    expect(await statusOf(crashedReworkTaskId)).toBe("BLOCKED");
   });
 });

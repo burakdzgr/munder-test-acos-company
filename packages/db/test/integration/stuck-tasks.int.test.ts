@@ -18,6 +18,7 @@ import {
   companyContext,
   createDb,
   createGuardedDb,
+  pickNextQueuedTaskId,
   runMigrations,
   sweepStuckTasks,
   type CompanyContext,
@@ -319,5 +320,59 @@ describe("stuck-task sweep (09 §9, 07 §8)", { timeout: 60_000 }, () => {
     const finding = result.findings.find((f) => f.taskId === task.id);
     expect(finding).toBeDefined();
     expect(finding!.needsWorkflowRestart).toBe(false);
+  });
+
+  // ------------------------------------------------------------------
+  // T14 — düzeltme turu (rework re-entry) kaybolmamalı.
+  // A7 canlı koşumu (2026-08-20): inceleme changes_requested verdi, yeniden
+  // giriş workflow'u BİR KEZ başladı ve çöktü ('model llama3.2:3b not
+  // found'). Görev CHANGES_REQUESTED'ta, sahibi BOŞTA kaldı; ne drain
+  // kuyruğu ne sweep o durumu tarıyordu, şirket kilitlendi.
+  // ------------------------------------------------------------------
+
+  /** Fikstür: sweep/kuyruk yalnız STATUS okur; turu kurmak için ham güncelleme
+   *  yeterli (inceleme zinciri bu dosyanın konusu değil). */
+  async function reworkTask(title: string, status: "CHANGES_REQUESTED" | "QA_FAILED" | "REJECTED") {
+    const task = await assignedTask(title);
+    await db
+      .update(tasks)
+      .set({ status })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.id, task.id)));
+    return task;
+  }
+
+  it("CHANGES_REQUESTED'ta çakılı kalan düzeltme turunu bildirir ve yeniden başlatılmasını ister", async () => {
+    const task = await reworkTask("Düzeltme bekleyen iş", "CHANGES_REQUESTED");
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    const finding = result.findings.find((f) => f.taskId === task.id);
+    expect(finding).toBeDefined();
+    expect(finding!.kind).toBe("rework_stalled");
+    // sahibi boşta → çağıran (main.ts) döngüyü yeniden başlatmalı
+    expect(finding!.needsWorkflowRestart).toBe(true);
+    // sweep durumu DEĞİŞTİRMEZ: düzeltme turu kendi geçişini yapar
+    expect(await statusOf(task.id)).toBe("CHANGES_REQUESTED");
+  });
+
+  it("QA_FAILED ve REJECTED de aynı kümede taranır", async () => {
+    const qaFailed = await reworkTask("QA'dan dönen iş", "QA_FAILED");
+    const rejected = await reworkTask("Founder'ın reddettiği iş", "REJECTED");
+    const later = new Date(Date.now() + 60 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    for (const t of [qaFailed, rejected]) {
+      const finding = result.findings.find((f) => f.taskId === t.id);
+      expect(finding?.kind).toBe("rework_stalled");
+    }
+  });
+
+  it("drain kuyruğu CHANGES_REQUESTED görevi sıradaki iş olarak döndürür", async () => {
+    // bu ajanın BAŞKA açık işi kalmasın: kuyruk seçicisi tek satır döner
+    await db
+      .update(tasks)
+      .set({ status: "CANCELLED" })
+      .where(and(eq(tasks.companyId, companyId), eq(tasks.ownerAgentId, OWNER)));
+    const task = await reworkTask("Sıradaki düzeltme", "CHANGES_REQUESTED");
+    const next = await pickNextQueuedTaskId(guardedDb, companyId, OWNER);
+    expect(next).toBe(task.id);
   });
 });

@@ -475,7 +475,12 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
         .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
       // yalnız SAHİBİNİN oturumu ilerletir: inceleme/QA oturumları görevi
       // REVIEW'dan çekip almaz (matris zaten owner|system diyor)
-      if (taskRow?.status === "ASSIGNED" && taskRow.ownerAgentId === input.agentId) {
+      // T14: yeniden-giriş durumları da sahibinin sırasıdır (07 §5:
+      // CHANGES_REQUESTED/QA_FAILED/REJECTED → IN_PROGRESS, owner|manager).
+      // Düzeltme turu bunlarda AÇILIYOR; görev IN_PROGRESS'e alınmazsa tüm
+      // tur boyunca park mekanizmaları yine sessizce no-op kalır.
+      const ownerTurn = ["ASSIGNED", "CHANGES_REQUESTED", "QA_FAILED", "REJECTED"];
+      if (taskRow && ownerTurn.includes(taskRow.status) && taskRow.ownerAgentId === input.agentId) {
         await taskState
           .transition(ctx, input.taskId, "IN_PROGRESS", { kind: "agent", agentId: input.agentId })
           .catch(() => {
@@ -2268,15 +2273,37 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
       // sweep'in WAITING/ASSIGNED tarama kümesinin DIŞINDA kalır: kalıcı bir
       // hata 30 dakikada bir kör restart döngüsüne girmez, kararı yönetici verir.
       const [task] = await guardedDb
-        .select({ status: tasks.status })
+        .select({ status: tasks.status, ownerAgentId: tasks.ownerAgentId })
         .from(tasks)
         .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
       if (!task) return;
       try {
-        if (task.status === "ASSIGNED" || task.status === "WAITING") {
+        // T14 (A7 canlı koşumu, 2026-08-20): CHANGES_REQUESTED'ta çöken
+        // düzeltme turu hiçbir dala girmiyordu — olay defterinde
+        // agent.escalated + "görev BLOCKED durumda bekliyor" yazıyor ama
+        // görev CHANGES_REQUESTED'ta kalıyordu: mesaj yalan söylüyor ve
+        // yönetici olmayan bir durumu düzeltmeye çalışıyordu.
+        //
+        // Aktör seçimi 07 §5 matrisine göre AYRIŞIR: ASSIGNED/WAITING→
+        // IN_PROGRESS'e {owner, system} izinli, ama yeniden-giriş üçlüsünde
+        // (CHANGES_REQUESTED/QA_FAILED/REJECTED→IN_PROGRESS) yalnız
+        // {owner, manager} var — system YOK. Ölen döngünün sahibi adına
+        // taşırız; sahibi olmayan görevi hiç park etmeyiz.
+        const SYSTEM_PARKABLE = ["ASSIGNED", "WAITING"];
+        const OWNER_PARKABLE = ["CHANGES_REQUESTED", "QA_FAILED", "REJECTED"];
+        if (SYSTEM_PARKABLE.includes(task.status)) {
           await taskState.transition(ctx, input.taskId, "IN_PROGRESS", { kind: "system" });
+        } else if (OWNER_PARKABLE.includes(task.status) && task.ownerAgentId) {
+          await taskState.transition(ctx, input.taskId, "IN_PROGRESS", {
+            kind: "agent",
+            agentId: task.ownerAgentId,
+          });
         }
-        if (["ASSIGNED", "WAITING", "IN_PROGRESS"].includes(task.status)) {
+        if (
+          task.status === "IN_PROGRESS" ||
+          SYSTEM_PARKABLE.includes(task.status) ||
+          (OWNER_PARKABLE.includes(task.status) && task.ownerAgentId !== null)
+        ) {
           await taskState.transition(ctx, input.taskId, "BLOCKED", { kind: "system" }, {
             note: `workflow crash: ${reason.slice(0, 200)}`,
           });

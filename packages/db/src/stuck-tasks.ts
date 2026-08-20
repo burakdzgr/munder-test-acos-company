@@ -57,7 +57,12 @@ export interface StuckTaskFinding {
   ownerAgentId: string | null;
   /** Bildirim gidecek yönetici (reports_to bir üst). */
   managerAgentId: string | null;
-  kind: "waiting_past_sla" | "assigned_too_long" | "orphan_child_assigned" | "review_reopened";
+  kind:
+    | "waiting_past_sla"
+    | "assigned_too_long"
+    | "rework_stalled"
+    | "orphan_child_assigned"
+    | "review_reopened";
   /** Sahibinin canlı oturumu yoksa çağıran workflow'u yeniden başlatmalı. */
   needsWorkflowRestart: boolean;
   stuckForMs: number;
@@ -85,6 +90,18 @@ async function managerOf(db: Db, companyId: string, agentId: string): Promise<st
   return row?.manager_id ?? null;
 }
 
+/**
+ * 07 §5: sahibinin sırası olan yeniden-giriş durumları. Üçünün de tek çıkışı
+ * owner|manager ile IN_PROGRESS — yani ASSIGNED ile aynı anlamda "bu görev
+ * sahibinin döngüsünü bekliyor". Kuyruk (pickNextQueuedTaskId) ve sweep aynı
+ * kümeyi görmeli, yoksa düzeltme turu kaybolur (T14).
+ */
+const REWORK_STATUSES: ReadonlySet<string> = new Set([
+  "CHANGES_REQUESTED",
+  "QA_FAILED",
+  "REJECTED",
+]);
+
 export async function sweepStuckTasks(
   db: Db,
   guardedDb: GuardedDb,
@@ -108,7 +125,7 @@ export async function sweepStuckTasks(
              t.created_at
            ) AS since
       FROM ${tasks} t
-     WHERE t.status IN ('WAITING','ASSIGNED')
+     WHERE t.status IN ('WAITING','ASSIGNED','CHANGES_REQUESTED','QA_FAILED','REJECTED')
   `);
   const candidates = (rows.rows as Array<{
     id: string;
@@ -186,7 +203,12 @@ export async function sweepStuckTasks(
       title: task.title,
       ownerAgentId: task.ownerAgentId,
       managerAgentId,
-      kind: task.status === "WAITING" ? "waiting_past_sla" : "assigned_too_long",
+      kind:
+        task.status === "WAITING"
+          ? "waiting_past_sla"
+          : REWORK_STATUSES.has(task.status)
+            ? "rework_stalled"
+            : "assigned_too_long",
       needsWorkflowRestart: task.ownerAgentId !== null && live.length === 0,
       stuckForMs: idleMs,
     };
@@ -207,7 +229,9 @@ export async function sweepStuckTasks(
                 reason:
                   finding.kind === "waiting_past_sla"
                     ? `TASK-${task.number} ${Math.round(idleMs / 60_000)} dakikadır WAITING — wait_for süresi doldu (07 §8)`
-                    : `TASK-${task.number} ${Math.round(idleMs / 60_000)} dakikadır ASSIGNED ve başlamadı`,
+                    : finding.kind === "rework_stalled"
+                      ? `TASK-${task.number} ${Math.round(idleMs / 60_000)} dakikadır ${task.status} — düzeltme turu hiç başlamadı`
+                      : `TASK-${task.number} ${Math.round(idleMs / 60_000)} dakikadır ASSIGNED ve başlamadı`,
                 toAgentId: managerAgentId,
               },
             },
@@ -400,7 +424,9 @@ export function describeStuckTask(finding: StuckTaskFinding): string {
         ? `${minutes} dakikadır sahipsizdi — Scheduler seçimiyle delege edildi`
         : finding.kind === "review_reopened"
           ? `${minutes} dakikadır reviewersız REVIEW'daydı — inceleme yeniden açıldı`
-          : `${minutes} dakikadır atanmış ama başlamadı`;
+          : finding.kind === "rework_stalled"
+            ? `${minutes} dakikadır düzeltme bekliyor ama tur hiç başlamadı`
+            : `${minutes} dakikadır atanmış ama başlamadı`;
   const restart = finding.needsWorkflowRestart ? " — ajanın döngüsü çalışmıyor, yeniden başlatılıyor" : "";
   return `TASK-${finding.taskNumber} "${finding.title}" ${what}${restart}.`;
 }
