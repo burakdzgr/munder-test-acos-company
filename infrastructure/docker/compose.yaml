@@ -99,6 +99,7 @@ services:
       context: ../..
       dockerfile: infrastructure/docker/Dockerfile.node
       args:
+        ACOS_BUILD_SHA: ${ACOS_BUILD_SHA-unknown}
         APP_FILTER: "@acos/server"
         APP_MAIN: apps/server/dist/main.js
     environment:
@@ -185,6 +186,7 @@ services:
       context: ../..
       dockerfile: infrastructure/docker/Dockerfile.node
       args:
+        ACOS_BUILD_SHA: ${ACOS_BUILD_SHA-unknown}
         APP_FILTER: "@acos/agent-worker"
         APP_MAIN: workers/agent-worker/dist/main.js
     environment:
@@ -258,6 +260,7 @@ services:
       context: ../..
       dockerfile: infrastructure/docker/Dockerfile.node
       args:
+        ACOS_BUILD_SHA: ${ACOS_BUILD_SHA-unknown}
         APP_FILTER: "@acos/execution-worker"
         APP_MAIN: workers/execution-worker/dist/main.js
     environment:
@@ -289,6 +292,7 @@ services:
       context: ../..
       dockerfile: infrastructure/docker/Dockerfile.node
       args:
+        ACOS_BUILD_SHA: ${ACOS_BUILD_SHA-unknown}
         APP_FILTER: "@acos/sandbox-manager"
         APP_MAIN: services/sandbox-manager/dist/main.js
     environment:

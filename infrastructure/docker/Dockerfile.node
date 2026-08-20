@@ -18,4 +18,11 @@ RUN pnpm --filter "${APP_FILTER}..." run build
 
 ARG APP_MAIN
 ENV APP_MAIN=${APP_MAIN}
+
+# Anti-fake-green (live-run staging): the commit this image was built from,
+# baked in so a run can prove the CONTAINER carries the code under test rather
+# than a stale image that merely reports a version string. The app never reads
+# it; the harness compares it with `git rev-parse HEAD`.
+ARG ACOS_BUILD_SHA=unknown
+ENV ACOS_BUILD_SHA=${ACOS_BUILD_SHA}
 CMD node ${APP_MAIN}

@@ -42,6 +42,17 @@ const port = (base) => String(base + SLOT * 100);
 const DATA_DIR = `./data-${PROJECT}`; // relative to the compose file directory
 const dataDirAbs = join(process.cwd(), "infrastructure", "docker", `data-${PROJECT}`);
 
+/** `git rev-parse HEAD`, suffixed when the tree has uncommitted changes. */
+function buildSha() {
+  try {
+    const sha = execSync("git rev-parse HEAD", { encoding: "utf8" }).trim();
+    const dirty = execSync("git status --porcelain", { encoding: "utf8" }).trim().length > 0;
+    return dirty ? `${sha}-dirty` : sha;
+  } catch {
+    return "unknown";
+  }
+}
+
 const stackEnv = {
   ...process.env,
   DATA_DIR,
@@ -78,6 +89,11 @@ const stackEnv = {
   // needs exactly this one.
   CLAUDE_CLI_BRIDGE_URL:
     process.env.CLAUDE_CLI_BRIDGE_URL || "http://host.docker.internal:3777",
+  // Anti-fake-green: the commit the images are built FROM, baked into every
+  // node image (Dockerfile.node) so a run can prove the container carries the
+  // code under test. A stack built from a dirty tree gets "<sha>-dirty" — a
+  // live proof run must not be able to claim a clean commit it did not build.
+  ACOS_BUILD_SHA: buildSha(),
   WORKSPACE_NET_NAME: `${PROJECT}-workspaces`,
   // Slot 0 keeps the historical subnet; isolated stacks move into 10.x so they
   // never overlap it or each other (172.16-172.31 has no room above 172.31).
@@ -156,7 +172,21 @@ function playwright() {
   }, true);
 }
 
-const mode = process.argv[2] ?? "run";
+// No bare default. `run` is down -> up -> playwright -> down, so invoking the
+// script with no argument USED to wipe and rebuild whatever stack the current
+// ACOS_E2E_PROJECT names — a "let me just check this file" command that starts
+// by destroying volumes. (Found the hard way: a syntax check ran the whole
+// cycle.) `pnpm e2e` still passes `run` explicitly; a bare call now prints
+// usage, like every other mode typo already did.
+const mode = process.argv[2];
+if (!mode) {
+  console.error("usage: node scripts/e2e-stack.mjs <run|up|down|config>");
+  console.error("  run    down -> up -> playwright -> down  (DESTRUCTIVE: wipes the project's volumes)");
+  console.error("  up     start the stack and leave it running");
+  console.error("  down   stop the stack and remove its volumes");
+  console.error("  config print the resolved project/ports and touch nothing");
+  process.exit(2);
+}
 if (mode === "up") {
   up();
 } else if (mode === "down") {
