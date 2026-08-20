@@ -23,6 +23,8 @@ export function OfficePanel() {
     (b) => b !== "IDLE" && b !== "OFFLINE",
   ).length;
   const setLayout = useOfficeStore((s) => s.setLayout);
+  const setRoster = useOfficeStore((s) => s.setRoster);
+  const setFloorFilter = useOfficeStore((s) => s.setFloorFilter);
   const setSelectedAgent = useFocus((s) => s.setSelectedAgent);
   const [hireOpen, setHireOpen] = useState(false);
 
@@ -43,8 +45,42 @@ export function OfficePanel() {
     () => new Map((agents.data ?? []).map((agent) => [agent.id, agent.avatarUrl])),
     [agents.data],
   );
+  // FAZ 2B: koltuk dağıtımı unvana bakar (CEO → CEO odası, lider → lider
+  // masası). Unvan pozisyonlarda, tepe yönetici ayrı uçta; ikisi de burada
+  // birleştirilip yansıtıcıya veriliyor.
+  const positions = useQuery({
+    queryKey: keys.orgPositions(companyId),
+    queryFn: () => api.org.listPositions(companyId),
+  });
+  const executive = useQuery({
+    queryKey: [companyId, "tasks", "top-executive"],
+    queryFn: () => api.tasks.topExecutive(companyId),
+    retry: false,
+  });
+  useEffect(() => {
+    const titleById = new Map((positions.data ?? []).map((p) => [p.id, p.title]));
+    const executiveId = executive.data?.agentId ?? null;
+    setRoster(
+      new Map(
+        (agents.data ?? []).map((agent) => [
+          agent.id,
+          {
+            title: titleById.get(agent.positionId) ?? null,
+            executive: agent.id === executiveId,
+          },
+        ]),
+      ),
+    );
+  }, [agents.data, positions.data, executive.data, setRoster]);
+
   // E2/W8: odak kümesi takım filtresini VE seçili projeyi izler
-  const { members: focusMembers } = useFocusAgentSet(companyId);
+  const { members: focusMembers, reason: focusReason } = useFocusAgentSet(companyId);
+  // FAZ 2B/2B-4: PROJE seçiliyse kat o projenin katıdır — yalnız o ekip
+  // oturur, kalanı katta hiç yoktur. TAKIM filtresi ise yalnız vurgudur
+  // (soluklaştırma), katı değiştirmez.
+  useEffect(() => {
+    setFloorFilter(focusReason === "project" ? focusMembers : null);
+  }, [focusReason, focusMembers, setFloorFilter]);
 
   function detach() {
     // Electron shell → second BrowserWindow (U14b); browser → popup window

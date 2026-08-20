@@ -16,32 +16,24 @@ import {
   Sprite,
   Text,
   Texture,
-  TilingSprite,
   type Spritesheet,
 } from "pixi.js";
 import { useOfficeStore } from "../../stores/office.js";
 import { useFocus } from "../../stores/focus.js";
 import type { OfficeSceneEngine } from "./sceneState.js";
-import { WALL, computeFloorplan, type Floorplan } from "./floorplan.js";
+import { officeMap, type OfficeMap } from "./tiled/tiledMap.js";
+import type { FloorProjector } from "./tiled/project.js";
+import { tileArt, type TileArtSpec } from "./tiled/tileset.js";
+import { themeForProject, type OfficeTheme } from "./tiled/theme.js";
+import type { SeatedFloor } from "./tiled/seatPool.js";
 import {
-  BOOKSHELF_ART,
-  CABINET_ART,
-  COFFEE_ART,
-  DESK_ART,
-  PLANT_ART,
-  RACK_ART,
-  RUG_ART,
-  SOFA_ART,
-  WATERCOOLER_ART,
-  WHITEBOARD_ART,
-  artSize,
-  corridorTileArt,
-  emitArt,
-  floorTileArt,
-  wallFaceArt,
-  woodPlankArt,
-  type PixelArt,
-} from "./tiles.js";
+  typingOffset,
+  visualStateFor,
+  type Bubble,
+  type VisualInput,
+  type VisualState,
+} from "./tiled/visualState.js";
+import { emitArt, type PixelArt } from "./tiles.js";
 import {
   SPRITE_BASE,
   loadAvatars,
@@ -72,20 +64,41 @@ const BG = 0x0b0e13;
  */
 const PIXEL = 2;
 
-const hexInt = (hex: string): number => parseInt(hex.slice(1), 16);
 /**
- * Oda zemini taban tonu (2026-08-18 sanat turu): vurgu %25, AÇIK nötr gri
- * %75. Eski karışım app-koyusuna gidiyordu ve ofis "gece vardiyası" gibi
- * duruyordu; AGENTDESK referansı aydınlık karo ister — koridorla aynı
- * parlaklık bandında, ama departman vurgusunu taşıyan bir ton.
+ * FAZ 2B / 2B-3 — baş üstü balonu. İÇERİĞİ UYDURMUYORUZ: yalnız durumun
+ * şeklini çiziyoruz (düşünce/konuşma/inceleme/uyarı). Metin, ancak sunucu
+ * gerçek bir metin gönderirse yazılabilir — şu an göndermiyor.
  */
-const FLOOR_NEUTRAL = 0x8d94a1;
-function roomBase(accent: string): string {
-  const a = parseInt(accent.slice(1), 16);
-  const d = FLOOR_NEUTRAL;
-  const mix = (shift: number) =>
-    Math.round(((a >> shift) & 255) * 0.25 + ((d >> shift) & 255) * 0.75);
-  return `#${((mix(16) << 16) | (mix(8) << 8) | mix(0)).toString(16).padStart(6, "0")}`;
+function paintBubble(g: Graphics, kind: Bubble, x: number, y: number): void {
+  if (kind === "none") return;
+  const color =
+    kind === "alert" ? 0xff6b6b : kind === "review" ? 0xffcb47 : kind === "thought" ? 0xa879ff : 0x3fd0a0;
+  if (kind === "thought") {
+    g.circle(x, y, 7).fill({ color: 0x151a22 }).stroke({ color, width: 1.5 });
+    g.circle(x - 3, y - 1, 1.4).fill({ color });
+    g.circle(x, y - 1, 1.4).fill({ color });
+    g.circle(x + 3, y - 1, 1.4).fill({ color });
+    g.circle(x - 6, y + 8, 2).fill({ color: 0x151a22 }).stroke({ color, width: 1 });
+    return;
+  }
+  if (kind === "alert") {
+    g.poly([x, y - 8, x + 8, y + 6, x - 8, y + 6])
+      .fill({ color: 0x151a22 })
+      .stroke({ color, width: 1.5 });
+    g.rect(x - 0.8, y - 4, 1.6, 6).fill({ color });
+    g.rect(x - 0.8, y + 3, 1.6, 1.6).fill({ color });
+    return;
+  }
+  // speech / review: köşeli balon + kuyruk
+  g.roundRect(x - 9, y - 7, 18, 13, 3).fill({ color: 0x151a22 }).stroke({ color, width: 1.5 });
+  g.poly([x - 3, y + 6, x + 1, y + 6, x - 1, y + 10]).fill({ color: 0x151a22 });
+  if (kind === "review") {
+    g.circle(x - 1, y - 1, 3).stroke({ color, width: 1.4 });
+    g.rect(x + 1.5, y + 1.5, 4, 1.2).fill({ color });
+  } else {
+    g.rect(x - 5, y - 3, 10, 1.4).fill({ color });
+    g.rect(x - 5, y, 7, 1.4).fill({ color });
+  }
 }
 
 declare global {
@@ -95,12 +108,20 @@ declare global {
       readonly agentCount: number;
       readonly interactionCount: number;
       readonly snapshotCount: number;
+      /** FAZ 2B: KATTA oturan ajan sayısı (proje filtresi bunu düşürür) */
+      readonly floorSeats: number;
+      /** kat bir projeye filtreli mi */
+      readonly floorFiltered: boolean;
       readonly debugRing: unknown[];
     };
   }
 }
 
-function installDebugHook(engine: OfficeSceneEngine, getSnapshotCount: () => number): void {
+function installDebugHook(
+  engine: OfficeSceneEngine,
+  getSnapshotCount: () => number,
+  getProjector: () => FloorProjector,
+): void {
   window.__acosOffice = {
     get lastAppliedEventId() {
       return engine.lastAppliedEventId;
@@ -113,6 +134,12 @@ function installDebugHook(engine: OfficeSceneEngine, getSnapshotCount: () => num
     },
     get snapshotCount() {
       return getSnapshotCount();
+    },
+    get floorSeats() {
+      return getProjector().floor.seats.size;
+    },
+    get floorFiltered() {
+      return getProjector().filtered;
     },
     get debugRing() {
       return [...engine.debugRing.slice(-20)];
@@ -158,226 +185,103 @@ function shortName(name: string): string {
  * masanın üstünde koyu plaka + BÜYÜK harf ilk ad. Kadro/yerleşim değişince
  * yeniden kurulur — kare başına iş yok (plaka imzası ticker'da diff'lenir).
  */
-function paintNamePlates(
+interface TileSet {
+  /** döşeme anahtarı → pişirilmiş doku (tiles.ts sanatından) */
+  art: Map<string, Texture>;
+}
+
+/**
+ * FAZ 2B / 2B-2 — SABİT KATI çizer (Tiled haritası).
+ *
+ * Eskiden zemin sunucu yerleşiminden TÜRETİLİYORDU (computeFloorplan). Artık
+ * kat elle çizilmiş bir .tmj: Munder'ın kompozisyonu (CEO odası, toplantı
+ * odası, kafeterya, isimli masalar), pikselleri bizim. Harita saf veriden
+ * gelen "çizim kalemleri" listesidir; burada yalnız sprite'a dökülür.
+ */
+function paintTiledFloor(
   layer: Container,
-  plan: Floorplan,
+  map: OfficeMap,
+  floor: SeatedFloor,
+  cell: number,
+  tiles: TileSet,
+  spec: Record<string, TileArtSpec>,
+): void {
+  layer.removeChildren();
+  const place = (key: string, cx: number, cy: number, terrain: boolean) => {
+    const texture = tiles.art.get(key);
+    if (!texture) return;
+    const sprite = new Sprite(texture);
+    if (terrain) sprite.position.set(cx * cell, cy * cell);
+    else {
+      // mobilya sanatı hücreden büyük: çapa hücresinin üstüne oturt
+      sprite.position.set(
+        cx * cell + cell / 2 - texture.width / 2,
+        cy * cell + cell - texture.height,
+      );
+    }
+    layer.addChild(sprite);
+  };
+
+  const grown = floor.usedHeight > map.height;
+  const openRow = map.height - 1; // büyüme varken alt duvar açılır (geçiş)
+
+  for (const item of map.draw) {
+    // Kat büyüdüyse binanın ALT DUVARI kapı gibi açılır ve yeni bölüm oraya
+    // eklenir. Duvarı olduğu gibi bıraktığımızda yeni masalar binanın
+    // DIŞINDA, boşlukta duruyor gibi görünüyordu (ekran görüntüsünde
+    // yakalandı) — "kat büyüdü" değil "kat bozuldu" okunuyordu.
+    if (
+      grown &&
+      item.layer === "walls" &&
+      item.cy === openRow &&
+      item.cx > 0 &&
+      item.cx < map.width - 1
+    ) {
+      place("floor-open", item.cx, item.cy, true);
+      continue;
+    }
+    place(item.key, item.cx, item.cy, spec[item.key]?.terrain ?? false);
+  }
+
+  if (!grown) return;
+
+  // --- BÜYÜYEN BÖLÜM: zemin + yan duvarlar + alt duvar + yeni masalar ---
+  const bottom = floor.usedHeight;
+  for (let y = map.height; y < bottom; y += 1) {
+    for (let x = 0; x < map.width; x += 1) {
+      const edge = x === 0 || x === map.width - 1 || y === bottom - 1;
+      place(edge ? "wall" : "floor-open", x, y, true);
+    }
+  }
+  for (const desk of floor.extraDesks) place("desk", desk.deskCell.x, desk.deskCell.y, false);
+}
+
+/** Masa isim plakaları — koltuk sahibinin adı masasının önünde. */
+function paintSeatPlates(
+  layer: Container,
+  floor: SeatedFloor,
   cell: number,
   names: ReadonlyMap<string, string>,
 ): void {
   layer.removeChildren();
-  for (const room of plan.rooms) {
-    for (const desk of room.desks) {
-      if (!desk.agentId) continue;
-      const fullName = names.get(desk.agentId);
-      if (!fullName) continue;
-      const text = (fullName.trim().split(/\s+/)[0] ?? "").toUpperCase().slice(0, 10);
-      if (!text) continue;
-      const origin = deskOrigin(desk.cell, cell);
-      const label = new Text({
-        text,
-        style: { fill: 0xe8ecf2, fontSize: 8, fontFamily: "monospace", fontWeight: "bold" },
-      });
-      const w = label.width + 8;
-      const plate = new Graphics();
-      plate
-        .roundRect(desk.cell.x * cell - w / 2, origin.y - 11, w, 11, 2)
-        .fill({ color: 0x131820, alpha: 0.88 })
-        .stroke({ color: hexInt(room.accent), width: 1, alpha: 0.5 });
-      label.anchor.set(0.5, 0);
-      label.position.set(desk.cell.x * cell, origin.y - 9.5);
-      layer.addChild(plate, label);
-    }
-  }
-}
-
-function deskOrigin(cell: { x: number; y: number }, cellSize: number): { x: number; y: number } {
-  const size = artSize(DESK_ART, PIXEL);
-  // Katsayı 0.72 → 1.0: 0.72'de masa üstü hücrenin hemen üstüne düşüyordu ve
-  // avatar (hücrede, ~32px boyunda) ahşabın ÖNÜNE çıkıyordu — ekranda sıra
-  // "monitör, kişi, masa" oluyordu. Tepeden görünüşte doğru sıra "masa+monitör,
-  // sonra oturan kişi"; çizimi tam boy yukarı kaydırmak bunu veriyor.
-  return { x: cell.x * cellSize - size.w / 2, y: cell.y * cellSize - size.h };
-}
-
-interface TileSet {
-  desk: Texture;
-  plant: Texture;
-  rack: Texture;
-  coffee: Texture;
-  wall: Texture;
-  corridor: Texture;
-  wood: Texture;
-  bookshelf: Texture;
-  watercooler: Texture;
-  cabinet: Texture;
-  whiteboard: Texture;
-  rug: Texture;
-  sofa: Texture;
-  /** oda vurgu rengi → zemin karosu (oda başına bir kez pişirilir) */
-  floors: Map<string, Texture>;
-}
-
-function paintProps(
-  g: Graphics,
-  layer: Container,
-  plan: Floorplan,
-  cell: number,
-  tiles: TileSet,
-): void {
-  const place = (texture: Texture, x: number, y: number) => {
-    const sprite = new Sprite(texture);
-    sprite.position.set(x, y);
-    layer.addChild(sprite);
-  };
-  for (const prop of plan.props) {
-    const x = prop.x * cell;
-    const y = prop.y * cell;
-    if (prop.kind === "rack") {
-      place(tiles.rack, x, y);
-    } else if (prop.kind === "plant") {
-      place(tiles.plant, x, y);
-    } else if (prop.kind === "coffee") {
-      place(tiles.coffee, x, y);
-    } else if (prop.kind === "bookshelf") {
-      place(tiles.bookshelf, x, y);
-    } else if (prop.kind === "watercooler") {
-      place(tiles.watercooler, x, y);
-    } else if (prop.kind === "cabinet") {
-      place(tiles.cabinet, x, y);
-    } else if (prop.kind === "whiteboard") {
-      place(tiles.whiteboard, x, y);
-    } else if (prop.kind === "rug") {
-      place(tiles.rug, x, y);
-    } else if (prop.kind === "sofa") {
-      place(tiles.sofa, x, y);
-    } else if (prop.kind === "meeting_table") {
-      const w = 5 * cell;
-      const h = 2 * cell;
-      g.roundRect(x - w / 2, y - h / 2, w, h, 6)
-        .fill(0x4a3a2a)
-        .stroke({ color: 0x5c4834, width: 2 });
-      for (const dx of [-1.6, 0, 1.6]) {
-        g.rect(x + dx * cell - 0.3 * cell, y - h / 2 - 0.75 * cell, 0.6 * cell, 0.55 * cell).fill(
-          0x2b3440,
-        );
-        g.rect(x + dx * cell - 0.3 * cell, y + h / 2 + 0.2 * cell, 0.6 * cell, 0.55 * cell).fill(
-          0x2b3440,
-        );
-      }
-    } else {
-      // reception
-      g.rect(x, y, 5 * cell, 1.1 * cell).fill(0x3a3550);
-      g.rect(x, y, 5 * cell, 0.2 * cell).fill(0x4a4568);
-    }
-  }
-}
-
-function paintFloorplan(layer: Container, plan: Floorplan, cell: number, tiles: TileSet): void {
-  layer.removeChildren();
-  const g = new Graphics();
-
-  // Zeminler ve duvarlar DÖŞEME (TilingSprite): tek dokunun tekrarı, tek
-  // draw call, ve büyütünce piksel yapısı korunuyor. Eskiden düz dolgu +
-  // dama tahtasıydı; ölçeklenince "piksel sanatı" değil "renkli dikdörtgen"
-  // gibi duruyordu.
-  const tile = (texture: Texture, x: number, y: number, w: number, h: number) => {
-    const sprite = new TilingSprite({ texture, width: w, height: h });
-    sprite.position.set(x, y);
-    layer.addChild(sprite);
-    return sprite;
-  };
-
-  // corridor/lobby ground fills the whole envelope; rooms paint over it
-  tile(
-    tiles.corridor,
-    plan.bounds.x * cell,
-    plan.bounds.y * cell,
-    plan.bounds.w * cell,
-    plan.bounds.h * cell,
-  );
-
-  // room floors: departman vurgusundan pişirilmiş karo
-  for (const room of plan.rooms) {
-    const floor = tiles.floors.get(room.accent);
-    const { x, y, w, h } = room.rect;
-    if (floor) tile(floor, x * cell, y * cell, w * cell, h * cell);
-  }
-
-  // meeting floor — ahşap tahta (AGENTDESK'in kahverengi orta odası)
-  if (plan.meeting) {
-    const { x, y, w, h } = plan.meeting.rect;
-    tile(tiles.wood, x * cell, y * cell, w * cell, h * cell);
-  }
-
-  layer.addChild(g);
-
-  // walls (door gaps pre-cut) — döşenmiş duvar yüzü
-  for (const wall of plan.walls) {
-    tile(tiles.wall, wall.x * cell, wall.y * cell, wall.w * cell, wall.h * cell);
-  }
-
-  // desks: pişirilmiş piksel masa (monitör tonu dinamik — monitor layer)
-  for (const room of plan.rooms) {
-    for (const desk of room.desks) {
-      const sprite = new Sprite(tiles.desk);
-      const origin = deskOrigin(desk.cell, cell);
-      sprite.position.set(origin.x, origin.y);
-      layer.addChild(sprite);
-    }
-  }
-
-  // entrance: dark threshold + welcome mat
-  g.rect(plan.entrance.x * cell, plan.entrance.y * cell, plan.entrance.w * cell, WALL * cell).fill(
-    0x0c1016,
-  );
-  g.rect(
-    plan.entrance.x * cell,
-    (plan.entrance.y - 0.5) * cell,
-    plan.entrance.w * cell,
-    0.4 * cell,
-  ).fill(0x2f3a2a);
-
-  paintProps(g, layer, plan, cell, tiles);
-
-  // Salon tabelaları: ODANIN ÜST DUVARINA asılır.
-  //
-  // Eskiden zeminin üstüne, ilk masa sırasının hizasına yazılıyordu ve
-  // masalar tabelanın üstüne binip yazıyı okunmaz hâle getiriyordu
-  // (ekran görüntüsünde "ENGINEERING" yazısının yarısı masaların altındaydı).
-  for (const room of plan.rooms) {
-    const plate = new Graphics();
-    const text = room.label.toUpperCase();
-    const width = Math.min(room.rect.w * cell - 8, text.length * 7.4 + 12);
-    plate
-      .roundRect((room.rect.x + 0.4) * cell, (room.rect.y + 0.15) * cell, width, 18, 3)
-      .fill({ color: 0x0c1016, alpha: 0.85 })
-      .stroke({ color: hexInt(room.accent), width: 1, alpha: 0.55 });
-    layer.addChild(plate);
-
+  for (const seat of floor.seats.values()) {
+    const name = names.get(seat.agentId);
+    if (!name) continue;
     const label = new Text({
-      text,
-      style: { fill: room.accent, fontSize: 11, fontFamily: "monospace", fontWeight: "bold" },
+      text: shortName(name).toUpperCase(),
+      style: {
+        fill: 0x9aa7b4,
+        fontSize: 9,
+        fontFamily: "monospace",
+        letterSpacing: 0.5,
+      },
     });
-    label.position.set((room.rect.x + 0.4) * cell + 6, (room.rect.y + 0.15) * cell + 3);
+    label.anchor.set(0.5, 0);
+    label.position.set(seat.cell.x * cell + cell / 2, (seat.cell.y - 1) * cell - 4);
     layer.addChild(label);
   }
-  if (plan.meeting) {
-    const label = new Text({
-      text: plan.meeting.label.toUpperCase(),
-      style: { fill: 0x8fa3c8, fontSize: 12, fontFamily: "monospace" },
-    });
-    label.alpha = 0.7;
-    label.position.set((plan.meeting.rect.x + 0.8) * cell, (plan.meeting.rect.y + 0.6) * cell);
-    layer.addChild(label);
-  }
-  const lobby = new Text({
-    text: "LOBİ",
-    style: { fill: 0x39424f, fontSize: 11, fontFamily: "monospace", fontWeight: "bold" },
-  });
-  lobby.alpha = 0.55;
-  lobby.position.set((plan.entrance.x - 6.6) * cell, (plan.entrance.y - 3.2) * cell);
-  layer.addChild(lobby);
 }
+
 
 export function OfficeCanvas({
   onSelectAgent,
@@ -395,6 +299,9 @@ export function OfficeCanvas({
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const engine = useOfficeStore((s) => s.engine);
+  const projector = useOfficeStore((s) => s.projector);
+  const projectorRef = useRef(projector);
+  projectorRef.current = projector;
   const snapshotCount = useOfficeStore((s) => s.snapshotCount);
   const [fallback, setFallback] = useState(false);
   const snapshotCountRef = useRef(snapshotCount);
@@ -418,12 +325,26 @@ export function OfficeCanvas({
     executiveIdRef.current = executiveAgentId;
     executiveDirtyRef.current = true;
   }
+  /**
+   * T26: tıklama geri çağrısı REF'te tutulur, bağımlılıkta DEĞİL.
+   * Çağıranlar satır içi ok fonksiyonu veriyor (OfficePanel), yani her
+   * yeniden render'da kimliği değişiyordu; bağımlılıkta olduğu için proje
+   * değişiminin/sihirbazın her açılışının ardından TÜM Pixi uygulaması
+   * yıkılıp yeniden kuruluyordu. Sahne artık yalnız motor/yedek değişince
+   * kurulur; tıklama her zaman en güncel geri çağrıyı çağırır.
+   */
+  const onSelectAgentRef = useRef(onSelectAgent);
+  onSelectAgentRef.current = onSelectAgent;
+  // FAZ 2B/2B-4: kat teması seçili projeye göre (aynı düzen, kendi tonu).
+  const selectedProjectId = useFocus((s) => s.selectedProjectId);
+  const themeRef = useRef<OfficeTheme>(themeForProject(selectedProjectId));
+  themeRef.current = themeForProject(selectedProjectId);
   const selectedAgentId = useFocus((s) => s.selectedAgentId);
   const selectedRef = useRef(selectedAgentId);
   selectedRef.current = selectedAgentId;
 
   useEffect(() => {
-    installDebugHook(engine, () => snapshotCountRef.current);
+    installDebugHook(engine, () => snapshotCountRef.current, () => projectorRef.current);
   }, [engine]);
 
   useEffect(() => {
@@ -432,9 +353,9 @@ export function OfficeCanvas({
     const app = new Application();
     let destroyed = false;
     let hostObserver: ResizeObserver | null = null;
-    let renderedLayoutVersion = -1;
     let renderedEngineVersion = -1;
-    let plan: Floorplan | null = null;
+    let renderedFloorSig = "";
+    const map: OfficeMap = officeMap();
     interface AvatarNode {
       root: Container;
       sprite: AnimatedSprite | null;
@@ -445,6 +366,9 @@ export function OfficeCanvas({
       lastY: number;
       dir: WalkDir;
       anim: string;
+      /** FAZ 2B/2B-3: baş üstü balonu ve oturma/yazma durumu */
+      bubble: Graphics;
+      visual: VisualState | null;
     }
     const avatarNodes = new Map<string, AvatarNode>();
 
@@ -475,6 +399,14 @@ export function OfficeCanvas({
       } catch {
         sheet = null;
       }
+      // T26: yükleme UÇUŞTAYKEN efekt temizlenmiş olabilir (proje değişimi,
+      // sihirbaz, panel yeniden render'ı). O durumda app.destroy() çalışmış ve
+      // app.stage NULL'dur — aşağıdaki addChild "Cannot read properties of
+      // null" ile patlıyordu. Yükleme sonrası bayrağı yeniden okuyoruz.
+      if (destroyed) {
+        app.destroy(true);
+        return;
+      }
       const camera = new Container();
       const zoneLayer = new Container();
       // masa isim plakaları (AGENTDESK dili) — zemin üstü, avatar altı
@@ -491,39 +423,38 @@ export function OfficeCanvas({
       // Piksel döşemeleri ÖMÜRDE BİR KEZ pişirilir; her plan değişiminde
       // yeniden üretilseydi büyük org'da her yeniden yerleşimde görünür bir
       // takılma olurdu.
-      const tiles: TileSet = {
-        desk: bakeArt(app, DESK_ART, PIXEL),
-        plant: bakeArt(app, PLANT_ART, PIXEL),
-        rack: bakeArt(app, RACK_ART, PIXEL),
-        coffee: bakeArt(app, COFFEE_ART, PIXEL),
-        wall: bakeArt(app, wallFaceArt(), PIXEL),
-        corridor: bakeArt(app, corridorTileArt(), PIXEL),
-        wood: bakeArt(app, woodPlankArt(), PIXEL),
-        bookshelf: bakeArt(app, BOOKSHELF_ART, PIXEL),
-        watercooler: bakeArt(app, WATERCOOLER_ART, PIXEL),
-        cabinet: bakeArt(app, CABINET_ART, PIXEL),
-        whiteboard: bakeArt(app, WHITEBOARD_ART, PIXEL),
-        rug: bakeArt(app, RUG_ART, PIXEL),
-        sofa: bakeArt(app, SOFA_ART, PIXEL),
-        floors: new Map<string, Texture>(),
-      };
+      // Tema başına döşeme seti TEMBEL pişirilir: proje değişince yeni ton
+      // bir kez üretilir, sonra önbellekten gelir (her karede pişirmek büyük
+      // katta görünür takılma demekti).
+      const bakedThemes = new Map<string, { tiles: TileSet; spec: Record<string, TileArtSpec> }>();
+      function themeTiles(theme: OfficeTheme): { tiles: TileSet; spec: Record<string, TileArtSpec> } {
+        const cached = bakedThemes.get(theme.id);
+        if (cached) return cached;
+        const spec = tileArt(theme);
+        const tiles: TileSet = { art: new Map<string, Texture>() };
+        for (const [key, entry] of Object.entries(spec)) {
+          tiles.art.set(key, bakeArt(app, entry.art, PIXEL));
+        }
+        const baked = { tiles, spec };
+        bakedThemes.set(theme.id, baked);
+        return baked;
+      }
+      let tiles: TileSet = themeTiles(themeRef.current).tiles;
 
       // 2026-08-18 (Founder kararı): pan/zoom TAMAMEN kalktı — ofis her
       // zaman panele CONTAIN-fit sığar ve panel boyutu değişince kendini
       // yeniden ölçekler. Kamerayı süren tek şey bu fonksiyondur.
       function fitCamera(): void {
-        if (!plan) return;
         const sw = app.screen.width;
         const sh = app.screen.height;
-        const pw = plan.bounds.w * CELL;
-        const ph = plan.bounds.h * CELL;
+        // kat BÜYÜYEBİLİR (fazla ajan → yeni masa adaları): yükseklik
+        // yansıtıcının kullandığı satır sayısıdır, haritanınki değil.
+        const pw = map.width * CELL;
+        const ph = Math.max(map.height, projector.floor.usedHeight) * CELL;
         if (pw <= 0 || ph <= 0 || sw <= 0 || sh <= 0) return;
         const scale = Math.min(Math.min(sw / pw, sh / ph), 2.5);
         camera.scale.set(scale);
-        camera.position.set(
-          (sw - pw * scale) / 2 - plan.bounds.x * CELL * scale,
-          (sh - ph * scale) / 2 - plan.bounds.y * CELL * scale,
-        );
+        camera.position.set((sw - pw * scale) / 2, (sh - ph * scale) / 2);
       }
       app.renderer.on("resize", fitCamera);
 
@@ -539,9 +470,13 @@ export function OfficeCanvas({
 
 
       let lastLabelsVisible: boolean | null = null;
-      let lastPlateSig = "";
+      // Yalnız faz sayacı: yazma ritmi gibi DURUMA BAĞLI görsellerin fazı.
+      // Hareket üretmez — hangi avatarın "yazıyor" sayılacağını badge belirler.
+      let elapsedSeconds = 0;
+      let lastPhase = -1;
       app.ticker.add((ticker) => {
         engine.tick(ticker.deltaMS / 1000);
+        elapsedSeconds += ticker.deltaMS / 1000;
         // P2: zoom-thresholded name labels — react to wheel zoom immediately.
         // Eşik 0.85 → 1.25 (2026-08-18): adlar artık masa plakalarında kalıcı;
         // avatar üstü etiket yalnız yakın kadraja iner (çifte yazı önlenir).
@@ -552,29 +487,24 @@ export function OfficeCanvas({
             node.label.visible = labelsVisible || id === selectedRef.current;
           }
         }
-        if (engine.layout && engine.layoutVersion !== renderedLayoutVersion) {
-          renderedLayoutVersion = engine.layoutVersion;
-          plan = computeFloorplan(engine.layout);
-          // zemin karoları oda vurgularından pişirilir — plan değişince
-          // yeni vurgular gelebilir, önbelleğe eklenir (aynı renk bir kez)
-          for (const room of plan.rooms) {
-            if (!tiles.floors.has(room.accent)) {
-              tiles.floors.set(
-                room.accent,
-                bakeArt(app, floorTileArt(hexInt(roomBase(room.accent)), 11), PIXEL),
-              );
-            }
-          }
-          paintFloorplan(zoneLayer, plan, CELL, tiles);
-          fitCamera();
-        }
-        // masa plakaları: yerleşim ya da kadro değişince yeniden kurulur
-        const plateSig = `${renderedLayoutVersion}:${engine.avatars.size}`;
-        if (plan && plateSig !== lastPlateSig) {
-          lastPlateSig = plateSig;
+        // Kat SABİT; yeniden çizilmesi yalnız KADRO değişince gerekir
+        // (koltuk dağıtımı değişir, kat büyüyebilir).
+        const floor = projector.floor;
+        const theme = themeRef.current;
+        const floorSig = `${theme.id}:${floor.seats.size}:${floor.usedHeight}:${[
+          ...floor.seats.values(),
+        ]
+          .map((s) => `${s.agentId}@${s.seat}`)
+          .join(",")}`;
+        if (floorSig !== renderedFloorSig) {
+          renderedFloorSig = floorSig;
+          const baked = themeTiles(theme);
+          tiles = baked.tiles;
+          paintTiledFloor(zoneLayer, map, floor, CELL, tiles, baked.spec);
           const names = new Map<string, string>();
           for (const [id, a] of engine.avatars) names.set(id, a.name);
-          paintNamePlates(plateLayer, plan, CELL, names);
+          paintSeatPlates(plateLayer, floor, CELL, names);
+          fitCamera();
         }
         // CEO işareti geldi/değişti → avatar geçişini bir kez zorla, yoksa
         // motor durgunken (bütün ajanlar IDLE) halka hiç çizilmez
@@ -582,26 +512,44 @@ export function OfficeCanvas({
           executiveDirtyRef.current = false;
           renderedEngineVersion = -1;
         }
-        if (engine.version === renderedEngineVersion) return;
+        // Motor durgunken de bir şeyin canlı kalması gerekebilir: WORKING olan
+        // ajanın klavye ritmi ve monitör titremesi. Bu ritim ajanın DURUMUNA
+        // bağlı (badge), kendi kendine dolaşan bir animasyon değil — durum
+        // IDLE'a dönünce ritim de biter.
+        const phase = Math.floor(elapsedSeconds * 7);
+        const typingLive = [...avatarNodes.values()].some(
+          (n) => n.visual?.activity === "typing",
+        );
+        if (engine.version === renderedEngineVersion && !(typingLive && phase !== lastPhase)) {
+          return;
+        }
+        lastPhase = phase;
         renderedEngineVersion = engine.version;
 
         // desk monitors tinted by the seated agent's live status
         monitorLayer.clear();
-        if (plan) {
-          for (const room of plan.rooms) {
-            for (const desk of room.desks) {
-              if (!desk.agentId) continue;
-              const avatar = engine.avatars.get(desk.agentId);
-              const color = avatar ? (BADGE_COLOR[avatar.badge] ?? 0x233040) : 0x233040;
-              // Ekran dikdörtgeni masa ÇİZİMİNDEN türetilir, elle girilen
-              // sayılardan değil: DESK_ART'ta ekran 10..21. sütun ve 3..6.
-              // satırda. Sabit ofsetler çizim değişince sessizce kayıyordu.
-              const origin = deskOrigin(desk.cell, CELL);
-              monitorLayer
-                .rect(origin.x + 10 * PIXEL, origin.y + 3 * PIXEL, 12 * PIXEL, 4 * PIXEL)
-                .fill({ color, alpha: avatar ? 0.85 : 0.3 });
-            }
-          }
+        for (const seat of projector.floor.seats.values()) {
+          const avatar = engine.avatars.get(seat.agentId);
+          const color = avatar ? (BADGE_COLOR[avatar.badge] ?? 0x233040) : 0x233040;
+          // WORKING → ekran hafifçe titrer (yazma). Kaynağı badge.
+          const typing = avatarNodes.get(seat.agentId)?.visual?.activity === "typing";
+          const glow = typing ? (phase % 2 === 0 ? 1 : 0.7) : avatar ? 0.85 : 0.3;
+          // Masa, koltuğun BİR ÜSTÜNDEKİ hücrede (harita üreteci böyle
+          // yerleştiriyor). Ekran dikdörtgeni DESK_ART'taki ekranın yeri:
+          // 10..21. sütun, 3..6. satır — sabit ofset yazmıyoruz.
+          const deskX = seat.cell.x * CELL;
+          const deskY = (seat.cell.y - 1) * CELL;
+          const deskTexture = tiles.art.get("desk");
+          const offsetX = deskTexture ? CELL / 2 - deskTexture.width / 2 : 0;
+          const offsetY = deskTexture ? CELL - deskTexture.height : 0;
+          monitorLayer
+            .rect(
+              deskX + offsetX + 10 * PIXEL,
+              deskY + offsetY + 3 * PIXEL,
+              12 * PIXEL,
+              4 * PIXEL,
+            )
+            .fill({ color, alpha: glow });
         }
 
         // avatars: create/update/remove Pixi nodes from engine state.
@@ -636,17 +584,20 @@ export function OfficeCanvas({
             });
             label.anchor.set(0.5, 0);
             label.position.set(0, 8);
-            root.addChild(badge, label);
+            const bubble = new Graphics();
+            root.addChild(badge, bubble, label);
             root.eventMode = "static";
             root.cursor = "pointer";
-            root.on("pointertap", () => onSelectAgent?.(agentId));
+            root.on("pointertap", () => onSelectAgentRef.current?.(agentId));
             avatarLayer.addChild(root);
             node = {
               root,
               sprite,
               body,
               badge,
+              bubble,
               label,
+              visual: null,
               lastX: avatar.pos.x,
               lastY: avatar.pos.y,
               dir: "down",
@@ -671,10 +622,35 @@ export function OfficeCanvas({
           node.lastX = avatar.pos.x;
           node.lastY = avatar.pos.y;
 
+          // FAZ 2B/2B-3: görsel durum TALİMAT verisinden türetilir
+          // (badge + yürüyor mu + koltuğunda mı + içinde olduğu etkileşim).
+          const seat = projector.seatCell(agentId);
+          const atSeat =
+            !!seat &&
+            Math.abs(avatar.pos.x - seat.x) < 0.2 &&
+            Math.abs(avatar.pos.y - seat.y) < 0.2;
+          let interactionKind: VisualInput["interaction"] = null;
+          for (const interaction of engine.interactions.values()) {
+            if (interaction.agentIds.includes(agentId)) {
+              interactionKind = interaction.kind as VisualInput["interaction"];
+              break;
+            }
+          }
+          const visual = visualStateFor({
+            badge: avatar.badge,
+            moving,
+            atSeat,
+            dir: node.dir,
+            interaction: interactionKind ?? null,
+          });
+          node.visual = visual;
+
           const badgeColor = BADGE_COLOR[avatar.badge] ?? 0x5c6773;
           if (node.sprite && sheet) {
             const avatarId = resolveAvatarId(agentId, avatarUrlsRef.current?.get(agentId) ?? null);
-            const animKey = `${avatarId}:${moving ? "walk" : "idle"}:${node.dir}`;
+            // oturuyorsa masaya DÖNÜK duruş karesi (sırtı bize dönük)
+            const facing = visual.posture === "seated" ? visual.facing : node.dir;
+            const animKey = `${avatarId}:${moving ? "walk" : "idle"}:${facing}`;
             if (node.anim !== animKey) {
               node.anim = animKey;
               const entry = avatarLib.get(avatarId);
@@ -685,7 +661,7 @@ export function OfficeCanvas({
                   );
                   node.sprite.play();
                 } else {
-                  node.sprite.textures = [sheet.textures[entry.idle[node.dir]] ?? Texture.EMPTY];
+                  node.sprite.textures = [sheet.textures[entry.idle[facing]] ?? Texture.EMPTY];
                   node.sprite.gotoAndStop(0);
                 }
                 // frame boyutundan bağımsız yerleşim: hedef ayak izi ~32×40
@@ -744,10 +720,30 @@ export function OfficeCanvas({
           // cevap veriyor; tam ad tıklanınca açılan ajan kartında duruyor.
           node.label.text = shortName(avatar.name);
           node.label.visible = camera.scale.x >= 1.25 || agentId === selectedRef.current;
-          node.root.position.set(avatar.pos.x * CELL, avatar.pos.y * CELL);
+          // Oturan avatar sandalyeye çöker (birkaç piksel yukarı) ve WORKING
+          // ise klavyede omuz ritmi verir. İkisi de TALİMATTAN gelen duruma
+          // bağlı: koltuk yansıtıcıdan, WORKING office.status.changed'den.
+          const sit = node.visual?.posture === "seated" ? -3 : 0;
+          const type = typingOffset(node.visual?.activity ?? "idle", elapsedSeconds);
+          node.root.position.set(avatar.pos.x * CELL, avatar.pos.y * CELL + sit + type);
           node.root.zIndex = avatar.pos.y;
-          const focusSet = focusAgentIdsRef.current;
-          node.root.alpha = focusSet && !focusSet.has(agentId) ? 0.22 : 1;
+
+          node.bubble.clear();
+          if (node.visual && node.visual.bubble !== "none") {
+            paintBubble(node.bubble, node.visual.bubble, 0, -50);
+          }
+
+          // FAZ 2B/2B-4: PROJE KATI. Filtre varken katta olmayan ajan
+          // GÖRÜNMEZ — soluk değil, hiç yok (kat o projenin katı). Filtre
+          // yokken eski davranış: takım filtresi solukluk yapar.
+          if (projector.filtered && !projector.onFloor(agentId)) {
+            node.root.visible = false;
+            continue;
+          }
+          node.root.visible = true;
+          const focusSet = projector.filtered ? null : focusAgentIdsRef.current;
+          const focusAlpha = focusSet && !focusSet.has(agentId) ? 0.22 : 1;
+          node.root.alpha = node.visual?.dim ? focusAlpha * 0.45 : focusAlpha;
         }
         for (const [agentId, node] of avatarNodes) {
           if (!engine.avatars.has(agentId)) {
@@ -779,7 +775,7 @@ export function OfficeCanvas({
       }
       host.replaceChildren();
     };
-  }, [engine, fallback, onSelectAgent]);
+  }, [engine, fallback]);
 
   if (fallback) {
     // degraded mode (23 §15): same store, list rendering
