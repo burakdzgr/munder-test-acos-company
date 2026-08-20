@@ -256,7 +256,7 @@ async function run(): Promise<void> {
   // E4/T31 (ADR-022): CLI-session runtime ports. Only wired when the broker is
   // configured; otherwise resolveAgentRuntimeActivity keeps every turn on steps.
   const { createCliSessionActivities } = await import("./cli-session/activities.js");
-  const { createBrokerClient, createGatewaySessionClient, createSandboxSessionClient } = await import("./cli-session/clients.js");
+  const { createAdmissionClient, createBrokerClient, createGatewaySessionClient, createSandboxSessionClient } = await import("./cli-session/clients.js");
   const { startTemporalHeartbeat } = await import("./activities/agent-task.js");
   const cliCfg = config.cliRuntime;
   const cliRuntimeEnabled = cliCfg.runtime === "cli" && Boolean(cliCfg.brokerUrl) && Boolean(cliCfg.brokerSecret);
@@ -279,11 +279,12 @@ async function run(): Promise<void> {
       rows: 32,
     },
     broker: createBrokerClient({ baseUrl: cliCfg.brokerUrl ?? "http://127.0.0.1:3779", token: cliCfg.brokerSecret ?? "" }),
-    gateway: createGatewaySessionClient({
-      baseUrl: serverInternalUrl,
-      token: config.security.internalApiToken,
-      containerGatewayUrl: cliCfg.containerGatewayUrl,
-    }),
+    // T30 §1.1/§10: minted and admitted HOST-side with the internal token; the
+    // server hands back mcpUrl (MCP_PUBLIC_URL) = the address the CONTAINER uses.
+    gateway: createGatewaySessionClient({ baseUrl: serverInternalUrl, token: config.security.internalApiToken }),
+    admission: createAdmissionClient({ baseUrl: serverInternalUrl, token: config.security.internalApiToken }, (msg, meta) =>
+      console.log(JSON.stringify({ msg, ...meta })),
+    ),
     sandboxSessions: createSandboxSessionClient({ baseUrl: config.sandbox.managerUrl, token: config.security.internalApiToken }),
     sandboxHttp: { baseUrl: config.sandbox.managerUrl, token: config.security.internalApiToken },
     runtimeEvents,

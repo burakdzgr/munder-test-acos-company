@@ -115,6 +115,7 @@ export async function driveSession(ports: DrivePorts, input: DriveInput, opts: D
 
   let brokerToken: string | null = null;
   let gatewayToken: string | null = null;
+  let gatewayMcpSessionId: string | null = null;
   let opened = false;
   let endedBy: EndedBy = "cli_exit";
   let exitCode: number | null = null;
@@ -150,23 +151,25 @@ export async function driveSession(ports: DrivePorts, input: DriveInput, opts: D
     }
     brokerToken = mint.token;
 
-    // ---- 3. gateway session (the control plane's bearer for MCP + audit)
+    // ---- 3. gateway MCP session (T30 §1.1): the control plane's bearer for MCP + builtin audit
     const gw = await ports.gateway.mint({
       companyId: input.companyId,
       agentId: input.agentId,
       taskId: input.taskId,
       agentSessionId: input.agentSessionId,
-      terminalSessionId: input.terminalSessionId,
-      workspaceId: input.workspaceId,
+      ttlSec: Math.min(43_200, Math.max(60, Math.ceil(input.limits.maxWallMs / 1000) + 600)),
     });
     gatewayToken = gw.token;
+    gatewayMcpSessionId = gw.mcpSessionId;
+    const gatewayOrigin = new URL(gw.mcpUrl).origin;
 
     // ---- 4. the CLI becomes the PTY process
     const env: Record<string, string> = {
       ...(input.extraEnv ?? {}),
       ANTHROPIC_BASE_URL: mint.baseUrl,
       ANTHROPIC_AUTH_TOKEN: mint.token,
-      ACOS_GATEWAY_URL: gw.containerGatewayUrl,
+      ACOS_MCP_URL: gw.mcpUrl,
+      ACOS_GATEWAY_URL: gatewayOrigin,
       ACOS_GATEWAY_TOKEN: gw.token,
       ACOS_PROMPT: input.brief,
       ACOS_SESSION_MODE: input.sessionMode,
@@ -224,7 +227,9 @@ export async function driveSession(ports: DrivePorts, input: DriveInput, opts: D
         log("cli session: end failed", { err: String(err) });
       }
     }
-    if (gatewayToken) await ports.gateway.revoke(gatewayToken).catch((err: unknown) => log("gateway revoke failed", { err: String(err) }));
+    if (gatewayToken && gatewayMcpSessionId) {
+      await ports.gateway.revoke(gatewayMcpSessionId, input.companyId).catch((err: unknown) => log("gateway revoke failed", { err: String(err) }));
+    }
     if (brokerToken) {
       try {
         usage = await ports.broker.revoke(input.agentSessionId);

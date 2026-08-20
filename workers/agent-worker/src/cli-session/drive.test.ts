@@ -63,10 +63,10 @@ function harness(over: {
     mint: async () => {
       calls.push("gateway.mint");
       if (over.gatewayFails) throw new Error("gateway_unavailable");
-      return { token: "gw-TOKEN", containerGatewayUrl: "http://server:3000" };
+      return { token: "gw-TOKEN", mcpSessionId: "mcps-1", mcpUrl: "http://server:3000/mcp/v1", expiresAt: null };
     },
-    revoke: async (t) => {
-      revokedGateway.push(t);
+    revoke: async (mcpSessionId, companyId) => {
+      revokedGateway.push(`${mcpSessionId}@${companyId}`);
       calls.push("gateway.revoke");
     },
   };
@@ -139,6 +139,7 @@ describe("driveSession — the agent turn as one brokered CLI session (ADR-022)"
     expect(s.openedEnv).toMatchObject({
       ANTHROPIC_BASE_URL: "http://broker:3779",
       ANTHROPIC_AUTH_TOKEN: "acos-sess-TOKEN",
+      ACOS_MCP_URL: "http://server:3000/mcp/v1",
       ACOS_GATEWAY_URL: "http://server:3000",
       ACOS_GATEWAY_TOKEN: "gw-TOKEN",
       ACOS_PROMPT: "do it",
@@ -150,7 +151,9 @@ describe("driveSession — the agent turn as one brokered CLI session (ADR-022)"
     expect(r.endedBy).toBe("cli_exit");
     expect(r.outcome).toBe("completed");
     expect(s.revokedBroker).toBe(1);
-    expect(s.revokedGateway).toEqual(["gw-TOKEN"]);
+    expect(s.revokedGateway).toEqual(["mcps-1@co"]); // revoke by mcpSessionId + companyId (T30 §1.1)
+    // INTERNAL_API_TOKEN never enters the container (T30 §1.1 security seam)
+    expect(Object.keys(s.openedEnv ?? {})).not.toContain("INTERNAL_API_TOKEN");
     expect(s.released).toBe(1);
     expect(r.usage?.requestCount).toBe(3);
   });

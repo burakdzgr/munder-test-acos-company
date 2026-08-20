@@ -51,8 +51,9 @@ export function buildCliBrief(input: BriefInput): string {
     "",
     "# How this session works",
     "- This is a live ACOS agent session. The ONLY way to act on the company (tasks, delegation, hiring, review, help) is the `acos` MCP tools; there is no other channel.",
-    "- Finish by calling `complete_task` with a concise result summary. If you are blocked, call `request_help`. If your work needs review, call `request_review`.",
-    "- After `complete_task` / `request_help` / `request_review` the session ends; do not keep working after that.",
+    "- Finish by calling `complete_task` with a concise result summary. If your work needs review, call `request_review`. Both end your turn — do not keep working after them.",
+    "- If you are blocked, call `request_help` (your manager answers by message). To split work, `create_task` (state real successCriteria) then `delegate_task` with toAgentId `scheduler` (the Scheduler picks the person) or `self` (you keep it).",
+    "- A tool answering `awaiting_approval` is NOT a failure: the work is parked for a human — do other work or end your turn; never retry it in a loop.",
     workspace.kind === "worktree"
       ? `- Your workspace is the task worktree at ${workspace.cwd}${workspace.branch ? ` on branch \`${workspace.branch}\`` : ""}. Commit your work there with git; do not push.`
       : `- This is a planning session: you have no code worktree. Work through the MCP tools (create/delegate subtasks, request reviews) and your own reasoning; ${workspace.cwd} is scratch space.`,

@@ -7,7 +7,7 @@
 // itself before the session starts.
 import type { IsolationLevel } from "@acos/tools";
 import type { SandboxPort } from "@acos/db";
-import type { BrokerPort, BrokerSessionSummary, GatewaySessionPort, SandboxSessionPort } from "./ports.js";
+import type { AdmissionPort, BrokerPort, BrokerSessionSummary, GatewaySessionPort, SandboxSessionPort } from "./ports.js";
 import { CliSessionError } from "./drive.js";
 
 interface HttpOpts {
@@ -136,28 +136,68 @@ export function createBrokerClient(opts: HttpOpts): BrokerPort {
 // ---------------------------------------------------------------- gateway
 
 /**
- * Gateway session tokens — T30 contract (Oscar): POST /internal/v1/agent-sessions
- * → { token, ... }; DELETE /internal/v1/agent-sessions/:token. Until the
- * endpoint exists the worker fails the CLI turn fast and loudly
+ * Gateway MCP sessions — T30 contract §1.1 (Oscar, branch t35-family-b-extraction):
+ *   POST /internal/v1/mcp/sessions {companyId, agentId, taskId, agentSessionId, ttlSec?}
+ *     → {sessionToken, mcpSessionId, mcpUrl, expiresAt}
+ *   POST /internal/v1/mcp/sessions/:mcpSessionId/revoke {companyId} → 204
+ * Minted HOST-side with INTERNAL_API_TOKEN; ONLY sessionToken + mcpUrl go into
+ * the container. `mcpUrl` is whatever MCP_PUBLIC_URL the server hands out — the
+ * address the workspace network can reach (via the egress proxy). If the
+ * endpoint is missing/refuses, the turn fails fast and loudly
  * (`gateway_unavailable`) instead of running an un-audited session.
- * `containerGatewayUrl` is the address the CONTAINER uses (compose service
- * name through the egress proxy), not the worker's.
  */
-export function createGatewaySessionClient(opts: HttpOpts & { containerGatewayUrl: string }): GatewaySessionPort {
+export function createGatewaySessionClient(opts: HttpOpts): GatewaySessionPort {
   return {
     async mint(input) {
-      const r = await call<{ token?: string; gatewaySessionToken?: string }>(opts, "POST", "/internal/v1/agent-sessions", input);
-      const token = r.json?.token ?? r.json?.gatewaySessionToken;
-      if ((r.status !== 200 && r.status !== 201) || !token) {
+      const r = await call<{ sessionToken?: string; mcpSessionId?: string; mcpUrl?: string; expiresAt?: string | number }>(
+        opts,
+        "POST",
+        "/internal/v1/mcp/sessions",
+        input,
+      );
+      const token = r.json?.sessionToken;
+      if ((r.status !== 200 && r.status !== 201) || !token || !r.json?.mcpUrl || !r.json.mcpSessionId) {
         throw new CliSessionError(
           "gateway_unavailable",
-          `tool gateway agent-sessions mint → ${r.status} (T30 endpoint missing or refused) — refusing to run an un-audited CLI session`,
+          `tool gateway mcp-sessions mint → ${r.status} ${JSON.stringify(r.json)?.slice(0, 160)} (T30 endpoint missing or refused) — refusing to run an un-audited CLI session`,
         );
       }
-      return { token, containerGatewayUrl: opts.containerGatewayUrl };
+      return { token, mcpSessionId: r.json.mcpSessionId, mcpUrl: r.json.mcpUrl, expiresAt: r.json.expiresAt ?? null };
     },
-    async revoke(token) {
-      await call(opts, "DELETE", `/internal/v1/agent-sessions/${encodeURIComponent(token)}`);
+    async revoke(mcpSessionId, companyId) {
+      await call(opts, "POST", `/internal/v1/mcp/sessions/${encodeURIComponent(mcpSessionId)}/revoke`, { companyId });
+    },
+  };
+}
+
+// -------------------------------------------------------------- admission
+
+/**
+ * Session admission — T30 contract §10: POST /internal/v1/agent-sessions/admit
+ * {companyId, agentId, taskId} → {admitted:true, cap} | {admitted:false, cap,
+ * reason:'agent_busy'|'company_cap', liveSessions, retryAfterMs}. Reads the
+ * SAME gate the Scheduler uses. Deliberately NO release call: the slot frees
+ * when the agent_sessions row leaves starting/running (workflow close + sweep).
+ * A missing endpoint (older server) admits — the Scheduler gate upstream of the
+ * workflow already enforced the cap when it started us.
+ */
+export function createAdmissionClient(opts: HttpOpts, log?: (msg: string, meta?: Record<string, unknown>) => void): AdmissionPort {
+  return {
+    async admit(input) {
+      const r = await call<{ admitted?: boolean; cap?: number; reason?: string; liveSessions?: number; retryAfterMs?: number }>(
+        opts,
+        "POST",
+        "/internal/v1/agent-sessions/admit",
+        input,
+      );
+      if (r.status === 404) {
+        log?.("admission endpoint missing (older server) — admitting; the Scheduler gate already ran at workflow start");
+        return { admitted: true, release: async () => {} };
+      }
+      if (r.status !== 200 || !r.json) throw new Error(`admission → ${r.status} ${JSON.stringify(r.json)?.slice(0, 160)}`);
+      if (r.json.admitted === true) return { admitted: true, release: async () => {} };
+      log?.("session not admitted", { reason: r.json.reason, liveSessions: r.json.liveSessions, cap: r.json.cap });
+      return { admitted: false, retryAfterMs: r.json.retryAfterMs ?? 30_000 };
     },
   };
 }

@@ -57,18 +57,19 @@ export interface BrokerPort {
   revoke(sessionId: string): Promise<BrokerSessionSummary | null>;
 }
 
-/** Tool Gateway session tokens (Oscar's T30 contract): the bearer the
- *  in-container MCP shim / audit hook present to the gateway. */
+/** Tool Gateway MCP sessions (T30 contract §1.1): `POST /internal/v1/mcp/sessions`
+ *  mints the per-session bearer the container's CLI presents to the gateway
+ *  (MCP at `mcpUrl` + the builtin audit endpoint). Minted with the INTERNAL
+ *  token on the HOST side; only `token` enters the container. */
 export interface GatewaySessionPort {
   mint(input: {
     companyId: string;
     agentId: string;
     taskId: string;
     agentSessionId: string;
-    terminalSessionId: string;
-    workspaceId: string;
-  }): Promise<{ token: string; containerGatewayUrl: string }>;
-  revoke(token: string): Promise<void>;
+    ttlSec?: number;
+  }): Promise<{ token: string; mcpSessionId: string; mcpUrl: string; expiresAt: string | number | null }>;
+  revoke(mcpSessionId: string, companyId: string): Promise<void>;
 }
 
 export interface AgentSessionStatus {

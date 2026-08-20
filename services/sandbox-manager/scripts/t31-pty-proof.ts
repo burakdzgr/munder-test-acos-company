@@ -7,8 +7,8 @@
 // it spends real tokens; the nightly live suite is the automated home for it.
 //
 //   WORKSPACE_NETWORK=bridge BROKER_URL=http://127.0.0.1:3779 BROKER_SECRET=... \
-//   GATEWAY_URL=http://127.0.0.1:3780 CONTAINER_GATEWAY_URL=http://host.docker.internal:3780 \
-//   GATEWAY_TOKEN=... IMAGE=acos/workspace-node:t31 OUT=pty-proof.log \
+//   GATEWAY_URL=http://127.0.0.1:3780 INTERNAL_API_TOKEN=... (host side only; mints the MCP session) \
+//   IMAGE=acos/workspace-node:t31 OUT=pty-proof.log [ACOS_MCP_TRANSPORT=http|stdio-bridge] \
 //   pnpm --filter @acos/sandbox-manager exec tsx scripts/t31-pty-proof.ts
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -19,8 +19,8 @@ import type { TerminalLogSink, TerminalTransport } from "../src/terminal.js";
 const BROKER = process.env.BROKER_URL ?? "http://127.0.0.1:3779";
 const SECRET = process.env.BROKER_SECRET ?? "";
 const GW = process.env.GATEWAY_URL ?? "http://127.0.0.1:3780";
-const CONTAINER_GW = process.env.CONTAINER_GATEWAY_URL ?? "http://host.docker.internal:3780";
-const GW_TOKEN = process.env.GATEWAY_TOKEN ?? "gw-session-token-xyz";
+const INTERNAL_TOKEN = process.env.INTERNAL_API_TOKEN ?? "dev-internal-token-change-me";
+const MCP_TRANSPORT = process.env.ACOS_MCP_TRANSPORT ?? "http"; // http | stdio-bridge
 const IMAGE = process.env.IMAGE ?? "acos/workspace-node:t31";
 const OUT = process.env.OUT ?? "pty-proof.log";
 const MODEL = process.env.MODEL ?? "sonnet";
@@ -49,6 +49,14 @@ async function main(): Promise<void> {
     headers: { authorization: `Bearer ${SECRET}`, "content-type": "application/json" },
     body: JSON.stringify({ sessionId, companyId: "proof-co", agentId: "proof-agent", taskId: "task-1" }),
   }).then((r) => r.json())) as { token: string; baseUrl: string };
+  // T30 §1.1: the MCP session is minted HOST-side with the internal token; only
+  // sessionToken + mcpUrl enter the container.
+  const gw = (await fetch(`${GW}/internal/v1/mcp/sessions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ companyId: "proof-co", agentId: "proof-agent", taskId: "task-1", agentSessionId: sessionId, ttlSec: 3600 }),
+  }).then((r) => r.json())) as { sessionToken: string; mcpSessionId: string; mcpUrl: string };
+  console.log("mcp session", gw.mcpSessionId, "mcpUrl", gw.mcpUrl);
   const brief =
     "You are Kevin-bot, an ACOS engineer. Task TASK-7: create hello.txt containing 'hello from the PTY' in the current directory, " +
     "then call the acos MCP tool complete_task with summary 'TASK-7 done: hello.txt written'. Do nothing else; keep replies to one line.";
@@ -62,8 +70,9 @@ async function main(): Promise<void> {
     env: {
       ANTHROPIC_BASE_URL: mint.baseUrl,
       ANTHROPIC_AUTH_TOKEN: mint.token,
-      ACOS_GATEWAY_URL: CONTAINER_GW,
-      ACOS_GATEWAY_TOKEN: GW_TOKEN,
+      ACOS_MCP_URL: gw.mcpUrl,
+      ACOS_GATEWAY_TOKEN: gw.sessionToken,
+      ACOS_MCP_TRANSPORT: MCP_TRANSPORT,
       ACOS_MODEL: MODEL,
       ACOS_SESSION_MODE: "interactive",
       ACOS_PROMPT: brief,
@@ -90,6 +99,11 @@ async function main(): Promise<void> {
     totals?: unknown;
     requestCount?: number;
   };
+  await fetch(`${GW}/internal/v1/mcp/sessions/${gw.mcpSessionId}/revoke`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ companyId: "proof-co" }),
+  }).catch(() => {});
   const gwlog = await fetch(`${GW}/__log`).then((r) => r.json());
   const text = frames.join("");
   writeFileSync(OUT, text);
