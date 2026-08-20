@@ -101,9 +101,15 @@ export function ProjectWizard({
       await api.projects.setGoal(companyId, project.id, requirements.trim());
 
       const deadline = Date.now() + POLL_TIMEOUT_MS;
+      // Uç açık ama CEO henüz bitirmediyse elimizde GERÇEK bir satır olur
+      // (status 'draft'). Kullanıcı beklemeyi keserse yerel taslak UYDURMAK
+      // yerine o satırı düzenletiriz: Oscar'ın garantisi (source 'human'a
+      // dönünce LLM önerisi üzerine YAZMAZ) yalnız sunucu satırı için geçerli.
+      let serverDraft: StaffingProposal | null = null;
       for (;;) {
         if (cancelled.current) throw new Error("iptal");
         const server = await fetchProposal(companyId, project.id);
+        if (server?.status === "draft") serverDraft = server;
         if (server?.status === "awaiting_human") {
           return { projectId: project.id, proposal: server };
         }
@@ -121,10 +127,13 @@ export function ProjectWizard({
         if (skipWait.current || Date.now() > deadline) break;
         await new Promise((resolve) => setTimeout(resolve, POLL_MS));
       }
-      // uç yok ya da CEO önerisi zamanında gelmedi → yerel taslak
+      // Beklemeyi kestik ya da süre doldu.
+      // a) sunucuda açık bir taslak satırı VARSA onu düzenletiriz (PATCH edilir,
+      //    aynı id baştan sona korunur, CEO araya girse bile insanın planı kalır)
+      // b) yoksa (uç hiç yok) yerel taslağa düşeriz ve bunu ekranda söyleriz
       return {
         projectId: project.id,
-        proposal: localDraftProposal(project.id, name, requirements),
+        proposal: serverDraft ?? localDraftProposal(project.id, name, requirements),
       };
     },
     onSuccess: ({ projectId: id, proposal: next, reason }) => {
@@ -282,6 +291,15 @@ export function ProjectWizard({
               <p className="mt-1 whitespace-pre-wrap text-[10.5px] text-acos-fg2">
                 {proposal.rationaleMd}
               </p>
+              {!proposal.local && proposal.status === "draft" && (
+                <p
+                  className="mt-1 text-[10px] text-acos-fg2"
+                  data-testid="proposal-draft-server-note"
+                >
+                  CEO değerlendirmesini henüz bitirmedi. Kadroyu buradan siz kurarsanız plan
+                  sizin olur — CEO&apos;nun önerisi bunun üzerine yazmaz.
+                </p>
+              )}
               {proposal.local && (
                 <p className="mt-1 text-[10px] text-acos-fg2" data-testid="proposal-draft-note">
                   (taslak öneri — kalıcı CEO önerisi bağlandığında bu liste doğrudan CEO&apos;dan
