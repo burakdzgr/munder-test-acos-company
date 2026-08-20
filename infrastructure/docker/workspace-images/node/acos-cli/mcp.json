@@ -1,0 +1,10 @@
+{
+  "$comment": "ACOS MCP wiring for the in-container claude CLI (`--mcp-config` + `--strict-mcp-config`: this is the ONLY MCP server the session can see). The shim forwards to the Tool Gateway; env (ACOS_GATEWAY_URL/TOKEN, HTTP_PROXY) is inherited from the session process.",
+  "mcpServers": {
+    "acos": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/opt/acos/cli/mcp-shim.mjs"]
+    }
+  }
+}

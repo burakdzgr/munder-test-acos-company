@@ -11,6 +11,7 @@ import {
   condition,
   continueAsNew,
   isCancellation,
+  patched,
   proxyActivities,
   setHandler,
   sleep,
@@ -27,6 +28,7 @@ import {
 } from "@acos/domain";
 import { AgentActionSchema, type AgentAction } from "@acos/llm/agent-action";
 import type { createAgentTaskActivities } from "../activities/agent-task.js";
+import type { createCliSessionActivities } from "../cli-session/activities.js";
 import type { LlmMessage } from "@acos/llm";
 import {
   approvalVerdictSignal,
@@ -75,6 +77,23 @@ const toolActivity = proxyActivities<ReturnType<typeof createAgentTaskActivities
   retry: { maximumAttempts: 1 },
 });
 
+/**
+ * E4/T31 (ADR-022): the agent turn as ONE live Claude Code CLI session. The
+ * whole turn is a single long activity (the session's own wall-clock ceiling
+ * is enforced inside it and by the broker); heartbeats every 10s so a dead
+ * worker is rescheduled fast. ONE retry: a re-run re-mints idempotently and
+ * re-attaches to a still-running session (open is idempotent while live).
+ */
+const cliSessionActivity = proxyActivities<ReturnType<typeof createCliSessionActivities>>({
+  startToCloseTimeout: "3 hours",
+  heartbeatTimeout: "2 minutes",
+  retry: { maximumAttempts: 2, initialInterval: "10s" },
+});
+const cliRuntimeResolve = proxyActivities<ReturnType<typeof createCliSessionActivities>>({
+  startToCloseTimeout: "30s",
+  retry: { maximumAttempts: 3, initialInterval: "2s" },
+});
+
 /** Carried across continueAsNew (08 §10) — small, schema-versioned. */
 export interface CarriedState {
   stepNo: number;
@@ -98,7 +117,7 @@ export interface AgentTaskInput {
 }
 
 export interface AgentTaskOutcome {
-  outcome: "review_requested" | "completed" | "abandoned" | "guard_stopped";
+  outcome: "review_requested" | "completed" | "abandoned" | "guard_stopped" | "help_requested";
   steps: number;
 }
 
@@ -268,6 +287,17 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
   });
 
   try {
+    // E4/T31 (ADR-022): patched() keeps recorded histories replaying the
+    // steps loop unchanged; new runs ask the runtime which path this turn takes.
+    if (patched("t31-cli-runtime")) {
+      const runtime = await cliRuntimeResolve.resolveAgentRuntimeActivity(ref);
+      if (runtime.kind === "cli") {
+        const session = await cliSessionActivity.runCliSessionActivity(ref);
+        outcome = session.outcome;
+        stepNo += session.requests;
+        return { outcome, steps: stepNo };
+      }
+    }
     for (;;) {
       // guard (c) hard: cumulative cap — starting a step beyond the cap is
       // refused (value in @acos/domain/policies, cumulative across continues)
@@ -634,6 +664,7 @@ export async function agentTaskWorkflow(input: AgentTaskInput): Promise<AgentTas
         // guard'ı (bütçe, döngü, adım tavanı) tarafından hiçbir şey teslim
         // etmeden kesilen koşu, Founder'ın oturum listesinde başarılı bir
         // koşudan ayırt edilemiyordu. Teslimat yoksa oturum başarılı değildir.
+        // help_requested (CLI runtime): the turn ended by asking for help — not a delivery, not a failure
         status: outcome === "abandoned" || outcome === "guard_stopped" ? "failed" : "completed",
       });
     }

@@ -9,6 +9,16 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
+# E4/T31 (ADR-022): the agent turn IS a Claude Code CLI session running in this
+# container. Pinned; the npm package ships the native linux binary. Autoupdate is
+# off (rootfs is read-only anyway). The ACOS kit (settings, MCP shim, INV-3 audit
+# hook, session entry) is root-owned + read-only: uid 1000 can run it, not edit it.
+ARG CLAUDE_CODE_VERSION=2.1.237
+ENV DISABLE_AUTOUPDATER=1
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"   && claude --version   && npm cache clean --force
+COPY --chmod=0755 acos-cli/run-session.sh /opt/acos/cli/run-session.sh
+COPY --chmod=0644 acos-cli/settings.json acos-cli/mcp.json acos-cli/proxy-http.mjs acos-cli/audit-hook.mjs acos-cli/mcp-shim.mjs acos-cli/stop-hook.mjs /opt/acos/cli/
+
 # unprivileged inside an already-hardened container; uid 1000 = node
 USER node
 

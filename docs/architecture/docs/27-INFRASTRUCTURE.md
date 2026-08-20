@@ -304,6 +304,22 @@ OPENROUTER_API_KEY=
 OLLAMA_BASE_URL=http://localhost:11434
 VLLM_BASE_URL=
 
+# E4/T31 (ADR-022) — agent turn as a live Claude Code CLI session (broker identity)
+ACOS_AGENT_RUNTIME=steps             # steps | cli — cli = every agent turn is a claude CLI session in the workspace container
+IDENTITY_BROKER_URL=                 # worker → identity broker control plane, e.g. http://host.docker.internal:3779
+ACOS_BROKER_SECRET=                  # ≥16 chars; bearer for broker mint/usage/revoke (never the provider credential)
+ACOS_CONTAINER_GATEWAY_URL=http://server:3000   # what the CONTAINER uses for the Tool Gateway (via egress proxy)
+ACOS_CLI_SESSION_MODE=interactive    # interactive (live TUI in the PTY) | print
+ACOS_CLI_WORKSPACE_KIND=auto         # auto (goal/initiative/epic → light session workspace, else worktree) | worktree | session
+ACOS_CLI_WORKSPACE_IMAGE=acos/workspace-node
+ACOS_CLI_MODEL=                      # optional model override for the session
+ACOS_CLI_SESSION_MAX_MS=7200000      # wall-clock ceiling per session (INV-19 at the session boundary)
+ACOS_CLI_SESSION_MAX_TOKENS=5000000
+ACOS_CLI_SESSION_MAX_REQUESTS=400
+ACOS_CLI_ADMISSION_WAIT_MS=600000
+# identity-broker process (HOST side — holds the subscription credential; see services/identity-broker)
+#   IDENTITY_BROKER_PORT=3779  CLAUDE_CODE_OAUTH_TOKEN=<claude setup-token>  (or ANTHROPIC_API_KEY, or ~/.claude/.credentials.json)
+#   BROKER_MAX_LIVE_SESSIONS=12  BROKER_MAX_LIVE_SESSIONS_PER_COMPANY=4
 # Embeddings
 EMBEDDINGS_PROVIDER=openai       # openai | ollama
 EMBEDDINGS_MODEL=text-embedding-3-small

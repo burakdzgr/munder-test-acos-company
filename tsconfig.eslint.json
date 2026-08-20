@@ -12,6 +12,7 @@
       "@acos/agent-worker": ["workers/agent-worker/src/index.ts"],
       "@acos/execution-worker": ["workers/execution-worker/src/index.ts"],
       "@acos/sandbox-manager": ["services/sandbox-manager/src/index.ts"],
+      "@acos/identity-broker": ["services/identity-broker/src/index.ts"],
       "@acos/*": ["packages/*/src/index.ts"]
     }
   },

@@ -208,6 +208,17 @@ services:
       # çekilmemişse zincirin dibi garantili çökme olur (2026-08-20 canlı
       # koşusu tam olarak burada öldü: 'model llama3.2:3b not found').
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL-http://ollama:11434}
+      # E4/T31 (ADR-022): agent turn as a live claude CLI session. The identity
+      # broker runs on the HOST (it holds the subscription credential) — the
+      # worker reaches it via host.docker.internal; the container never sees it.
+      ACOS_AGENT_RUNTIME: ${ACOS_AGENT_RUNTIME:-steps}
+      IDENTITY_BROKER_URL: ${IDENTITY_BROKER_URL:-}
+      ACOS_BROKER_SECRET: ${ACOS_BROKER_SECRET:-}
+      ACOS_CONTAINER_GATEWAY_URL: ${ACOS_CONTAINER_GATEWAY_URL:-http://server:3000}
+      ACOS_CLI_SESSION_MODE: ${ACOS_CLI_SESSION_MODE:-interactive}
+      ACOS_CLI_WORKSPACE_KIND: ${ACOS_CLI_WORKSPACE_KIND:-auto}
+      ACOS_CLI_WORKSPACE_IMAGE: ${ACOS_CLI_WORKSPACE_IMAGE:-acos/workspace-node}
+      ACOS_CLI_MODEL: ${ACOS_CLI_MODEL:-}
       # use_tool → Tool Gateway internal HTTP (T40, S3)
       SERVER_INTERNAL_URL: http://server:3000
       # TASK 6: greenfield bootstrap sandbox'a doğrudan gider

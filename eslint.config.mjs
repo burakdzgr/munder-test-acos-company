@@ -24,6 +24,7 @@ const MATRIX = {
   "agent-worker": ["domain", "db", "events", "llm", "tools", "config"],
   "execution-worker": ["domain", "tools", "config", "contracts"],
   "sandbox-manager": ["config", "contracts", "tools"],
+  "identity-broker": [],
 };
 
 const ELEMENT_DIRS = {
@@ -41,6 +42,7 @@ const ELEMENT_DIRS = {
   "agent-worker": "workers/agent-worker",
   "execution-worker": "workers/execution-worker",
   "sandbox-manager": "services/sandbox-manager",
+  "identity-broker": "services/identity-broker",
 };
 
 export default tseslint.config(

@@ -31,6 +31,8 @@ export const WORKSPACES: WorkspaceSpec[] = [
   { dir: "workers/agent-worker", name: "agent-worker", allowed: ["domain", "db", "events", "llm", "tools", "config"] },
   { dir: "workers/execution-worker", name: "execution-worker", allowed: ["domain", "tools", "config", "contracts"] },
   { dir: "services/sandbox-manager", name: "sandbox-manager", allowed: ["config", "contracts", "tools"] },
+  // E4/T31 (ADR-022 §4): host-side identity broker — zero @acos deps by design (holds the subscription credential, nothing else).
+  { dir: "services/identity-broker", name: "identity-broker", allowed: [] },
 ];
 
 // ui may see contracts TYPES only (28 §2): devDependency permitted, runtime dependency not.
