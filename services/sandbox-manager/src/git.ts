@@ -27,6 +27,12 @@ export const REPOS_VOLUME = "acos-repos";
 export const REPOS_MOUNT = "/data/repos";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * Merge metadata alanlarının üst sınırı (T56). Env üzerinden geçtikleri
+ * için tırnak/özel karakter sorun değil; sınırsız uzunluk ise argüman
+ * listesini şişirir — makul bir tavan koruma olarak kalıyor.
+ */
+const MERGE_FIELD_MAX = 4000;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 
 export class GitError extends Error {
@@ -60,6 +66,12 @@ export interface GitRunOptions {
    * single system operation; agent workloads never get this mode).
    */
   network?: "none" | "bridge";
+  /**
+   * Konteynere GEÇİLEN ortam değişkenleri. Serbest metin (görev başlığı, ajan
+   * adı…) script METNİNE İNTERPOLE EDİLMEZ; buradan geçer. Kabuk, env
+   * değerini hiç ayrıştırmaz — tırnak/`$`/`;` orada zararsızdır.
+   */
+  env?: Readonly<Record<string, string>>;
 }
 
 /** The container-running seam â€” faked in unit tests, dockerode in prod. */
@@ -95,6 +107,9 @@ export class DockerGitRunner implements GitRunner {
       Entrypoint: ["/bin/sh", "-c"],
       Cmd: [script],
       Tty: false,
+      ...(opts.env && {
+        Env: Object.entries(opts.env).map(([key, value]) => `${key}=${value}`),
+      }),
       Labels: { "acos.sandbox": "true", "acos.git_helper": "true" },
       HostConfig: {
         NetworkMode: network,
@@ -776,9 +791,34 @@ export class GitWorkspaces {
     if (!TASK_BRANCH_PATTERN.test(input.branch)) {
       throw new GitError("INVALID_INPUT", `bad task branch: ${input.branch}`);
     }
-    for (const value of [input.message, input.authorName, input.authorEmail, input.reviewedBy]) {
-      if (value.includes("'")) {
-        throw new GitError("INVALID_INPUT", "single quotes are not allowed in merge metadata");
+    // T56 — KESME İŞARETİ YASAĞI KALKTI. Eski kural her ' içeren metadata'yı
+    // reddediyordu; merge mesajı GÖREV BAŞLIĞINDAN türediği için başlığında
+    // kesme işareti olan görev ASLA merge edilemiyor, dolayısıyla ASLA DONE
+    // olamıyordu (canlı koşum #2: {status:'ok', version} başlıklı TASK-6).
+    // Türkçe başlıklar da sürekli kesme kullanıyor ("API'nin") — dar bir
+    // kenar durum değil, normal iş akışı.
+    //
+    // Kök sebep tırnak değil, METADATA'NIN SCRIPT METNİNE İNTERPOLE EDİLMESİ
+    // idi. Artık serbest metin script'e hiç girmiyor, konteynere ENV ile
+    // geçiyor; kabuk env değerini yeniden ayrıştırmaz. Guard yerinde duruyor
+    // ama artık DOĞRU şeyi kolluyor: env'e giremeyecek baytlar + uzunluk.
+    const mergeFields: Array<[string, string]> = [
+      ["message", input.message],
+      ["authorName", input.authorName],
+      ["authorEmail", input.authorEmail],
+      ["reviewedBy", input.reviewedBy],
+    ];
+    for (const [field, value] of mergeFields) {
+      if (value.includes(String.fromCharCode(0))) {
+        throw new GitError("INVALID_INPUT", `${field} contains a NUL byte`);
+      }
+      // message çok satırlı olabilir (aşağıda tek satıra iniyor); ötekiler
+      // tek satırlık kimlik alanları.
+      if (field !== "message" && /[\r\n]/.test(value)) {
+        throw new GitError("INVALID_INPUT", `${field} contains a line break`);
+      }
+      if (value.length > MERGE_FIELD_MAX) {
+        throw new GitError("INVALID_INPUT", `${field} is longer than ${MERGE_FIELD_MAX} chars`);
       }
     }
     const repo = this.bareRepoPath(input.projectId);
@@ -796,20 +836,33 @@ export class GitWorkspaces {
       // değil deponun kendi HEAD dalına gider
       'B=$(git --git-dir="$R" symbolic-ref --short HEAD 2>/dev/null || echo main)',
       'git checkout -q "$B"',
-      `export GIT_AUTHOR_NAME='${input.authorName}' GIT_AUTHOR_EMAIL='${input.authorEmail}'`,
+      // GIT_AUTHOR_NAME/EMAIL konteynere ENV ile geliyor (aşağıdaki run
+      // çağrısı); burada yalnız committer author'dan türetiliyor.
       'export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"',
       // conflict â†’ list files and exit 45 (typed result, no partial state)
       `if ! git merge --squash "origin/${input.branch}" >/dev/null 2>&1; then`,
       "  git diff --name-only --diff-filter=U | sed 's/^/::conflict::/'",
       "  exit 45",
       "fi",
-      `git commit -q -m '${subject}' -m 'Reviewed-by: ${input.reviewedBy}' || { echo '::conflict::EMPTY_MERGE' ; exit 45; }`,
+      // -m "$VAR": kabuk, tırnak içindeki değişkeni GENİŞLETİR ama yeniden
+      // AYRIŞTIRMAZ — başlıktaki ' \" $ ` ; hepsi düz metin olarak commit'e girer.
+      'git commit -q -m "$ACOS_MERGE_SUBJECT" -m "$ACOS_MERGE_TRAILER" || { echo "::conflict::EMPTY_MERGE" ; exit 45; }',
       'git push -q "$R" "$B"',
       'echo "::merge::$(git rev-parse HEAD)"',
     ].join("\n");
-    const result = await this.runner.run(script, [
-      { volume: this.reposVolume, target: REPOS_MOUNT },
-    ]);
+    const result = await this.runner.run(
+      script,
+      [{ volume: this.reposVolume, target: REPOS_MOUNT }],
+      {
+        // Serbest metin BURADAN geçiyor, script metninden değil.
+        env: {
+          ACOS_MERGE_SUBJECT: subject,
+          ACOS_MERGE_TRAILER: `Reviewed-by: ${input.reviewedBy}`,
+          GIT_AUTHOR_NAME: input.authorName,
+          GIT_AUTHOR_EMAIL: input.authorEmail,
+        },
+      },
+    );
     if (result.exitCode === 44) {
       throw new GitError("REPO_NOT_FOUND", `no bare repo for project ${input.projectId}`);
     }
