@@ -10,4 +10,4 @@ export {
   type BootIo,
 } from "./env.js";
 
-export { TASK_QUEUES, NATS_SUBJECT_PREFIX, DEFAULT_BUDGETS, type TaskQueue } from "./constants.js";
+export { TASK_QUEUES, WORKFLOW_IDS, NATS_SUBJECT_PREFIX, DEFAULT_BUDGETS, type TaskQueue } from "./constants.js";

@@ -313,6 +313,14 @@ describe("stuck-task sweep (09 §9, 07 §8)", { timeout: 60_000 }, () => {
     expect(stalled).toBeDefined();
     expect(stalled!.review?.reviewId).toBe(rows[0]!.id);
     expect(stalled!.review?.reviewerAgentId).toBe(MANAGER);
+    // F2 (Jim review): kurtarma AYNI incelemeyi başlatmalı — ikinci bir review
+    // satırı açmak turu geri sarar. Değiştirdiğim assert bunu yalnız ÖRTÜK
+    // tutuyordu; açıkça ölçüyoruz.
+    const afterRows = await db
+      .select({ id: reviews.id })
+      .from(reviews)
+      .where(and(eq(reviews.companyId, companyId), eq(reviews.taskId, task.id)));
+    expect(afterRows).toHaveLength(1);
   });
 
   it("QA'da incelemecisiz asılı kalan görevi de yeniden açar — ve turu QA olarak açar (T11b)", async () => {

@@ -200,6 +200,10 @@ export interface ActionDispatchDeps {
     | undefined;
   runtimeEvents?: RuntimeEventPort | undefined;
   /** request_review → bağımsız incelemecinin reviewWorkflow'u (T43). */
+  /** T53/F1: dönüş `false` = başlatılamadı (Temporal yok/reddetti). `void`
+   *  dönen uygulamalar (worker: gerçek hatada THROW eder) başarılı sayılır —
+   *  aksi halde `reviewStarted` yalnızca dep'in VARLIĞINI raporlar, ki bu tam
+   *  olarak kapatmaya çalıştığımız sessizliğin bir başka biçimi olurdu. */
   startReviewWorkflow?:
     | ((input: {
         companyId: string;
@@ -207,7 +211,7 @@ export interface ActionDispatchDeps {
         taskId: string;
         reviewerAgentId: string;
         authorAgentId: string;
-      }) => Promise<void>)
+      }) => Promise<boolean | void>)
     | undefined;
 }
 
@@ -325,14 +329,30 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
       let startedWorkflow = false;
       if (review.reviewerAgentId) {
         if (deps.startReviewWorkflow) {
-          await deps.startReviewWorkflow({
+          // F1 (Jim review): dep'in VAR olması "tur başladı" demek DEĞİL.
+          // Sunucu shim'i Temporal yokken/reddederken de dönüyordu; sadece
+          // varlığa bakmak `reviewStarted:true` yalanını üretiyordu — yani bu
+          // alan tam da ölçmesi gereken şeyi ölçmüyordu.
+          const started = await deps.startReviewWorkflow({
             companyId: ctx.companyId,
             reviewId: review.id,
             taskId,
             reviewerAgentId: review.reviewerAgentId,
             authorAgentId,
           });
-          startedWorkflow = true;
+          startedWorkflow = started !== false;
+          if (!startedWorkflow) {
+            console.warn(
+              "review opened but the reviewWorkflow could not be started — the reviewer's turn has NOT begun; the stuck-task sweep will retry it",
+              {
+                companyId: ctx.companyId,
+                taskId,
+                reviewId: review.id,
+                reviewerAgentId: review.reviewerAgentId,
+                authorAgentId,
+              },
+            );
+          }
         } else {
           console.warn(
             "review opened but no startReviewWorkflow dependency is wired — the reviewer's turn will NOT start; the task stays in REVIEW until the stuck-task sweep reopens it",

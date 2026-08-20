@@ -5,7 +5,7 @@
 // authoritative; a worker restart re-drives from Postgres state).
 import { WorkflowIdReusePolicy } from "@temporalio/client";
 import { uuidv7 } from "@acos/domain";
-import { TASK_QUEUES } from "@acos/config";
+import { TASK_QUEUES, WORKFLOW_IDS } from "@acos/config";
 import { checkSessionGate, type GuardedDb } from "@acos/db";
 
 export interface AgentWorkflowStartInput {
@@ -82,9 +82,10 @@ export interface ReviewWorkflowStartInput {
 /** true = started (or already running); false = Temporal reddetti. */
 export type ReviewWorkflowStarter = (input: ReviewWorkflowStartInput) => Promise<boolean>;
 
-/** workers/agent-worker/src/main.ts'teki ikizle AYNI id şeması: `review.<reviewId>`
- *  — duplicate start yutulur, böylece sweep ile dispatcher yarışırsa ikinci
- *  başlatma zararsızdır (aynı workflow, tek yürütme). */
+/** Id şeması TEK yerde (`WORKFLOW_IDS.review`, @acos/config): worker, bu starter
+ *  ve sweep aynı stringi kullanmak ZORUNDA — "duplicate start yutulur" güvencesi
+ *  yalnız string aynı kaldığı sürece doğru, iki yazım aynı incelemeyi iki kez
+ *  koşturur. F3 (Jim review). */
 export function createReviewWorkflowStarter(
   temporalClient: import("@temporalio/client").Client,
   onError: (err: unknown, input: ReviewWorkflowStartInput) => void,
@@ -93,7 +94,7 @@ export function createReviewWorkflowStarter(
     try {
       await temporalClient.workflow.start("reviewWorkflow", {
         taskQueue: TASK_QUEUES.agentTasks,
-        workflowId: `review.${input.reviewId}`,
+        workflowId: WORKFLOW_IDS.review(input.reviewId),
         args: [input],
       });
       return true;

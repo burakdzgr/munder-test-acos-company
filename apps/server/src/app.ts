@@ -517,9 +517,12 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
                 { taskId: input.taskId, reviewId: input.reviewId, reviewerAgentId: input.reviewerAgentId },
                 "review opened but no reviewWorkflow starter is wired — the reviewer's turn will NOT start until the stuck-task sweep picks it up",
               );
-              return;
+              return false;
             }
-            await app.reviewWorkflowStarter(input);
+            // F1: starter'ın boolean'ı ÇAĞIRANA kadar gitmeli. Bu shim onu
+            // yutunca `reviewStarted` sunucu yolunda dekoratif bir `true`
+            // oluyordu: Temporal reddetse bile gözlem "başladı" diyordu.
+            return app.reviewWorkflowStarter(input);
           },
           ...(app.commsSignalPort && { signalPort: app.commsSignalPort }),
           invokeTool: async (req) => {

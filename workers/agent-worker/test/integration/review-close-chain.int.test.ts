@@ -336,6 +336,27 @@ describe("request_review → reviewWorkflow başlatıcısı (T53)", { timeout: 1
     expect(observation.reviewStarted).toBe(false);
   });
 
+  it("başlatıcı VAR ama BAŞLATAMIYORSA: reviewStarted:false — dep'in varlığı 'başladı' demek değil (F1)", async () => {
+    // Jim'in review bulgusu: `startedWorkflow`'u yalnız dep'in VARLIĞINA
+    // bakarak set etmek, sunucu yolunda dekoratif bir `true` üretiyordu —
+    // Temporal kapalıyken/reddederken bile gözlem "tur başladı" diyordu. Yani
+    // sessizliği kapatmak için eklenen alan, tam da o sessizliğin yeni bir
+    // biçimi oluyordu. Başlatıcı `false` derse gözlem de `false` demeli.
+    const { createActionDispatcher } = await import("@acos/agent-actions");
+    const dispatcher = createActionDispatcher({
+      guardedDb,
+      startReviewWorkflow: async () => false, // Temporal reddetti
+    });
+    const task = await inProgressTask("Reddedilen başlatma");
+
+    const observation = await requestReview(dispatcher, task.id);
+
+    // satır GERÇEKTEN açıldı (vakumlu bir false değil) ama tur başlamadı
+    expect(observation.reviewId).toBeDefined();
+    expect(await statusOf(task.id)).toBe("REVIEW");
+    expect(observation.reviewStarted).toBe(false);
+  });
+
   it("başlatıcı VARSA: aynı akış reviewStarted:true der ve doğru review'u başlatır", async () => {
     const started: Array<{ reviewId: string; taskId: string; reviewerAgentId: string }> = [];
     const { createActionDispatcher } = await import("@acos/agent-actions");

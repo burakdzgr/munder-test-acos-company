@@ -8,12 +8,14 @@ import {
   WorkflowIdReusePolicy,
   type WorkflowHandle,
 } from "@temporalio/client";
-import { TASK_QUEUES } from "@acos/config";
+import { TASK_QUEUES, WORKFLOW_IDS } from "@acos/config";
 
 export const workflowIds = {
   agentTask: (taskId: string, agentId: string) => `agent-task.${taskId}.${agentId}`,
   agentInbox: (agentId: string) => `agent-inbox.${agentId}`,
-  review: (reviewId: string) => `review.${reviewId}`,
+  // T53/F3: the server starts this workflow too — the id lives in @acos/config
+  // so "a duplicate start is harmless" cannot quietly stop being true.
+  review: WORKFLOW_IDS.review,
   // 12 §5: `memory-consolidation-<company_id>-<trigger_ref>` — idempotent dedupe
   consolidation: (companyId: string, triggerRef: string) =>
     `memory-consolidation-${companyId}-${triggerRef}`,

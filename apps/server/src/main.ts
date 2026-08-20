@@ -1,6 +1,6 @@
 // Boot sequence (T15, 28 §2): config → migrate under advisory lock → routes.
 import { Pool } from "pg";
-import { loadConfigOrExit } from "@acos/config";
+import { WORKFLOW_IDS, loadConfigOrExit } from "@acos/config";
 import { createDb, createGuardedDb, runMigrations, WorkspaceService } from "@acos/db";
 import { companies } from "@acos/db/schema";
 import { connect as natsConnect } from "nats";
@@ -367,7 +367,7 @@ async function main(): Promise<void> {
           await temporalClientRef.workflow
             .start("reviewWorkflow", {
               taskQueue: "agent-tasks",
-              workflowId: `review.${finding.review.reviewId}`,
+              workflowId: WORKFLOW_IDS.review(finding.review.reviewId),
               args: [
                 {
                   companyId: finding.companyId,
