@@ -146,9 +146,10 @@ Canonical rule (`_DECISIONS.md` §3, 28 §3). Rows = importer, allowed internal 
 | `llm` | `domain`, `config` (DB logging via injected callback — no repositories) |
 | `contracts` | `domain`, `events` |
 | `ui` | nothing internal (type-only imports from `contracts` allowed) |
+| `agent-actions` | `domain`, `db`, `events`, `llm`, `tools`, `contracts` — the single-writer Family-B dispatcher (E4/T35), shared by the worker loop and the MCP gateway so INV-13 keeps ONE writer |
 | `apps/server` | all packages except `ui` |
 | `apps/web` | **`contracts` + `ui` only** |
-| `workers/agent-worker` | `domain`, `db`, `events`, `llm`, `tools`, `config` |
+| `workers/agent-worker` | `domain`, `db`, `events`, `llm`, `tools`, `config`, `contracts`, `agent-actions` |
 | `workers/execution-worker` | `domain`, `tools`, `config`, `contracts` — **never `db`** |
 | `services/sandbox-manager` | `config`, `contracts`, `tools` — **never `db`** |
 
