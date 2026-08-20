@@ -20,6 +20,7 @@ import { OrgService } from "../org/service.js";
 import { AgentsService } from "../agents/service.js";
 import { seedToolGrants } from "../../seed.js";
 import { linkProjectTeam } from "../projects/team-links.js";
+import { confirmedStaffingBaseline } from "./proposal.js";
 
 export interface StaffingRequirement {
   capability: string;
@@ -276,6 +277,16 @@ export async function continueProjectPlanning(
       .catch(() => {});
   };
 
+  // T25/#2 (god kararı, Jim'in canlı koşusundan): İNSANIN ONAYLADIĞI SİHİRBAZ
+  // PLANI KADRONUN TEMELİDİR. Öncesinde applyPlan doğru kadroyu kurduktan
+  // hemen sonra buradaki gap analizi gereksinim artefaktından yeniden türetip
+  // insanın SİLDİĞİ takım için ikinci bir Founder onayı açıyordu ("eksik
+  // kadro: devops x1") — insan aynı kadroyu iki kez, ikincisinde de az önce
+  // kaldırdığı takım için onaylamak zorunda kalıyor ve iş o ana kadar
+  // başlamıyordu. Onaylanmış öneri artık analizci listesinin YERİNE geçer:
+  // silinen takım "eksik" sayılmaz, eklenen takım da temele dahil olur.
+  const baseline = await confirmedStaffingBaseline(db, ctx, projectId).catch(() => null);
+
   // gereksinim analizi artefaktı (TASK 8) → yetenek listesi
   let analysis = await loadRequirementAnalysis(db, ctx, projectId);
   // FAIL-CLOSED (P0-1, canlı kanıt 2026-08-19): analyzeRequirementsActivity
@@ -286,7 +297,9 @@ export async function continueProjectPlanning(
   // bekletir") gereği analiz yok/boşsa kadro TAM DEĞİL varsayılır:
   // deterministik asgari mühendislik gereksinimi yazılır (degraded artefakt —
   // karar izlenebilir kalır) ve gap analizi normal yolundan Founder onayı üretir.
-  if (!analysis || (analysis.required_capabilities ?? []).length === 0) {
+  // Onaylanmış bir plan VARSA bu "bilgi yok" hali değildir — P0-1'in
+  // degraded artefaktı yalnızca gerçekten hiçbir girdi olmadığında yazılır.
+  if (!baseline && (!analysis || (analysis.required_capabilities ?? []).length === 0)) {
     const fallback = {
       goal: project.objectiveMd.slice(0, 200),
       required_capabilities: ["fullstack"],
@@ -296,7 +309,7 @@ export async function continueProjectPlanning(
     await projectsService.saveRequirementAnalysis(ctx, projectId, fallback).catch(() => {});
     analysis = fallback;
   }
-  const capabilities = analysis.required_capabilities ?? [];
+  const capabilities = baseline ?? analysis?.required_capabilities ?? [];
 
   const topExec = await projectsService.topExecutive(ctx).catch(() => null);
   if (!topExec) {

@@ -18,7 +18,7 @@ import {
   cancelProposal,
   confirmProposal,
   editProposal,
-  getOpenProposal,
+  getLatestProposal,
   getProposal,
   openDraftProposal,
   ProposalError,
@@ -82,12 +82,16 @@ export async function registerProposalRoutes(
       const { companyId, projectId } = request.params;
       const role = await deps.companiesSvc().membership(user.id, companyId);
       if (!role) throw new ApiError("not_found", "company not found");
-      const proposal = await getOpenProposal(
+      // T25/#3: durumu ne olursa olsun EN SON öneri döner. Yalnız açık
+      // durumları döndürmek, öneri uygulandığı anda GET'i 404'e çeviriyordu ve
+      // istemci "uygulandı" ile "uç yok"u yine ayırt edemiyordu — d2ef2d9'un
+      // kapattığı belirsizliğin aynısı. 404 artık tek şey demek: öneri hiç yok.
+      const proposal = await getLatestProposal(
         deps.guardedDb(),
         companyContext(companyId),
         projectId,
       );
-      if (!proposal) throw new ApiError("not_found", "bu proje için açık kadro önerisi yok");
+      if (!proposal) throw new ApiError("not_found", "bu proje için kadro önerisi yok");
       return proposal;
     },
   );
