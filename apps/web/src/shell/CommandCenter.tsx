@@ -29,6 +29,14 @@ import { ChatPanel } from "../features/comms/ChatPanel.js";
 import { ApprovalsView } from "../features/approvals/ApprovalsView.js";
 import { EventsView } from "../features/events/EventsView.js";
 import { ProjectsView } from "../features/projects/ProjectsView.js";
+// E1 (tek ekran): eskiden yalnız rota olan görünümler de panel oldu — nav
+// sekme satırı kalktığı için tek varış noktası burası.
+import { OrganizationView } from "../features/organization/OrganizationView.js";
+import { AgentsView } from "../features/agents/AgentsView.js";
+import { CommunicationView } from "../features/comms/CommunicationView.js";
+import { DashboardView } from "../features/dashboard/DashboardView.js";
+import { SettingsView } from "../features/settings/SettingsView.js";
+import { usePanelBus } from "../stores/panels.js";
 
 // Lazy panel: content mounts only while the panel is the visible tab of its
 // group. Hidden tabs therefore never warm the Query cache with data that can
@@ -79,6 +87,11 @@ const components: Record<string, FunctionComponent<IDockviewPanelProps>> = {
   costs: lazyPanel(() => <CostsView />),
   events: lazyPanel(() => <EventsView />),
   projects: lazyPanel(() => <ProjectsView />),
+  organization: lazyPanel(() => <OrganizationView />),
+  agents: lazyPanel(() => <AgentsView />),
+  communication: lazyPanel(() => <CommunicationView />, "dark"),
+  dashboard: lazyPanel(() => <DashboardView />),
+  settings: lazyPanel(() => <SettingsView />),
 };
 
 type PanelSpec = { id: string; title: string };
@@ -98,6 +111,11 @@ const P: Record<string, PanelSpec> = {
   costs: { id: "costs", title: "Maliyet" },
   events: { id: "events", title: "Olaylar" },
   projects: { id: "projects", title: "Projeler" },
+  organization: { id: "organization", title: "Organizasyon" },
+  agents: { id: "agents", title: "Ajanlar" },
+  communication: { id: "communication", title: "İletişim" },
+  dashboard: { id: "dashboard", title: "Dashboard" },
+  settings: { id: "settings", title: "Ayarlar" },
 };
 
 function add(
@@ -193,6 +211,8 @@ export function CommandCenter() {
   const apiRef = useRef<DockviewApi | null>(null);
   const saveTimer = useRef<number | null>(null);
   const presetSeq = useUiPrefs((s) => s.presetSeq);
+  const requestedPanelId = usePanelBus((s) => s.requestedPanelId);
+  const requestSeq = usePanelBus((s) => s.requestSeq);
   // 2026-08-19 (Founder UX bulgusu): bir panel sekmesi X'lenince geri getirecek
   // hiçbir yol yoktu — kapalı paneller burada izlenir ve alttaki pill'den tek
   // tıkla geri açılır. Kalıcı layout kapalı hâli sakladığı için bu şart.
@@ -232,6 +252,22 @@ export function CommandCenter() {
       }, 500);
     });
   }
+
+  // E1: üst çubuktaki panel açıcı (ve tek ekrana katlanan rotalar) bir panel
+  // isteyince aç/öne getir. Kapalıysa aktif grubun sekmesi olarak katılır —
+  // yerleşimi bozmadan "o görünüme gitmiş" olursun.
+  useEffect(() => {
+    if (requestSeq === 0 || !requestedPanelId) return;
+    const api = apiRef.current;
+    const spec = P[requestedPanelId];
+    if (!api || !spec) return;
+    if (!api.getPanel(spec.id)) {
+      const anchor = api.activePanel?.id ?? api.panels[0]?.id;
+      add(api, spec, anchor ? { referencePanel: anchor, direction: "within" } : undefined);
+      refreshMissing(api);
+    }
+    api.getPanel(spec.id)?.api.setActive();
+  }, [requestSeq, requestedPanelId]);
 
   // Top-bar preset buttons bump presetSeq; re-apply even if the name repeats.
   useEffect(() => {

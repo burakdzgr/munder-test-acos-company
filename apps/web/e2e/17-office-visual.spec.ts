@@ -11,8 +11,9 @@ test("ofis: zemin + odalar + avatarlar çizildi", async ({ page }) => {
 
   await login(page);
   await openCompany(page, "Acme");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-office").click();
-
   await expect(page.getByTestId("office-agent-count")).toBeVisible({ timeout: 20_000 });
   await page.waitForFunction(() => (window.__acosOffice?.agentCount ?? 0) > 0, undefined, {
     timeout: 20_000,

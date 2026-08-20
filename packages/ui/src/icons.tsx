@@ -171,6 +171,17 @@ export function SettingsIcon(props: IconProps) {
   );
 }
 
+// E1: üst çubuktaki Founder kimliği — tıklanınca CEO'ya görev verme
+// diyaloğu açılır, yani bu ikon "ben" değil "işi buradan veriyorum" demek.
+export function UserIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="8" r="3.4" />
+      <path d="M4.5 20c0-3.6 3.4-6.2 7.5-6.2s7.5 2.6 7.5 6.2" />
+    </svg>
+  );
+}
+
 export function SearchIcon(props: IconProps) {
   return (
     <svg {...base(props)}>

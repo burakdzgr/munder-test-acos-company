@@ -7,6 +7,10 @@ test("hire wizard creates an active agent visible in grid and detail", async ({ 
   await login(page);
   await openCompany(page, "Acme Technologies");
 
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+
+  await page.getByTestId("panel-launcher").click();
+
   await page.getByTestId("nav-agents").click();
   await expect(page.getByTestId("agent-grid")).toBeVisible();
   const seededCards = await page.getByTestId("agent-grid").locator("a").count();

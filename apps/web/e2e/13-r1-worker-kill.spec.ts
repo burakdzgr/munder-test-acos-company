@@ -83,6 +83,10 @@ test("R1: killing agent-worker mid-cascade loses nothing — the run resumes and
     qa: await countTasks(QA_TASK, true),
   };
 
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+
+  await page.getByTestId("panel-launcher").click();
+
   await page.getByTestId("nav-tasks").click();
   await expect(page.getByTestId("kanban-board").or(page.getByText("Görev yok"))).toBeVisible({
     timeout: 15_000,

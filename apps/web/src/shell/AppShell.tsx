@@ -1,9 +1,13 @@
-// Command-center shell (24 §1, 36 §3 — U02): dark acosDark chrome. Top bar =
-// brand · company switcher · team chips (+ Takım) · global search · token
-// pill (wired in U11) · + Ajan Ekle · approvals/notifications badges ·
-// Founder menu. Left icon rail keeps all 14 views reachable (accessible
-// names unchanged for the e2e suite). Legacy views render on a light island
-// inside the dark chrome until U03 wraps them as dockview panels.
+// Command-center shell (24 §1, 36 §3 — U02; E1 tek ekran).
+//
+// E1 (Founder isteği, 2026-08-20): üst NAV SEKME SATIRI KALDIRILDI. Tek varış
+// noktası CommandCenter; "bir görünüme gitmek" artık o panelin dockview'da
+// açılması demek (panelBus). 16 rota tek ekrana katlandı (router.tsx), nav-*
+// test kimlikleri panel açıcının içine TAŞINDI — silinmedi.
+//
+// Üst çubuk (tek satır) = marka · şirket seçici · panel açıcı · ORTADA proje
+// bazlı takımlar · yerleşim önayarları · arama · jeton pill · + Ajan Ekle ·
+// onay/bildirim rozetleri · Founder kimliği (tıkla → CEO'ya görev ver).
 import { useEffect, useState, type ComponentType } from "react";
 import { Link, Outlet, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
@@ -28,6 +32,8 @@ import {
   CostsIcon,
   SettingsIcon,
   BellIcon,
+  UserIcon,
+  ChevronDownIcon,
 } from "@acos/ui";
 import { api, keys } from "../lib/api.js";
 import { useEventTicker } from "../stores/eventTicker.js";
@@ -38,6 +44,9 @@ import { RealtimeDispatcher, useRealtimeStatus } from "../realtime/RealtimeDispa
 import { HireModal } from "../features/agents/HireModal.js";
 import { TeamManageModal } from "../features/organization/TeamManageModal.js";
 import { useNotifications } from "../stores/notifications.js";
+import { usePanelBus } from "../stores/panels.js";
+import { DirectiveDialog } from "../features/office/DirectiveDialog.js";
+import { useProjectTeams } from "../features/organization/useProjectTeams.js";
 import { Toasts } from "./Toasts.js";
 
 function formatTokens(n: number): string {
@@ -52,45 +61,90 @@ const PRESETS: Array<{ key: CommandPreset; label: string }> = [
   { key: "overview", label: "Genel" },
 ];
 
-// id = kararlı test/route anahtarı (data-testid={`nav-${id}`}); label = görünen
-// + erişilebilir Türkçe ad. e2e seçicileri nav-* testid'lerini kullanır.
-const NAV_ITEMS: Array<{
+// E1: her görünüm artık bir PANEL. id = kararlı test anahtarı
+// (data-testid={`nav-${id}`}) — e2e seçicileri korunsun diye adlar aynı
+// bırakıldı, yalnız yerleri değişti: sekme satırı yerine panel açıcı menüsü.
+// panelId = CommandCenter'daki dockview paneli (null = zaten tek ekran).
+const PANEL_ITEMS: Array<{
   id: string;
   label: string;
   icon: ComponentType<IconProps>;
-  path?: string;
+  panelId: string | null;
 }> = [
-  { id: "command", label: "Komuta", icon: CommandIcon, path: "/c/$companyId" },
-  { id: "dashboard", label: "Dashboard", icon: DashboardIcon, path: "/c/$companyId/dashboard" },
-  { id: "office", label: "Ofis", icon: OfficeIcon, path: "/c/$companyId/office" },
-  { id: "tasks", label: "Görevler", icon: TasksIcon, path: "/c/$companyId/tasks" },
-  { id: "agents", label: "Ajanlar", icon: AgentsIcon, path: "/c/$companyId/agents" },
-  { id: "projects", label: "Projeler", icon: ProjectsIcon, path: "/c/$companyId/projects" },
-  { id: "memory", label: "Hafıza", icon: MemoryIcon, path: "/c/$companyId/memory" },
-  {
-    id: "organization",
-    label: "Organizasyon",
-    icon: OrganizationIcon,
-    path: "/c/$companyId/organization",
-  },
-  { id: "skills", label: "Yetenekler", icon: SkillsIcon, path: "/c/$companyId/skills" },
-  {
-    id: "communication",
-    label: "İletişim",
-    icon: CommunicationIcon,
-    path: "/c/$companyId/communication",
-  },
-  { id: "terminals", label: "Terminaller", icon: TerminalsIcon, path: "/c/$companyId/terminals" },
-  { id: "approvals", label: "Onaylar", icon: ApprovalsIcon, path: "/c/$companyId/approvals" },
-  { id: "events", label: "Olaylar", icon: EventsIcon, path: "/c/$companyId/events" },
-  { id: "reports", label: "Raporlar", icon: ReportsIcon, path: "/c/$companyId/reports" },
-  { id: "costs", label: "Maliyetler", icon: CostsIcon, path: "/c/$companyId/costs" },
-  { id: "settings", label: "Ayarlar", icon: SettingsIcon, path: "/c/$companyId/settings" },
+  { id: "command", label: "Komuta", icon: CommandIcon, panelId: null },
+  { id: "dashboard", label: "Dashboard", icon: DashboardIcon, panelId: "dashboard" },
+  { id: "office", label: "Ofis", icon: OfficeIcon, panelId: "office" },
+  { id: "tasks", label: "Görevler", icon: TasksIcon, panelId: "tasks" },
+  { id: "agents", label: "Ajanlar", icon: AgentsIcon, panelId: "agents" },
+  { id: "projects", label: "Projeler", icon: ProjectsIcon, panelId: "projects" },
+  { id: "memory", label: "Hafıza", icon: MemoryIcon, panelId: "memory" },
+  { id: "organization", label: "Organizasyon", icon: OrganizationIcon, panelId: "organization" },
+  { id: "skills", label: "Yetenekler", icon: SkillsIcon, panelId: "skills" },
+  { id: "communication", label: "İletişim", icon: CommunicationIcon, panelId: "communication" },
+  { id: "terminals", label: "Terminaller", icon: TerminalsIcon, panelId: "terminals" },
+  { id: "approvals", label: "Onaylar", icon: ApprovalsIcon, panelId: "approvals" },
+  { id: "events", label: "Olaylar", icon: EventsIcon, panelId: "events" },
+  { id: "reports", label: "Raporlar", icon: ReportsIcon, panelId: "reports" },
+  { id: "costs", label: "Maliyetler", icon: CostsIcon, panelId: "costs" },
+  { id: "settings", label: "Ayarlar", icon: SettingsIcon, panelId: "settings" },
 ];
 
+/** Panel açıcı: sekme satırının yerini alan tek düğme + açılır liste. */
+function PanelLauncher() {
+  const [open, setOpen] = useState(false);
+  const openPanel = usePanelBus((s2) => s2.openPanel);
+  return (
+    <span className="relative shrink-0">
+      <button
+        data-testid="panel-launcher"
+        aria-label="Panel aç"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 rounded-md border border-acos-line bg-acos-bg2 px-2 py-0.5 text-[11px] text-acos-fg1 hover:border-acos-fg2 hover:text-acos-fg0"
+        title="Görünümler — hepsi bu ekranda panel olarak açılır"
+      >
+        <CommandIcon size={14} />
+        <span className="hidden sm:inline">Paneller</span>
+        <ChevronDownIcon size={12} />
+      </button>
+      {open && (
+        <>
+          {/* dışarı tıklayınca kapansın */}
+          <span className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
+          <div
+            className="absolute left-0 top-7 z-50 grid w-64 grid-cols-2 gap-0.5 rounded-md border border-acos-line bg-acos-bg2 p-1 shadow-lg"
+            data-testid="panel-launcher-menu"
+          >
+            {PANEL_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  data-testid={`nav-${item.id}`}
+                  aria-label={item.label}
+                  title={item.panelId ? `${item.label} panelini aç` : "Komuta merkezi"}
+                  onClick={() => {
+                    if (item.panelId) openPanel(item.panelId);
+                    setOpen(false);
+                  }}
+                  className="flex items-center gap-1.5 rounded px-2 py-1 text-left text-[11px] text-acos-fg1 hover:bg-acos-bg3 hover:text-acos-fg0"
+                >
+                  <Icon size={14} className="shrink-0 text-acos-fg2" />
+                  <span className="truncate">{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
 function GlobalSearch({ companyId }: { companyId: string }) {
-  const navigate = useNavigate();
   const [q, setQ] = useState("");
+  const setSelectedAgent = useFocus((s2) => s2.setSelectedAgent);
+  const openPanel = usePanelBus((s2) => s2.openPanel);
   const agents = useQuery({
     queryKey: keys.agents(companyId),
     queryFn: () => api.agents.list(companyId),
@@ -99,9 +153,12 @@ function GlobalSearch({ companyId }: { companyId: string }) {
     ? (agents.data ?? []).filter((a) => a.name.toLowerCase().includes(q.trim().toLowerCase()))
     : [];
 
-  async function open(agentId: string) {
+  // E1: ayrı ajan sayfası yok — bulunan ajan ODAĞA alınır (paneller ona göre
+  // vurgular/filtreler) ve Ajanlar paneli öne gelir. Tek ekran korunur.
+  function open(agentId: string) {
     setQ("");
-    await navigate({ to: "/c/$companyId/agents/$agentId", params: { companyId, agentId } });
+    setSelectedAgent(agentId);
+    openPanel("agents");
   }
 
   return (
@@ -111,7 +168,7 @@ function GlobalSearch({ companyId }: { companyId: string }) {
         value={q}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && hits[0]) void open(hits[0].id);
+          if (e.key === "Enter" && hits[0]) open(hits[0].id);
           if (e.key === "Escape") setQ("");
         }}
         placeholder="ara…"
@@ -122,7 +179,7 @@ function GlobalSearch({ companyId }: { companyId: string }) {
           {hits.slice(0, 8).map((agent) => (
             <li key={agent.id}>
               <button
-                onMouseDown={() => void open(agent.id)}
+                onMouseDown={() => open(agent.id)}
                 className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[11px] text-acos-fg0 hover:bg-acos-bg3"
               >
                 {agent.name}
@@ -136,65 +193,102 @@ function GlobalSearch({ companyId }: { companyId: string }) {
   );
 }
 
-function TeamChips({ companyId }: { companyId: string }) {
-  const navigate = useNavigate();
+/**
+ * Proje bazlı takım şeridi (E1 gereksinim 4) — düz takım çipleri yerine.
+ *
+ * Founder'ın sorusu "hangi takım hangi projede çalışıyor" idi; eski şerit
+ * şirketteki TÜM takımları tek düzlemde gösteriyordu. Bağ veriden türetilir
+ * (useProjectTeams: tasks.projectId × tasks.orgUnitId) — şemaya yeni bir
+ * ilişki eklenmedi, backend'e dokunulmadı. Çip tıklaması eski davranışı
+ * korur: komuta merkezini o takıma filtreler (P1-A).
+ */
+function ProjectTeams({ companyId }: { companyId: string }) {
   const [manageOpen, setManageOpen] = useState(false);
-  const units = useQuery({
-    queryKey: keys.orgUnits(companyId),
-    queryFn: () => api.org.listUnits(companyId),
-  });
+  const { groups, idleTeams } = useProjectTeams(companyId);
   const edges = useQuery({
     queryKey: keys.orgEdges(companyId),
     queryFn: () => api.org.listEdges(companyId),
   });
-  const teamFilter = useFocus((s) => s.teamFilter);
-  const setTeamFilter = useFocus((s) => s.setTeamFilter);
-  const teams = (units.data ?? []).filter((u) => u.kind === "team");
+  const teamFilter = useFocus((s2) => s2.teamFilter);
+  const setTeamFilter = useFocus((s2) => s2.setTeamFilter);
   const headcount = (unitId: string) =>
     (edges.data ?? []).filter(
       (e) => e.kind === "member_of" && e.toUnitId === unitId && e.endedAt === null,
     ).length;
 
-  // P1-A: a chip FILTERS the Command Center to that team (0-member teams
-  // included — panels show their empty states); second click clears.
   function toggle(team: { id: string; name: string }) {
-    setTeamFilter(
-      teamFilter?.unitId === team.id ? null : { unitId: team.id, name: team.name },
-    );
-    void navigate({ to: "/c/$companyId", params: { companyId } });
+    setTeamFilter(teamFilter?.unitId === team.id ? null : { unitId: team.id, name: team.name });
   }
 
+  const chip = (
+    team: { id: string; name: string },
+    key: string,
+    openTasks: number | undefined,
+  ) => {
+    const active = teamFilter?.unitId === team.id;
+    return (
+      <button
+        key={key}
+        data-testid={`team-chip-${team.id}`}
+        onClick={() => toggle(team)}
+        title={`${team.name} — ${headcount(team.id)} üye${
+          openTasks ? ` · ${openTasks} açık iş` : ""
+        } · komuta merkezini bu takıma filtrele`}
+        className={cn(
+          "flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px]",
+          active
+            ? "border-dept-engineering bg-dept-engineering/15 text-acos-fg0"
+            : "border-acos-line bg-acos-bg2 text-acos-fg1 hover:border-acos-fg2",
+        )}
+      >
+        <span className="max-w-24 truncate">{team.name}</span>
+        <span
+          className={cn(
+            "rounded-full px-1.5 text-[9px] tabular-nums",
+            active ? "bg-dept-engineering text-acos-bg0" : "bg-acos-bg3",
+          )}
+        >
+          {headcount(team.id)}
+        </span>
+      </button>
+    );
+  };
+
+  const populated = groups.filter((g) => g.teams.length > 0);
+
   return (
-    // N7: chips are decorative context — they yield first under ~1100px
-    <div className="hidden min-w-0 items-center gap-1.5 lg:flex" data-testid="team-chips">
-      {teams.slice(0, 6).map((team) => {
-        const active = teamFilter?.unitId === team.id;
-        return (
-          <button
-            key={team.id}
-            data-testid={`team-chip-${team.id}`}
-            onClick={() => toggle(team)}
-            title={`${team.name} — komuta merkezini bu takıma filtrele`}
-            className={cn(
-              "flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px]",
-              active
-                ? "border-dept-engineering bg-dept-engineering/15 text-acos-fg0"
-                : "border-acos-line bg-acos-bg2 text-acos-fg1 hover:border-acos-fg2",
-            )}
-          >
-            <span className="max-w-28 truncate">{team.name}</span>
-            <span
-              className={cn(
-                "rounded-full px-1.5 text-[9px] tabular-nums",
-                active ? "bg-dept-engineering text-acos-bg0" : "bg-acos-bg3",
-              )}
-            >
-              {headcount(team.id)}
-            </span>
-          </button>
-        );
-      })}
-      {teams.length > 6 && <span className="text-[10px] text-acos-fg2">+{teams.length - 6}</span>}
+    // ORTADA: iki yanı flex-1 olan kapsayıcının içinde ortalanır (E1 §4).
+    <div
+      className="pointer-events-none absolute left-1/2 top-0 hidden h-[38px] max-w-[46%] -translate-x-1/2 items-center justify-center gap-3 overflow-x-auto lg:flex [&>*]:pointer-events-auto"
+      data-testid="team-chips"
+    >
+      {populated.slice(0, 3).map((group) => (
+        <span
+          key={group.projectId ?? "loose"}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border border-acos-line/60 bg-acos-bg1 px-1.5 py-0.5"
+          data-testid={`project-teams-${group.projectId ?? "none"}`}
+          title={`${group.projectName} — bu projede iş yapan takımlar`}
+        >
+          <span className="max-w-28 truncate text-[10px] font-semibold text-acos-fg2">
+            {group.projectName}
+          </span>
+          {group.teams.slice(0, 4).map((team) =>
+            chip(team, `${group.projectId}-${team.id}`, group.taskCountByUnit[team.id]),
+          )}
+          {group.teams.length > 4 && (
+            <span className="text-[9.5px] text-acos-fg2">+{group.teams.length - 4}</span>
+          )}
+        </span>
+      ))}
+      {populated.length > 3 && (
+        <span className="shrink-0 text-[10px] text-acos-fg2">+{populated.length - 3} proje</span>
+      )}
+      {populated.length === 0 && idleTeams.length > 0 && (
+        <span className="flex shrink-0 items-center gap-1.5" data-testid="project-teams-idle">
+          <span className="text-[10px] text-acos-fg2">iş bekleyen takımlar:</span>
+          {idleTeams.slice(0, 4).map((team) => chip(team, `idle-${team.id}`, undefined))}
+        </span>
+      )}
       {teamFilter && (
         <button
           data-testid="team-filter-clear"
@@ -231,6 +325,15 @@ export function AppShell() {
   const lastEvent = useEventTicker((s) => s.events[0]);
   const requestPreset = useUiPrefs((s) => s.requestPreset);
   const [hireOpen, setHireOpen] = useState(false);
+  // E1: Founder direktifi üst çubuktan verilir; hedef her zaman şirketin
+  // tepe yöneticisidir (sunucu ProjectsService.topExecutive ile bulur).
+  const [directiveOpen, setDirectiveOpen] = useState(false);
+  const executiveQuery = useQuery({
+    queryKey: [companyId, "org", "top-executive"],
+    queryFn: () => api.tasks.topExecutive(companyId),
+    retry: false, // ajansız şirkette 404 normaldir
+  });
+  const executive = executiveQuery.data ?? null;
   const [bellOpen, setBellOpen] = useState(false);
   const unread = useNotifications((s) => s.unread);
   const recentNotifications = useNotifications((s) => s.recent);
@@ -278,26 +381,38 @@ export function AppShell() {
   }
 
   return (
-    <div className="grid h-screen grid-rows-[38px_40px_minmax(0,1fr)_24px] bg-acos-bg0 font-sans text-[13px] text-acos-fg0">
-      <header className="flex items-center gap-2.5 overflow-hidden border-b border-acos-line bg-acos-bg1 px-3 text-xs">
+    <div className="grid h-screen grid-rows-[38px_minmax(0,1fr)_24px] bg-acos-bg0 font-sans text-[13px] text-acos-fg0">
+      <header className="relative flex items-center gap-2.5 overflow-hidden border-b border-acos-line bg-acos-bg1 px-3 text-xs">
         <span className="font-bold">
           A<b style={{ color: "#2ec26a" }}>C</b>OS
         </span>
-        <select
-          aria-label="Şirket"
-          value={companyId}
-          onChange={(e) =>
-            void navigate({ to: "/c/$companyId", params: { companyId: e.target.value } })
-          }
-          className="max-w-36 rounded-md border border-acos-line bg-acos-bg2 px-1.5 py-0.5 text-[11px] text-acos-fg0 focus:outline-none"
+        {/* E1 §3: şirket satırı KALIR — seçici artık etiketli, aktif şirket
+            adı okunur bir "chip" gibi görünür ve tek tıkla değiştirilir. */}
+        <span
+          className="flex shrink-0 items-center gap-1 rounded-md border border-acos-line bg-acos-bg2 pl-2"
+          data-testid="company-switcher"
         >
-          {companies.data?.map((company) => (
-            <option key={company.id} value={company.id}>
-              {company.name}
-            </option>
-          ))}
-        </select>
-        <TeamChips companyId={companyId} />
+          <span className="text-[9.5px] uppercase tracking-wide text-acos-fg2">şirket</span>
+          <select
+            aria-label="Şirket"
+            value={companyId}
+            onChange={(e) =>
+              void navigate({ to: "/c/$companyId", params: { companyId: e.target.value } })
+            }
+            className="max-w-40 rounded-md border-0 bg-transparent px-1 py-0.5 text-[11.5px] font-semibold text-acos-fg0 focus:outline-none"
+          >
+            {companies.data?.map((company) => (
+              <option key={company.id} value={company.id}>
+                {company.name}
+              </option>
+            ))}
+          </select>
+        </span>
+        <PanelLauncher />
+        {/* E1 §4: takım şeridi çubuğun GERÇEK ortasında durur — solundaki ve
+            sağındaki küme genişlikleri farklı olduğu için akışta değil,
+            mutlak konumla ortalanır (dar ekranda gizlenir). */}
+        <ProjectTeams companyId={companyId} />
         <div className="flex-1" />
         {/* Layout presets (36 §3): saved Command Center arrangements. */}
         <span className="hidden items-center gap-1 xl:flex" data-testid="layout-presets">
@@ -395,63 +510,34 @@ export function AppShell() {
         <span className="px-1 text-acos-fg2" title="Ayarlar (daha sonra)">
           <SettingsIcon size={15} />
         </span>
-        {/* Single-user mode: no logout — the Founder identity is ambient. */}
-        <span className="text-acos-fg1" data-testid="me-name">
-          {me.data?.displayName} ▾
-        </span>
+        {/* E1 §5+§7 — EN KRİTİK UX: Founder kimliği artık bir DÜĞME. Tıkla →
+            CEO'ya serbest metin görev ver (POST /directives) → çalışma
+            döngüsü başlar. Kullanıcı ilk işini buradan veriyor; ekranda
+            başka "işi nereden veriyorum" sorusu kalmıyor. CEO yoksa düğme
+            pasif ve nedenini söylüyor (önce bir tepe yönetici işe alın). */}
+        <button
+          data-testid="me-name"
+          onClick={() => setDirectiveOpen(true)}
+          disabled={!executive}
+          aria-label={
+            executive ? `${executive.name} adlı yöneticiye görev ver` : "Görev vermek için CEO gerekli"
+          }
+          title={
+            executive
+              ? `${executive.name} (${executive.positionTitle}) — tıkla, görevi ver`
+              : "Şirketin tepe yöneticisi yok — önce + Ajan Ekle ile bir CEO işe alın"
+          }
+          className={cn(
+            "flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px]",
+            executive
+              ? "border-acos-line bg-acos-bg2 text-acos-fg1 hover:border-dept-engineering hover:text-acos-fg0"
+              : "cursor-not-allowed border-acos-line/60 text-acos-fg2",
+          )}
+        >
+          <UserIcon size={14} />
+          <span className="max-w-28 truncate">{me.data?.displayName}</span>
+        </button>
       </header>
-
-      {/* Tek sayfa hissi (36 §2 UI overhaul): sol icon-rail yerine üstte
-          yatay sekme çubuğu — tüm 16 görünüm burada, tek satırda kaydırılabilir. */}
-      <nav
-        className="flex min-w-0 items-stretch gap-0.5 overflow-x-auto border-b border-acos-line bg-acos-bg1 px-2"
-        aria-label="Ana gezinme"
-      >
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          return item.path ? (
-            <Link
-              key={item.id}
-              to={item.path as "/c/$companyId/agents"}
-              params={{ companyId }}
-              activeOptions={{ exact: item.path === "/c/$companyId" }}
-              aria-label={item.label}
-              title={item.label}
-              data-testid={`nav-${item.id}`}
-              className={cn(
-                "group relative flex shrink-0 items-center gap-1.5 whitespace-nowrap px-3 text-[11.5px] font-medium",
-                "text-acos-fg1 transition-colors duration-150 hover:text-acos-fg0",
-                "[&.active]:text-acos-fg0",
-              )}
-            >
-              <Icon
-                size={16}
-                className="shrink-0 text-acos-fg2 transition-colors duration-150 group-hover:text-acos-fg1 [.active_&]:text-dept-engineering"
-              />
-              <span>{item.label}</span>
-              {/* alt çizgi vurgusu: aktifte belirgin, hover'da soluk */}
-              <span
-                className={cn(
-                  "pointer-events-none absolute inset-x-2 bottom-0 h-[2px] scale-x-0 rounded-full bg-dept-engineering",
-                  "transition-transform duration-150 group-hover:scale-x-50",
-                  "[.active_&]:scale-x-100",
-                )}
-              />
-            </Link>
-          ) : (
-            <span
-              key={item.id}
-              aria-label={item.label}
-              title={`${item.label} — daha sonraki bir görevle gelir`}
-              data-testid={`nav-${item.id}`}
-              className="flex shrink-0 cursor-not-allowed items-center gap-1.5 whitespace-nowrap px-3 text-[11.5px] font-medium text-acos-fg2/50"
-            >
-              <Icon size={16} className="shrink-0" />
-              <span>{item.label}</span>
-            </span>
-          );
-        })}
-      </nav>
 
       {/* P0-B: no more light island — every route renders on the dark canvas */}
       <main className={cn("min-w-0 overflow-auto", onCommandCenter ? "" : "p-4")}>
@@ -513,6 +599,14 @@ export function AppShell() {
       <Toasts />
 
       <HireModal open={hireOpen} onClose={() => setHireOpen(false)} />
+      {executive && (
+        <DirectiveDialog
+          companyId={companyId}
+          executive={executive}
+          open={directiveOpen}
+          onClose={() => setDirectiveOpen(false)}
+        />
+      )}
     </div>
   );
 }

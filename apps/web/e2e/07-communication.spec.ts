@@ -21,6 +21,10 @@ test("communication: team channel auto-provisions; Founder message persists", as
   expect(created.ok()).toBe(true);
   const unit = await created.json();
 
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+
+  await page.getByTestId("panel-launcher").click();
+
   await page.getByTestId("nav-communication").click();
   const channels = await (
     await page.request.get(`/api/v1/companies/${companyId}/channels?kind=team`)

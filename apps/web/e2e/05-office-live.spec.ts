@@ -8,6 +8,8 @@ import { login, openCompany } from "./helpers";
 async function openOffice(page: Page): Promise<void> {
   await login(page);
   await openCompany(page, "Acme Technologies");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-office").click();
   await expect(page.getByTestId("office-agent-count")).toBeVisible({ timeout: 15_000 });
   await page.waitForFunction(() => (window.__acosOffice?.agentCount ?? 0) > 0, undefined, {

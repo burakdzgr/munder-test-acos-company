@@ -72,8 +72,9 @@ test("live npm output streams into xterm; reload replays the ring and continues 
   // ---- UI: Terminals view lists the session; attach shows the LIVE flow ----
   await login(page);
   await openCompany(page, "Acme");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-terminals").click();
-
   // first-touch provisioning (worktree clone + container) happens before the
   // session opens — the list poll picks it up. Rows are keyed by THIS run's
   // task number: earlier runs may have left sessions behind.

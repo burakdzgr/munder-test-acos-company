@@ -11,8 +11,12 @@ test("ofis: CEO'ya görev ver düğmesi ve ajan kartı", async ({ page }) => {
 
   await login(page);
   await openCompany(page, "Acme");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-office").click();
-  await page.getByTestId("office-directive-button").waitFor({ timeout: 20_000 });
+  // E1: direktif düğmesi üst çubukta (tek ekran); ofis paneli canvas'ı çizer.
+  await page.getByTestId("me-name").waitFor({ timeout: 20_000 });
+  await page.locator("canvas").first().waitFor({ timeout: 20_000 });
   await page.waitForTimeout(2000); // sprite atlası + ilk kareler
 
   const shot = test.info().outputPath("office-directive.png");

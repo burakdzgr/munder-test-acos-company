@@ -53,6 +53,7 @@ export {
   CostsIcon,
   SettingsIcon,
   SearchIcon,
+  UserIcon,
   BellIcon,
   PlusIcon,
   CloseIcon,

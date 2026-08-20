@@ -62,6 +62,8 @@ test("failure → consolidation → Observatory with provenance; contradiction q
 
   // ---- demo 21: the consolidated memory appears in the Observatory ----
   // (.first(): persistent-stack re-runs accumulate one lesson per run)
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-memory").click();
   const row = page
     .getByTestId("memory-row")

@@ -13,6 +13,8 @@ test("hafıza galaksisi: canvas + gerçek düğümler + canlı filtre + seçim",
 
   await login(page);
   await openCompany(page, "Acme");
+  // E1 tek ekran: nav sekme satırı yok — görünümler panel açıcıdan gelir.
+  await page.getByTestId("panel-launcher").click();
   await page.getByTestId("nav-memory").click();
   await page.getByTestId("memory-tab-graph").click();
 
