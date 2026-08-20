@@ -92,6 +92,51 @@ triggered by untrusted content is the hook; the R2+ audit record is the `tool_in
 Session-level metering (broker → session-scoped `llm_calls`) is *added* for cost visibility, not a
 replacement for the per-operation ledger.
 
+## Why MCP-on-top does not weaken the skeleton (control-plane argument, Oscar, T30)
+
+Implemented on `t30-mcp-tool-gateway`; each point below is asserted by a test, not aspirational
+(`apps/server/test/integration/mcp-gateway.int.test.ts`, `packages/db/test/integration/session-gate.int.test.ts`).
+
+1. **INV-10 — the Scheduler still owns assignment.** The only delegation surface exposed to a CLI
+   accepts `"scheduler"` or `"self"`, never a concrete agent id. A session has no path to name a
+   target.
+2. **INV-14 — reviewer ≠ author.** `request_review` runs the same reviewer election; the CLI cannot
+   nominate its own reviewer.
+3. **INV-13 — one status writer.** This is why the organisational verbs are *not* yet served over
+   MCP: serving them means **moving** the worker's action dispatch to a shared home, not
+   re-implementing it in `apps/server`, which would create a second writer for task state.
+   Extract, don't duplicate.
+4. **Approvals.** `require_approval` is a first-class outcome, not an error: the tool does not
+   execute until a verdict lands, and R3/founder-category tools behave exactly as before.
+5. **Identity.** Derived from a per-session token bound to (company, agent, task, session) — never
+   from tool arguments. No tool takes an `agentId`/`companyId`/`taskId` parameter; a call whose
+   arguments carry another agent's id still audits as the token's agent.
+6. **S2 — secrets.** Credentials resolve server-side at dispatch and never cross into the
+   container; `INTERNAL_API_TOKEN` never enters a container at all, and a session token cannot mint
+   another token.
+7. **S5 — taint.** `outputFlagged` rides the result envelope, so a CLI session's derived calls carry
+   the taint bit exactly as the worker loop's fence does.
+8. **INV-3 / S3 — preserved in both directions.** MCP tool calls go through `ToolGateway.invoke` as
+   usual. The CLI's built-in tools are decided and audited through a new **audit-only mode**: the
+   gateway writes the decision and the `tool_invocations` row but does **not** execute — execution
+   stays in the sandbox, since executing again would double the side effect. Fail-closed on
+   unmapped built-ins.
+
+## Concurrency and cost, concretely
+
+**Concurrency.** N agents means N live CLI processes, so the bridge's de-facto 3-parallel ceiling
+disappears. It is replaced by an explicit company-scoped cap
+(`MAX_LIVE_SESSIONS_PER_COMPANY`, default **3** — today's effective parallelism, so enabling the CLI
+path cannot make the host worse than it already is). **One** gate serves every start path, rework
+re-entry included; a start path outside the cap would make the cap meaningless. Over the cap nothing
+fails: the task stays ASSIGNED and the session-ended drain releases company-wide capacity by
+priority/age.
+
+**Cost.** Session-level metering still matters even with the per-operation ledger intact, because
+`llm_calls` is empty for planning/intake-path calls today (only `callModelActivity` writes rows).
+That gap is **pre-existing, not caused by this decision** — but this decision makes it load-bearing,
+so closing it belongs to this work.
+
 ## Other invariants touched
 
 - **INV-9 (agent identity ⊥ model).** A CLI session is a model runtime. `agent_model_bindings`
