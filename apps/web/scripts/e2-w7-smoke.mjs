@@ -212,15 +212,38 @@ const PRESENCE = {
     name: a.name,
     // SUNUCU ızgarasındaki hücreler — yansıtıcı bunları kata oturtacak
     cell: { x: 3 + (i % 5) * 2, y: 3 + Math.floor(i / 5) * 2 },
-    badge: ["WORKING", "THINKING", "REVIEWING", "IDLE", "COMMUNICATING"][i % 5],
+    badge: [
+      "WORKING",
+      "THINKING",
+      "REVIEWING",
+      "COMMUNICATING",
+      "WORKING",
+      "BLOCKED",
+      "WORKING",
+      "WAITING",
+      "OFFLINE",
+      "ESCALATING",
+    ][i],
     deskId: `desk-${i}`,
     sessionId: null,
   })),
-  interactions: [],
+  interactions: [
+    {
+      id: "int-1",
+      kind: "meeting",
+      agentIds: [shotId(1), shotId(2)],
+      atCell: { x: 6, y: 6 },
+      causeEventId: "eeeeeeee-eeee-4eee-8eee-eeeeeeee0001",
+    },
+  ],
 };
 
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
+const page = await browser.newPage({
+  viewport: { width: 1600, height: 900 },
+  // FAZ 2B kanit goruntusu: balonlar/oturma kucuk panelde ancak 2x rasterde okunur
+  deviceScaleFactor: OFFICE_SHOT ? 2 : 1,
+});
 const pageErrors = [];
 if (OFFICE_SHOT) {
   await page.routeWebSocket("**/ws", (ws) => {
@@ -492,7 +515,12 @@ if (SELECT_PROOF) {
 }
 
 if (OFFICE_SHOT) {
-  await page.waitForTimeout(2500); // sahne + varlıklar
+  // Ayrık ofis penceresi: kat tam ekran çizilir, oturma/balon ayrıntısı okunur
+  // (panel içinde harita 0.37 ölçeğe iniyor ve ayrıntı kayboluyor).
+  await page.goto(`http://localhost:5199/c/${CID}/office-window`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForTimeout(3000); // sahne + varlıklar + WS anlık görüntüsü
   const seatCount = await page.evaluate(() => window.__acosOffice?.agentCount ?? -1);
   check("kadro sahneye indi (WS anlık görüntüsü)", seatCount > 0, `avatar: ${seatCount}`);
   const box = await page.getByTestId("office-canvas").boundingBox();
@@ -502,7 +530,19 @@ if (OFFICE_SHOT) {
       clip: { x: box.x, y: box.y, width: box.width, height: box.height },
     });
   }
-  check("kat ekran görüntüsüne alındı", !!box, "2b-kat.png");
+  if (box) {
+    // yakın plan: oturma duruşu + baş üstü balonları okunsun
+    await page.screenshot({
+      path: `${SHOTS}/2b-yakin.png`,
+      clip: {
+        x: box.x + box.width * 0.28,
+        y: box.y + box.height * 0.24,
+        width: box.width * 0.36,
+        height: box.height * 0.34,
+      },
+    });
+  }
+  check("kat ekran görüntüsüne alındı", !!box, "2b-kat.png + 2b-yakin.png");
   console.log(results.join(String.fromCharCode(10)));
   await browser.close();
   process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);

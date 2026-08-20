@@ -15,6 +15,7 @@ export function OfficeWindow() {
   const { companyId } = useParams({ from: "/c/$companyId/office-window" });
   const snapshot = usePresence((s) => s.snapshot);
   const setLayout = useOfficeStore((s) => s.setLayout);
+  const setRoster = useOfficeStore((s) => s.setRoster);
 
   const layoutQuery = useQuery({
     queryKey: [companyId, "office", "layout"],
@@ -32,6 +33,29 @@ export function OfficeWindow() {
     () => new Map((agents.data ?? []).map((agent) => [agent.id, agent.avatarUrl])),
     [agents.data],
   );
+
+  // FAZ 2B: ayrık pencere de aynı koltuk dağıtımını görmeli (CEO → CEO odası).
+  const positions = useQuery({
+    queryKey: keys.orgPositions(companyId),
+    queryFn: () => api.org.listPositions(companyId),
+  });
+  const executive = useQuery({
+    queryKey: [companyId, "tasks", "top-executive"],
+    queryFn: () => api.tasks.topExecutive(companyId),
+    retry: false,
+  });
+  useEffect(() => {
+    const titleById = new Map((positions.data ?? []).map((p) => [p.id, p.title]));
+    const executiveId = executive.data?.agentId ?? null;
+    setRoster(
+      new Map(
+        (agents.data ?? []).map((agent) => [
+          agent.id,
+          { title: titleById.get(agent.positionId) ?? null, executive: agent.id === executiveId },
+        ]),
+      ),
+    );
+  }, [agents.data, positions.data, executive.data, setRoster]);
 
   return (
     <div className="flex h-screen flex-col bg-acos-bg0 font-sans text-acos-fg0">

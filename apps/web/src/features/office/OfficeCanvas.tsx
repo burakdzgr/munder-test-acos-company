@@ -24,6 +24,13 @@ import type { OfficeSceneEngine } from "./sceneState.js";
 import { officeMap, type OfficeMap } from "./tiled/tiledMap.js";
 import { tileArt } from "./tiled/tileset.js";
 import type { SeatedFloor } from "./tiled/seatPool.js";
+import {
+  typingOffset,
+  visualStateFor,
+  type Bubble,
+  type VisualInput,
+  type VisualState,
+} from "./tiled/visualState.js";
 import { emitArt, type PixelArt } from "./tiles.js";
 import {
   SPRITE_BASE,
@@ -57,6 +64,43 @@ const PIXEL = 2;
 
 /** döşeme anahtarı → sanat (FAZ 2B: kendi piksellerimiz, LimeZu yok) */
 const TILE_ART = tileArt();
+
+/**
+ * FAZ 2B / 2B-3 — baş üstü balonu. İÇERİĞİ UYDURMUYORUZ: yalnız durumun
+ * şeklini çiziyoruz (düşünce/konuşma/inceleme/uyarı). Metin, ancak sunucu
+ * gerçek bir metin gönderirse yazılabilir — şu an göndermiyor.
+ */
+function paintBubble(g: Graphics, kind: Bubble, x: number, y: number): void {
+  if (kind === "none") return;
+  const color =
+    kind === "alert" ? 0xff6b6b : kind === "review" ? 0xffcb47 : kind === "thought" ? 0xa879ff : 0x3fd0a0;
+  if (kind === "thought") {
+    g.circle(x, y, 7).fill({ color: 0x151a22 }).stroke({ color, width: 1.5 });
+    g.circle(x - 3, y - 1, 1.4).fill({ color });
+    g.circle(x, y - 1, 1.4).fill({ color });
+    g.circle(x + 3, y - 1, 1.4).fill({ color });
+    g.circle(x - 6, y + 8, 2).fill({ color: 0x151a22 }).stroke({ color, width: 1 });
+    return;
+  }
+  if (kind === "alert") {
+    g.poly([x, y - 8, x + 8, y + 6, x - 8, y + 6])
+      .fill({ color: 0x151a22 })
+      .stroke({ color, width: 1.5 });
+    g.rect(x - 0.8, y - 4, 1.6, 6).fill({ color });
+    g.rect(x - 0.8, y + 3, 1.6, 1.6).fill({ color });
+    return;
+  }
+  // speech / review: köşeli balon + kuyruk
+  g.roundRect(x - 9, y - 7, 18, 13, 3).fill({ color: 0x151a22 }).stroke({ color, width: 1.5 });
+  g.poly([x - 3, y + 6, x + 1, y + 6, x - 1, y + 10]).fill({ color: 0x151a22 });
+  if (kind === "review") {
+    g.circle(x - 1, y - 1, 3).stroke({ color, width: 1.4 });
+    g.rect(x + 1.5, y + 1.5, 4, 1.2).fill({ color });
+  } else {
+    g.rect(x - 5, y - 3, 10, 1.4).fill({ color });
+    g.rect(x - 5, y, 7, 1.4).fill({ color });
+  }
+}
 
 declare global {
   interface Window {
@@ -279,6 +323,9 @@ export function OfficeCanvas({
       lastY: number;
       dir: WalkDir;
       anim: string;
+      /** FAZ 2B/2B-3: baş üstü balonu ve oturma/yazma durumu */
+      bubble: Graphics;
+      visual: VisualState | null;
     }
     const avatarNodes = new Map<string, AvatarNode>();
 
@@ -367,8 +414,13 @@ export function OfficeCanvas({
 
 
       let lastLabelsVisible: boolean | null = null;
+      // Yalnız faz sayacı: yazma ritmi gibi DURUMA BAĞLI görsellerin fazı.
+      // Hareket üretmez — hangi avatarın "yazıyor" sayılacağını badge belirler.
+      let elapsedSeconds = 0;
+      let lastPhase = -1;
       app.ticker.add((ticker) => {
         engine.tick(ticker.deltaMS / 1000);
+        elapsedSeconds += ticker.deltaMS / 1000;
         // P2: zoom-thresholded name labels — react to wheel zoom immediately.
         // Eşik 0.85 → 1.25 (2026-08-18): adlar artık masa plakalarında kalıcı;
         // avatar üstü etiket yalnız yakın kadraja iner (çifte yazı önlenir).
@@ -399,7 +451,18 @@ export function OfficeCanvas({
           executiveDirtyRef.current = false;
           renderedEngineVersion = -1;
         }
-        if (engine.version === renderedEngineVersion) return;
+        // Motor durgunken de bir şeyin canlı kalması gerekebilir: WORKING olan
+        // ajanın klavye ritmi ve monitör titremesi. Bu ritim ajanın DURUMUNA
+        // bağlı (badge), kendi kendine dolaşan bir animasyon değil — durum
+        // IDLE'a dönünce ritim de biter.
+        const phase = Math.floor(elapsedSeconds * 7);
+        const typingLive = [...avatarNodes.values()].some(
+          (n) => n.visual?.activity === "typing",
+        );
+        if (engine.version === renderedEngineVersion && !(typingLive && phase !== lastPhase)) {
+          return;
+        }
+        lastPhase = phase;
         renderedEngineVersion = engine.version;
 
         // desk monitors tinted by the seated agent's live status
@@ -407,6 +470,9 @@ export function OfficeCanvas({
         for (const seat of projector.floor.seats.values()) {
           const avatar = engine.avatars.get(seat.agentId);
           const color = avatar ? (BADGE_COLOR[avatar.badge] ?? 0x233040) : 0x233040;
+          // WORKING → ekran hafifçe titrer (yazma). Kaynağı badge.
+          const typing = avatarNodes.get(seat.agentId)?.visual?.activity === "typing";
+          const glow = typing ? (phase % 2 === 0 ? 1 : 0.7) : avatar ? 0.85 : 0.3;
           // Masa, koltuğun BİR ÜSTÜNDEKİ hücrede (harita üreteci böyle
           // yerleştiriyor). Ekran dikdörtgeni DESK_ART'taki ekranın yeri:
           // 10..21. sütun, 3..6. satır — sabit ofset yazmıyoruz.
@@ -422,7 +488,7 @@ export function OfficeCanvas({
               12 * PIXEL,
               4 * PIXEL,
             )
-            .fill({ color, alpha: avatar ? 0.85 : 0.3 });
+            .fill({ color, alpha: glow });
         }
 
         // avatars: create/update/remove Pixi nodes from engine state.
@@ -457,7 +523,8 @@ export function OfficeCanvas({
             });
             label.anchor.set(0.5, 0);
             label.position.set(0, 8);
-            root.addChild(badge, label);
+            const bubble = new Graphics();
+            root.addChild(badge, bubble, label);
             root.eventMode = "static";
             root.cursor = "pointer";
             root.on("pointertap", () => onSelectAgentRef.current?.(agentId));
@@ -467,7 +534,9 @@ export function OfficeCanvas({
               sprite,
               body,
               badge,
+              bubble,
               label,
+              visual: null,
               lastX: avatar.pos.x,
               lastY: avatar.pos.y,
               dir: "down",
@@ -492,10 +561,35 @@ export function OfficeCanvas({
           node.lastX = avatar.pos.x;
           node.lastY = avatar.pos.y;
 
+          // FAZ 2B/2B-3: görsel durum TALİMAT verisinden türetilir
+          // (badge + yürüyor mu + koltuğunda mı + içinde olduğu etkileşim).
+          const seat = projector.seatCell(agentId);
+          const atSeat =
+            !!seat &&
+            Math.abs(avatar.pos.x - seat.x) < 0.2 &&
+            Math.abs(avatar.pos.y - seat.y) < 0.2;
+          let interactionKind: VisualInput["interaction"] = null;
+          for (const interaction of engine.interactions.values()) {
+            if (interaction.agentIds.includes(agentId)) {
+              interactionKind = interaction.kind as VisualInput["interaction"];
+              break;
+            }
+          }
+          const visual = visualStateFor({
+            badge: avatar.badge,
+            moving,
+            atSeat,
+            dir: node.dir,
+            interaction: interactionKind ?? null,
+          });
+          node.visual = visual;
+
           const badgeColor = BADGE_COLOR[avatar.badge] ?? 0x5c6773;
           if (node.sprite && sheet) {
             const avatarId = resolveAvatarId(agentId, avatarUrlsRef.current?.get(agentId) ?? null);
-            const animKey = `${avatarId}:${moving ? "walk" : "idle"}:${node.dir}`;
+            // oturuyorsa masaya DÖNÜK duruş karesi (sırtı bize dönük)
+            const facing = visual.posture === "seated" ? visual.facing : node.dir;
+            const animKey = `${avatarId}:${moving ? "walk" : "idle"}:${facing}`;
             if (node.anim !== animKey) {
               node.anim = animKey;
               const entry = avatarLib.get(avatarId);
@@ -506,7 +600,7 @@ export function OfficeCanvas({
                   );
                   node.sprite.play();
                 } else {
-                  node.sprite.textures = [sheet.textures[entry.idle[node.dir]] ?? Texture.EMPTY];
+                  node.sprite.textures = [sheet.textures[entry.idle[facing]] ?? Texture.EMPTY];
                   node.sprite.gotoAndStop(0);
                 }
                 // frame boyutundan bağımsız yerleşim: hedef ayak izi ~32×40
@@ -565,10 +659,22 @@ export function OfficeCanvas({
           // cevap veriyor; tam ad tıklanınca açılan ajan kartında duruyor.
           node.label.text = shortName(avatar.name);
           node.label.visible = camera.scale.x >= 1.25 || agentId === selectedRef.current;
-          node.root.position.set(avatar.pos.x * CELL, avatar.pos.y * CELL);
+          // Oturan avatar sandalyeye çöker (birkaç piksel yukarı) ve WORKING
+          // ise klavyede omuz ritmi verir. İkisi de TALİMATTAN gelen duruma
+          // bağlı: koltuk yansıtıcıdan, WORKING office.status.changed'den.
+          const sit = node.visual?.posture === "seated" ? -3 : 0;
+          const type = typingOffset(node.visual?.activity ?? "idle", elapsedSeconds);
+          node.root.position.set(avatar.pos.x * CELL, avatar.pos.y * CELL + sit + type);
           node.root.zIndex = avatar.pos.y;
+
+          node.bubble.clear();
+          if (node.visual && node.visual.bubble !== "none") {
+            paintBubble(node.bubble, node.visual.bubble, 0, -50);
+          }
+
           const focusSet = focusAgentIdsRef.current;
-          node.root.alpha = focusSet && !focusSet.has(agentId) ? 0.22 : 1;
+          const focusAlpha = focusSet && !focusSet.has(agentId) ? 0.22 : 1;
+          node.root.alpha = node.visual?.dim ? focusAlpha * 0.45 : focusAlpha;
         }
         for (const [agentId, node] of avatarNodes) {
           if (!engine.avatars.has(agentId)) {
