@@ -218,6 +218,29 @@ export interface ActionDispatchDeps {
     | undefined;
 }
 
+/**
+ * "Bu çocuk KAPANDI MI — artık beklemem gereken bir şey değil mi?"
+ *
+ * TERMİNALLİK DEĞİLDİR ve öyle adlandırılmamalı: `REJECTED` durum makinesinde
+ * terminal değil (`REJECTED: ["IN_PROGRESS","FAILED"]`, bir düzeltme durumu),
+ * ama reddedilmiş bir çocuğu BEKLEMEK yanlış olur — ebeveyn, bir daha hiç
+ * kımıldamayabilecek bir çocuğa bağımlılık yazıp sonsuza kadar WAITING'de
+ * kalırdı.
+ *
+ * Bu küme daha önce iki yerde satır içi ve `TERMINAL` adıyla duruyordu; ad,
+ * arka arkaya İKİ kişiyi (önce god'un talimatını, sonra Jim'in F1 bulgusunu)
+ * "öyleyse `approval-wake`'in kümesiyle aynı olmalı" sonucuna götürdü. Değil:
+ * orası "görev BİTTİ Mİ" sorusudur ve `taskMachine.terminalStates`'ten türer.
+ * İki farklı soru, iki farklı küme — adlar da farklı olsun ki bir daha
+ * karışmasın.
+ */
+const CLOSED_CHILD_STATUSES: ReadonlySet<string> = new Set([
+  "DONE",
+  "FAILED",
+  "CANCELLED",
+  "REJECTED",
+]);
+
 export function createActionDispatcher(deps: ActionDispatchDeps) {
   const { guardedDb } = deps;
   const taskState = new TaskStateService(guardedDb);
@@ -312,8 +335,7 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
       .select({ id: tasks.id, status: tasks.status })
       .from(tasks)
       .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.parentId, taskId)));
-    const TERMINAL = new Set(["DONE", "FAILED", "CANCELLED", "REJECTED"]);
-    return rows.filter((r) => !TERMINAL.has(r.status)).map((r) => r.id);
+    return rows.filter((r) => !CLOSED_CHILD_STATUSES.has(r.status)).map((r) => r.id);
   }
 
   /** Konteynerin açık çocuk sayısı — gözlemde sahibe geri bildirilir. */
@@ -322,8 +344,7 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
       .select({ status: tasks.status })
       .from(tasks)
       .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.parentId, taskId)));
-    const TERMINAL = new Set(["DONE", "FAILED", "CANCELLED", "REJECTED"]);
-    return rows.filter((r) => !TERMINAL.has(r.status)).length;
+    return rows.filter((r) => !CLOSED_CHILD_STATUSES.has(r.status)).length;
   }
 
   /** request_review / review-shaped complete_task: open (or reset) the code
