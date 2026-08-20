@@ -1,14 +1,12 @@
 -- VENDORED COPY — do not edit here.
 --   source : hive/agents/oscar-mt0b6hjy/E4-LIVE-RUN-PRECONDITION-GATE.sql (Oscar)
---   vendored: 2026-08-20
---   sha256  : eee768f547269dba (of everything below this header)
+--   vendored: 2026-08-20 (re-vendored after Oscar tightened P3's :cap rule)
+--   sha256  : 90ab9b309ff64204 (of everything below this header)
 --
--- Why a copy at all: the harness must be versioned WITH the code it
--- checks, so "which assert set proved this run" has an answer. Why the
--- hash: this copy went stale once and the stale part (4d requiring
--- cost_cents > 0) would have failed a CORRECT run — a rotting assert set
--- is worse than none, because it fails honest work. Oscar notifies on
--- change; this line is the check that does not rely on anyone remembering.
+-- Why a copy at all: the harness must be versioned WITH the code it checks, so
+-- "which assert set proved this run" has an answer. Why the hash: this copy
+-- went stale once and the stale part would have failed a CORRECT run — a
+-- rotting assert set is worse than none, because it fails honest work.
 
 -- E4 CANLI RUN — ÖN KOŞUL KAPISI (Oscar, kontrol düzlemi)
 -- Jim'in `scripts/e2e-live-run.mjs --dry` akışında, CANLI KOŞU ATEŞLENMEDEN ÖNCE koşulur.
@@ -77,7 +75,16 @@ SELECT 'P2' AS id,
 -- Kapı hiç devreye girmezse T38'in "tavanda görevi ASSIGNED'da BEKLETİR,
 -- DÜŞÜRMEZ" davranışı kanıtlanamaz (o alt-iddiayı düşürmek de meşru bir karar,
 -- ama SESSİZCE düşmemeli — burada görünür olur).
--- :cap değeri MAX_LIVE_SESSIONS_PER_COMPANY ile aynı verilmeli.
+-- :cap NEREDEN GELMELI (Kevin/Jim d5328ff, 2026-08-21 — BU KAPIDAKI BIR DELIGI
+-- KAPATIYOR): bu sorgu :cap'i DOGRULAYAMAZ, yalnizca kendisine SOYLENEN sayiyi
+-- kadroyla karsilastirir. compose MAX_LIVE_SESSIONS_PER_COMPANY'yi konteynere
+-- HIC gecirmiyordu; yani atesleyen kabukta `export ...=2` yapilsa bile sunucu
+-- varsayilan 3 ile kosardi ve BU KAPI kendisine soylenen 2'yi "PASS" diye
+-- raporlardi — hic yururlukte olmayan bir tavani "kanitlamis" olurduk, T38'in
+-- tavanda-kuyruk iddiasiyla birlikte. Duzeltme compose + dogrulayicida:
+-- deger konteynerin ICINDEN `printenv` ile GERI OKUNUR.
+-- KURAL: :cap'e elle yazilan bir sayi DEGIL, konteynerden geri okunan deger
+-- verilmelidir. Aksi halde bu satir "birinin soyledigi sayi"yi dogrular.
 SELECT 'P3' AS id,
        'session cap is strictly below the active headcount (gate can engage)' AS claim,
        CASE WHEN (SELECT count(*) FROM agents a WHERE a.company_id = :company AND a.status = 'active') > :cap
