@@ -170,3 +170,26 @@ describe.skipIf(!dockerUp)("DockerSandbox round-trip (T37)", () => {
     expect(result.exitCode).toBe(137); // busybox timeout -s KILL
   }, 180_000);
 });
+
+// T47 — the deterministic container name must never surface a 409 as a 500:
+// concurrent creates from INDEPENDENT DockerSandbox instances (no shared
+// coalescing — like two sandbox-manager processes, or the analyzer fan-out
+// hitting a retry) all resolve to the same live container.
+describe.skipIf(!dockerUp)("createWorkspace idempotency on the deterministic name (T47)", () => {
+  it("6 concurrent creates across 3 independent instances → one running container, zero errors", async () => {
+    const workspaceId = randomUUID();
+    created.push(workspaceId);
+    const mk = () => new DockerSandbox({ docker, transport, logSink, nowMs: () => Date.now() });
+    const [a, b, c] = [mk(), mk(), mk()];
+    const results = await Promise.all(
+      [a, b, c, a, b, c].map((s) => s.createWorkspace({ workspaceId, isolation: "analysis", env: {}, mounts: [], labels: {} })),
+    );
+    expect(new Set(results.map((r) => r.containerId)).size).toBe(1);
+    expect(results.every((r) => r.status === "running")).toBe(true);
+    // a later create (retry after the fact) reuses it, too
+    const again = await mk().createWorkspace({ workspaceId, isolation: "analysis", env: {}, mounts: [], labels: {} });
+    expect(again.containerId).toBe(results[0]!.containerId);
+    const all = await docker.listContainers({ all: true, filters: { name: [`acos-ws-${workspaceId}`] } });
+    expect(all).toHaveLength(1);
+  }, 180_000);
+});
