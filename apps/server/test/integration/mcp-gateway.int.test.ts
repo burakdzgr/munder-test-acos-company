@@ -561,6 +561,22 @@ describe("MCP tool-gateway (E4/A)", { timeout: 300_000 }, () => {
     expect(env.turnEnded).toBe(true);
   });
 
+  it("GET /mcp/v1 açıkça 405 döner — istemcinin SSE yoklaması oturumu düşürmez", async () => {
+    // Streamable-HTTP istemcileri açılışta SSE akışı için GET dener (canlı
+    // bulgu). Kayıtsız metot 404'e düşerdi; 405 + Allow niyeti belli eder ve
+    // her iki hâlde de oturum SÜRER — asıl mesele 500/asılma OLMAMASI.
+    const dev = await mint({ agentId: DEV, taskId: openTaskId });
+    const probe = await app.inject({
+      method: "GET",
+      url: "/mcp/v1",
+      headers: { authorization: `Bearer ${dev.sessionToken}` },
+    });
+    expect(probe.statusCode).toBe(405);
+    expect(probe.headers.allow).toBe("POST");
+    // yoklamadan sonra normal akış bozulmadan devam eder
+    expect((await rpc(dev.sessionToken, "tools/list")).statusCode).toBe(200);
+  });
+
   it("initialize + ping MCP el sıkışmasını tamamlar, bildirim 202 döner", async () => {
     const dev = await mint({ agentId: DEV, taskId: openTaskId });
     const init = await rpc(dev.sessionToken, "initialize", {

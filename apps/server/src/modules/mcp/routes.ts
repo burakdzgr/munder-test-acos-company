@@ -202,6 +202,21 @@ export async function registerMcpRoutes(app: FastifyInstance, deps: McpRoutesDep
     return reply.status(200).send(result);
   });
 
+  // Streamable-HTTP MCP istemcileri oturumun BAŞINDA SSE akışı için bir GET
+  // yoklaması yapıyor (Kevin'in canlı bulgusu). Kayıtsız bir metot Fastify'da
+  // 404'e düşer ve oturum devam eder — ama bu bir KAZA. Açıkça 405 + Allow
+  // dönmek niyeti belli eder: bu uç tek yönlü JSON-RPC POST'tur, SSE akışı
+  // sunmuyoruz. Yanıt gövdesi de istemciye bunu söyler.
+  app.get("/mcp/v1", { schema: { hide: true } }, async (_request, reply) =>
+    reply
+      .status(405)
+      .header("allow", "POST")
+      .send({
+        code: "method_not_allowed",
+        message: "ACOS MCP is request/response JSON-RPC over POST; no SSE stream on GET.",
+      }),
+  );
+
   // --- konteyner: MCP (JSON-RPC 2.0) -----------------------------------
   app.post("/mcp/v1", { schema: { hide: true } }, async (request, reply) => {
     const auth = await verifyMcpToken(deps.guardedDb(), bearerValue(request.headers.authorization));
