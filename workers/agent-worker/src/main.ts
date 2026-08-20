@@ -293,7 +293,6 @@ async function run(): Promise<void> {
 
   const activities = {
     ...trivialActivities,
-    ...cliSessionActivities,
     ...createAgentTaskActivities({
       // TASK 13: Context Compiler CodeIndex sorgusu
       codeIndexQuery: async (q) => {
@@ -382,6 +381,9 @@ async function run(): Promise<void> {
           });
       },
     }),
+    // E4/T31: spread AFTER the base set — its steps-default
+    // resolveAgentRuntimeActivity must be overridden by the config-aware one.
+    ...cliSessionActivities,
   };
 
   const agentWorker = await Worker.create({
