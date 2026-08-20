@@ -27,6 +27,11 @@ const APPROVAL = "44444444-4444-4444-8444-444444444444";
 function stubActivities(actions: object[]) {
   let call = 0;
   return {
+    // E4/T31: the workflow asks the runtime first (patched "t31-cli-runtime");
+    // canned stubs answer "steps" like the base activity set does.
+    async resolveAgentRuntimeActivity() {
+      return { kind: "steps" as const, reason: "stub" };
+    },
     async startAgentSessionActivity() {},
     async getGuardSnapshotActivity() {
       return {
