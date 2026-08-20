@@ -418,6 +418,16 @@ export function OfficeCanvas({
     executiveIdRef.current = executiveAgentId;
     executiveDirtyRef.current = true;
   }
+  /**
+   * T26: tıklama geri çağrısı REF'te tutulur, bağımlılıkta DEĞİL.
+   * Çağıranlar satır içi ok fonksiyonu veriyor (OfficePanel), yani her
+   * yeniden render'da kimliği değişiyordu; bağımlılıkta olduğu için proje
+   * değişiminin/sihirbazın her açılışının ardından TÜM Pixi uygulaması
+   * yıkılıp yeniden kuruluyordu. Sahne artık yalnız motor/yedek değişince
+   * kurulur; tıklama her zaman en güncel geri çağrıyı çağırır.
+   */
+  const onSelectAgentRef = useRef(onSelectAgent);
+  onSelectAgentRef.current = onSelectAgent;
   const selectedAgentId = useFocus((s) => s.selectedAgentId);
   const selectedRef = useRef(selectedAgentId);
   selectedRef.current = selectedAgentId;
@@ -474,6 +484,14 @@ export function OfficeCanvas({
         for (const entry of avatarList) avatarLib.set(entry.avatarId, entry);
       } catch {
         sheet = null;
+      }
+      // T26: yükleme UÇUŞTAYKEN efekt temizlenmiş olabilir (proje değişimi,
+      // sihirbaz, panel yeniden render'ı). O durumda app.destroy() çalışmış ve
+      // app.stage NULL'dur — aşağıdaki addChild "Cannot read properties of
+      // null" ile patlıyordu. Yükleme sonrası bayrağı yeniden okuyoruz.
+      if (destroyed) {
+        app.destroy(true);
+        return;
       }
       const camera = new Container();
       const zoneLayer = new Container();
@@ -639,7 +657,7 @@ export function OfficeCanvas({
             root.addChild(badge, label);
             root.eventMode = "static";
             root.cursor = "pointer";
-            root.on("pointertap", () => onSelectAgent?.(agentId));
+            root.on("pointertap", () => onSelectAgentRef.current?.(agentId));
             avatarLayer.addChild(root);
             node = {
               root,
@@ -779,7 +797,7 @@ export function OfficeCanvas({
       }
       host.replaceChildren();
     };
-  }, [engine, fallback, onSelectAgent]);
+  }, [engine, fallback]);
 
   if (fallback) {
     // degraded mode (23 §15): same store, list rendering

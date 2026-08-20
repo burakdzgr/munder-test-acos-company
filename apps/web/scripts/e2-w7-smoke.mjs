@@ -22,6 +22,9 @@
 //   ... --select-proof → T27: ŞİRKET/PROJE seçicilerinin <option> renkleri
 //        ölçülür (koyu zemin + açık metin, kontrast oranı) ve seçenek listesi
 //        sayfa içinde (size) görüntülenip ekran görüntüsü alınır.
+//   ... --office-remount → T26: proje seçici + sihirbaz hızlıca açılıp kapanır,
+//        ofis sahnesi defalarca yeniden monte edilir; hiçbir yakalanmamış Pixi
+//        hatası (app.stage null → addChild) çıkmamalı.
 //   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
 //        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
 //   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
@@ -34,6 +37,9 @@ const INDEXING = process.argv.includes("--indexing");
 // T27: aciilr liste okunabilirligi (yerel popup ekran goruntusune girmez;
 // bu yuzden hesaplanmis renkler + sayfa ici liste kutusu goruntusu)
 const SELECT_PROOF = process.argv.includes("--select-proof");
+// T26: proje degisimi + sihirbaz acilip kapaninca Pixi sahnesi yikilip yeniden
+// kuruluyor; ucusta kalan varlik yuklemesi yok edilmis app.stage'e dokunuyordu.
+const OFFICE_REMOUNT = process.argv.includes("--office-remount");
 // yarış durumu: proje READY görünüyor ama ilk /goal yine de 409 yiyor
 const GOAL_409_ONCE = process.argv.includes("--goal-409-once");
 const STATE_MODE = process.argv.includes("--draft-then-ready")
@@ -159,7 +165,11 @@ const mkProposal = () => ({
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
+const pageErrors = [];
+page.on("pageerror", (e) => {
+  pageErrors.push(e.message);
+  console.log("PAGEERROR:", e.message);
+});
 
 await page.route("**/api/v1/**", async (route) => {
   const req = route.request();
@@ -393,6 +403,70 @@ if (SELECT_PROOF) {
   // seçicilerin çevresine kırp: satırlar okunacak kadar büyük görünsün
   await page.screenshot({ path: `${SHOTS}/t27-acik-liste.png`, clip: { x: 0, y: 0, width: 620, height: 120 } });
   check("açık seçenek listesi ekran görüntüsüne alındı", true, "t27-acik-liste.png");
+  console.log(results.join(String.fromCharCode(10)));
+  await browser.close();
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
+}
+
+if (OFFICE_REMOUNT) {
+  // Yarışı GERÇEKÇİ biçimde aç: sprite atlası yavaş insin (canlıda ağ/disk
+  // gecikmesi bunu zaten yapıyor), yeniden montaj yükleme UÇUŞTAYKEN olsun.
+  await page.route("**/sprites/**", async (route) => {
+    await new Promise((r) => setTimeout(r, 1200));
+    await route.continue();
+  });
+  const pixiCanvas = async () =>
+    await page.evaluate(
+      () => document.querySelector('[data-testid="office-canvas"] canvas') !== null,
+    );
+  await page.waitForTimeout(600);
+  check("Pixi sahnesi gerçekten kuruldu (canvas var)", await pixiCanvas());
+  // Sahne KAÇ KEZ yeniden kuruluyor? Host'a eklenen her <canvas> bir Pixi
+  // uygulaması demek. Gereksiz yeniden montaj hem pahalı hem de T26'daki
+  // yarışın kaynağı.
+  await page.evaluate(() => {
+    const host = document.querySelector('[data-testid="office-canvas"]');
+    window.__t26 = 0;
+    if (!host) return;
+    new MutationObserver((muts) => {
+      for (const m of muts)
+        for (const n of m.addedNodes)
+          if (n.nodeName === "CANVAS") window.__t26 += 1;
+    }).observe(host, { childList: true });
+  });
+  // proje değişimleri: her biri OfficePanel'i yeniden render eder
+  for (const pid of [P1, P2, "", P1, "", P2]) {
+    await page.selectOption('select[aria-label="Proje"]', pid);
+    await page.waitForTimeout(150); // yükleme uçuştayken tekrar yık/kur
+  }
+  // sihirbaz aç/kapa (üst durum değişimi → yine yeniden render)
+  for (let i = 0; i < 3; i += 1) {
+    await page.getByTestId("project-create-open").click();
+    await page.getByTestId("project-wizard").waitFor({ timeout: 10_000 });
+    await page.getByRole("button", { name: "Vazgeç" }).click();
+    await page.waitForTimeout(250);
+    await page.selectOption('select[aria-label="Proje"]', i % 2 === 0 ? P2 : P1);
+    await page.waitForTimeout(250);
+  }
+  await page.waitForTimeout(1500); // uçuştaki yüklemeler insin
+  const pixiErrors = pageErrors.filter(
+    (m) => /addChild|stage|null|undefined/i.test(m),
+  );
+  check(
+    "proje değişimi + sihirbaz aç/kapa: yakalanmamış Pixi hatası YOK",
+    pixiErrors.length === 0,
+    pixiErrors.slice(0, 3).join(" | ") || `toplam sayfa hatası: ${pageErrors.length}`,
+  );
+  const remounts = await page.evaluate(() => window.__t26 ?? -1);
+  check(
+    "sahne gereksiz yere yeniden kurulmuyor (proje değişimi + sihirbaz boyunca ≤1)",
+    remounts <= 1,
+    `yeni Pixi uygulaması sayısı: ${remounts}`,
+  );
+  check(
+    "ofis sahnesi hâlâ ayakta (yedek listeye düşmedi)",
+    (await page.getByTestId("office-canvas").count()) > 0,
+  );
   console.log(results.join(String.fromCharCode(10)));
   await browser.close();
   process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
