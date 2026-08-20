@@ -72,6 +72,30 @@ const get = async (baseUrl, path) => {
 };
 const list = (body) => (Array.isArray(body) ? body : (body?.items ?? body?.data ?? []));
 
+/**
+ * A terminal log is JSONL of PTY frames with base64 payloads, and the payload
+ * is a live TUI: the banner's "spacing" is cursor movement, not spaces. Reading
+ * the file as text finds neither the banner nor the MCP line even when both are
+ * plainly on screen — decode the frames and strip the escape sequences first.
+ */
+const readTerminalLog = (path) => {
+  if (!existsSync(path)) return "";
+  const text = readFileSync(path, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        const frame = JSON.parse(line);
+        return frame.data ? Buffer.from(frame.data, "base64").toString("utf8") : "";
+      } catch {
+        return line; // a plain-text log still reads fine
+      }
+    })
+    .join("");
+  return text.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r/g, "");
+};
+
+
 async function main() {
   const baseUrl = arg("base-url", process.env.ACOS_E2E_BASE_URL ?? "http://localhost:13000");
   console.log(`cli-session verify -> ${PROJECT} (${baseUrl})\n`);
@@ -138,31 +162,59 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
 
   // ---- 1. it RAN as a CLI --------------------------------------------------
   const logPath = join(DATA_DIR, "terminals", `${session.id}.log`);
-  const log = existsSync(logPath) ? readFileSync(logPath, "utf8") : "";
+  const log = readTerminalLog(logPath);
+  // Match across the cursor moves the TUI paints between letters: after
+  // stripping ANSI the banner reads "ClaudeCodev2.1.237", with no spaces left.
+  const banner = /Claude\s*Code\s*v\d+\.\d+/i.test(log);
+  const bypass = /bypass\s*permissions\s*on/i.test(log);
   if (!log) {
     record("FAIL", "the PTY carries a live CLI session", `no terminal log at ${logPath}`);
   } else {
-    const banner = /Claude Code v\d+\.\d+/.test(log);
-    const bypass = /bypass permissions on/i.test(log);
     record(
       banner ? "PASS" : "FAIL",
       "the PTY carries a live CLI session",
       banner
-        ? `banner present${bypass ? " + 'bypass permissions on'" : " (no bypass line — check settings.json)"}`
-        : "terminal log has no Claude Code banner — this is a shell, not a session",
+        ? `banner present${bypass ? " + 'bypass permissions on'" : " (no bypass line - check settings.json)"}`
+        : `terminal log has no Claude Code banner (${log.length} decoded chars) - this is a shell, not a session`,
     );
   }
 
   // ---- 2. it was OUR session: the MCP gateway was called from inside it ----
-  const calledMcp = /Called acos|mcp__acos/.test(log);
+  const calledMcp = /Called\s*acos|mcp__acos/i.test(log);
   record(
     calledMcp ? "PASS" : "FAIL",
     "the session reached the MCP tool-gateway",
     calledMcp ? "MCP call visible in the PTY stream" : "no MCP call in the terminal log",
   );
+  // The terminal session and the agent session are two different ids with no
+  // foreign key between them: /terminals gives the PTY id (right for the log
+  // file), while tool_invocations / llm_calls / agent_sessions are keyed by the
+  // AGENT session. Querying the DB with the PTY id silently matched zero rows
+  // and reported four claims as failures on a session that had visibly run -
+  // the worst failure mode a verifier has. The reliable join is the agent that
+  // opened the terminal, plus the second in which it opened it.
+  const agentSessionId = (() => {
+    if (!session.agentId || !hasColumn("agent_sessions", "agent_id")) return null;
+    const opened = session.createdAt ?? session.startedAt ?? null;
+    const window = opened
+      ? `and started_at <= timestamptz '${opened}' + interval '5 seconds'`
+      : "";
+    return (
+      sql(
+        `select id from agent_sessions where company_id::text = '${companyId}' and agent_id::text = '${session.agentId}' ${window} order by started_at desc limit 1`,
+      )[0] ?? null
+    );
+  })();
+  if (!agentSessionId) {
+    record("SKIP", "agent session resolved from the PTY", "no agent_sessions row for this terminal's agent");
+  } else {
+    record("PASS", "agent session resolved from the PTY", `terminal ${session.id.slice(0, 8)} -> agent session ${agentSessionId.slice(0, 8)}`);
+  }
 
   // ---- 3. it CLOSED its task through the gateway --------------------------
-  if (!hasColumn("tool_invocations", "id")) {
+  if (!agentSessionId) {
+    record("SKIP", "the turn closed its task via the gateway", "no agent session to scope the audit rows to");
+  } else if (!hasColumn("tool_invocations", "id")) {
     record("SKIP", "the turn closed its task via the gateway", "no tool_invocations table");
   } else {
     // Scoping the audit rows to THIS session takes one of three shapes
@@ -171,11 +223,11 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
     // identity and reach the agent session through Oscar's mcp_sessions row
     // (Kevin, T31 §3). Try them in order of directness.
     const scope = hasColumn("tool_invocations", "agent_session_id")
-      ? `agent_session_id::text = '${session.id}'`
+      ? `agent_session_id::text = '${agentSessionId}'`
       : hasColumn("tool_invocations", "session_id")
         ? `session_id::text = '${session.id}'`
         : hasColumn("tool_invocations", "mcp_session_id") && hasColumn("mcp_sessions", "agent_session_id")
-          ? `mcp_session_id in (select id from mcp_sessions where agent_session_id::text = '${session.id}')`
+          ? `mcp_session_id in (select id from mcp_sessions where agent_session_id::text = '${agentSessionId}')`
           : null;
     if (!scope) {
       record("SKIP", "the turn closed its task via the gateway", "no session column to join on");
@@ -185,12 +237,22 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
       );
       const names = rows.map((row) => row.split("|")[0]);
       const completed = names.some((name) => /complete_task/.test(name));
-      const builtins = names.filter((name) => /^(Bash|Read|Edit|Write|Glob|Grep|MultiEdit)$/.test(name));
+      // The hook posts the RAW builtin ({tool:"Bash"}), but the gateway
+      // TRANSLATES it server-side (T30 §9) before writing the row, so the audit
+      // trail carries ACOS verbs (terminal.run, fs.read) and never the CLI's
+      // own tool names. Matching on "Bash" therefore reported "the hook never
+      // fired" while its rows sat in the table. The marker the gateway stamps
+      // is what identifies them.
+      const builtins = hasColumn("tool_invocations", "result_summary")
+        ? sql(
+            `select tool_name, count(*) from tool_invocations where ${scope} and result_summary like '%executed by the CLI%' group by tool_name`,
+          ).map((row) => row.split("|")[0])
+        : [];
       record(
         completed ? "PASS" : "FAIL",
         "the turn closed its task via the gateway",
         completed
-          ? `complete_task audited (+${builtins.length} builtin row kind(s) from the PreToolUse hook)`
+          ? `complete_task audited (+${builtins.length} builtin-sourced row kind(s) from the PreToolUse hook)`
           : `no complete_task row for this session (saw: ${names.join(", ") || "nothing"})`,
       );
       // INV-3: every tool execution leaves an audit row. Builtins run INSIDE
@@ -198,24 +260,28 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
       record(
         builtins.length > 0 ? "PASS" : "FAIL",
         "INV-3 holds for CLI builtins (PreToolUse hook wired)",
-        builtins.length > 0 ? builtins.join(", ") : "no builtin audit rows — the hook never fired",
+        builtins.length > 0
+          ? `${builtins.join(", ")} (translated from CLI builtins, marker present)`
+          : "no row carries the gateway's builtin marker - the hook never fired",
       );
     }
   }
 
   // ---- 3b. the turn's model calls are tagged as CLI -----------------------
-  if (!hasColumn("llm_calls", "agent_session_id")) {
+  if (!agentSessionId) {
+    record("SKIP", "model calls are attributed to this session", "no agent session to scope the rows to");
+  } else if (!hasColumn("llm_calls", "agent_session_id")) {
     record("SKIP", "model calls are attributed to this session", "no llm_calls.agent_session_id");
   } else {
     // Kevin's activity writes one llm_calls row per broker request, tagged
     // runtime='cli'. Assert the tag too: rows without it mean the turn went
     // through the old API-call path even though the PTY looked right.
     const count = Number(
-      sql(`select count(*) from llm_calls where agent_session_id::text = '${session.id}'`)[0] ?? "0",
+      sql(`select count(*) from llm_calls where agent_session_id::text = '${agentSessionId}'`)[0] ?? "0",
     );
     const cliTagged = Number(
       sql(
-        `select count(*) from llm_calls where agent_session_id::text = '${session.id}' and context_telemetry->>'runtime' = 'cli'`,
+        `select count(*) from llm_calls where agent_session_id::text = '${agentSessionId}' and context_telemetry->>'runtime' = 'cli'`,
       )[0] ?? "0",
     );
     record(
@@ -233,7 +299,7 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
       record("SKIP", "session accounting matches the broker", "no agent_sessions.steps_count");
     } else {
       const steps = Number(
-        sql(`select steps_count from agent_sessions where id::text = '${session.id}'`)[0] ?? "-1",
+        sql(`select steps_count from agent_sessions where id::text = '${agentSessionId}'`)[0] ?? "-1",
       );
       record(
         steps === count ? "PASS" : "FAIL",
@@ -244,35 +310,49 @@ session ${session.id}${session.taskId ? ` (task ${session.taskId})` : " (no task
   }
 
   // ---- 4. it never held the key (INV-2 / S2) ------------------------------
-  // The subscription credential lives in exactly one process — the broker. The
+  // The subscription credential lives in exactly one process - the broker. The
   // container gets a revocable per-session token and nothing else. This is the
   // assert that must NEVER be softened.
-  const workspace = sh("docker", [
-    "ps",
-    "--filter",
-    "name=acos-ws-",
-    "--format",
-    "{{.Names}}",
-  ])
-    .split("\n")
-    .map((name) => name.trim())
-    .filter(Boolean)[0];
-  if (!workspace) {
-    record("SKIP", "no subscription credential inside the container", "no workspace container up");
+  //
+  // Two corrections learned from a real run: check the workspace THIS session
+  // ran in (container name = acos-ws-<workspaceId>) rather than whichever
+  // workspace container happened to be listed first, and read the container's
+  // Config.Env - the per-session token is injected into the exec env
+  // (docker exec -e), so it is absent from Config.Env BY DESIGN. Its absence
+  // there is the stronger property, not a finding.
+  const workspace = session.workspaceId ? `acos-ws-${session.workspaceId}` : null;
+  const configEnv = workspace
+    ? sh("docker", ["inspect", "--format", "{{json .Config.Env}}", workspace])
+    : "";
+  if (!workspace || !configEnv.trim()) {
+    record("SKIP", "no subscription credential inside the container (INV-2/S2)", workspace ? `${workspace} is gone (workspace torn down)` : "session carries no workspace id");
   } else {
-    const env = sh("docker", ["exec", workspace, "env"]);
     const leaked = [];
-    if (/sk-ant-/.test(env)) leaked.push("sk-ant- key material");
-    if (/^INTERNAL_API_TOKEN=/m.test(env)) leaked.push("INTERNAL_API_TOKEN");
-    if (/^CLAUDE_CODE_OAUTH_TOKEN=/m.test(env)) leaked.push("CLAUDE_CODE_OAUTH_TOKEN");
-    const brokered = /^ANTHROPIC_AUTH_TOKEN=acos-sess-/m.test(env);
+    if (/sk-ant-/.test(configEnv)) leaked.push("sk-ant- key material");
+    if (/"INTERNAL_API_TOKEN=/.test(configEnv)) leaked.push("INTERNAL_API_TOKEN");
+    if (/"CLAUDE_CODE_OAUTH_TOKEN=/.test(configEnv)) leaked.push("CLAUDE_CODE_OAUTH_TOKEN");
     record(
       leaked.length === 0 ? "PASS" : "FAIL",
       "no subscription credential inside the container (INV-2/S2)",
       leaked.length === 0
-        ? `${workspace} carries only a brokered token${brokered ? " (acos-sess-*)" : " — but ANTHROPIC_AUTH_TOKEN is not an acos-sess-* token"}`
+        ? `${workspace} Config.Env carries no key material`
         : `LEAKED: ${leaked.join(", ")} in ${workspace}`,
     );
+    // Live-only, best effort: while a session is running its exec env should
+    // carry a brokered acos-sess-* token. A stopped container proves nothing
+    // either way, so report it as such instead of failing the run.
+    const execToken = sh("docker", ["exec", workspace, "sh", "-c", "echo $ANTHROPIC_AUTH_TOKEN"]).trim();
+    if (execToken) {
+      record(
+        execToken.startsWith("acos-sess-") ? "PASS" : "FAIL",
+        "the live session runs on a brokered token",
+        execToken.startsWith("acos-sess-")
+          ? "ANTHROPIC_AUTH_TOKEN is an acos-sess-* token"
+          : "ANTHROPIC_AUTH_TOKEN is set but is NOT an acos-sess-* token",
+      );
+    } else {
+      record("SKIP", "the live session runs on a brokered token", "no live exec env (session already ended)");
+    }
   }
 
   const failed = results.filter((result) => result.verdict === "FAIL");
