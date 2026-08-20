@@ -109,13 +109,13 @@ describe("CLI session ledger (E4/T31 K1)", { timeout: 300_000 }, () => {
       .returning();
     taskId = task!.id;
     await db.insert(agentSessions).values({ id: sessionId, companyId, agentId, taskId, workflowId: "wf-1", runId: "run-1", status: "running", currentActivity: "WORKING" });
-  });
+  }, 300_000);
 
   afterAll(async () => {
     await new Promise<void>((r) => fakeSandbox?.close(() => r()));
     await pool?.end();
     await pgContainer?.stop();
-  });
+  }, 300_000);
 
   it("writes session-level llm_calls (creating the claude-cli provider row), idempotently, and rolls totals into agent_sessions", async () => {
     const activities = createCliSessionActivities({
