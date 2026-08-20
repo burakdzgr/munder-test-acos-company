@@ -19,6 +19,9 @@
 //        sonra hedefi vermeli.
 //   ... --goal-409-once → proje READY görünse de ilk /goal 409 döner (durum
 //        okuma ile POST arasındaki yarış): sihirbaz sessizce yeniden denemeli.
+//   ... --select-proof → T27: ŞİRKET/PROJE seçicilerinin <option> renkleri
+//        ölçülür (koyu zemin + açık metin, kontrast oranı) ve seçenek listesi
+//        sayfa içinde (size) görüntülenip ekran görüntüsü alınır.
 //   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
 //        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
 //   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
@@ -28,6 +31,9 @@ import { chromium } from "@playwright/test";
 const SHOTS = process.argv[2] ?? ".";
 const ENDPOINTS = !process.argv.includes("--no-endpoints");
 const INDEXING = process.argv.includes("--indexing");
+// T27: aciilr liste okunabilirligi (yerel popup ekran goruntusune girmez;
+// bu yuzden hesaplanmis renkler + sayfa ici liste kutusu goruntusu)
+const SELECT_PROOF = process.argv.includes("--select-proof");
 // yarış durumu: proje READY görünüyor ama ilk /goal yine de 409 yiyor
 const GOAL_409_ONCE = process.argv.includes("--goal-409-once");
 const STATE_MODE = process.argv.includes("--draft-then-ready")
@@ -335,6 +341,62 @@ check(
   "ofis paneli canlı (odak kümesi seçili projeye bağlı)",
   (await page.locator('[data-testid="office-canvas"]').count()) > 0,
 );
+
+if (SELECT_PROOF) {
+  const lum = (rgb) => {
+    const [r, g, b] = rgb.match(/\d+(\.\d+)?/g).slice(0, 3).map(Number);
+    const f = (v) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  };
+  const contrast = (a, b) => {
+    const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m);
+    return (x + 0.05) / (y + 0.05);
+  };
+  for (const label of ["Şirket", "Proje"]) {
+    const styles = await page.$$eval(
+      `select[aria-label="${label}"] option`,
+      (nodes) =>
+        nodes.map((n) => {
+          const cs = getComputedStyle(n);
+          return { text: n.textContent, bg: cs.backgroundColor, fg: cs.color };
+        }),
+    );
+    const ratios = styles.map((st) => ({ ...st, ratio: contrast(st.bg, st.fg) }));
+    const worst = ratios.reduce((a, b) => (a.ratio < b.ratio ? a : b));
+    check(
+      `${label} seçeneklerinin zemini KOYU (beyaz değil)`,
+      styles.every((st) => lum(st.bg) < 0.1),
+      styles.map((st) => st.bg).join(" · "),
+    );
+    check(
+      `${label} seçenekleri okunabilir (en kötü kontrast ≥ 4.5:1)`,
+      worst.ratio >= 4.5,
+      `${worst.text}: ${worst.fg} / ${worst.bg} = ${worst.ratio.toFixed(2)}:1`,
+    );
+  }
+  // Yerel açılır pencere ekran görüntüsüne girmez; AYNI CSS ile çizilen
+  // sayfa içi liste kutusu görünümünü (size) çekiyoruz.
+  await page.evaluate(() => {
+    for (const label of ["Şirket", "Proje"]) {
+      const el = document.querySelector(`select[aria-label="${label}"]`);
+      if (el) {
+        el.setAttribute("size", String(Math.max(2, el.options.length)));
+        el.style.position = "relative";
+        el.style.zIndex = "999";
+      }
+    }
+  });
+  await page.waitForTimeout(400);
+  // seçicilerin çevresine kırp: satırlar okunacak kadar büyük görünsün
+  await page.screenshot({ path: `${SHOTS}/t27-acik-liste.png`, clip: { x: 0, y: 0, width: 620, height: 120 } });
+  check("açık seçenek listesi ekran görüntüsüne alındı", true, "t27-acik-liste.png");
+  console.log(results.join(String.fromCharCode(10)));
+  await browser.close();
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
+}
 
 // --- W6 ---
 await page.getByTestId("project-create-open").click();

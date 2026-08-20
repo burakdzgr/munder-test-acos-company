@@ -293,7 +293,7 @@ function ProjectBar({ companyId }: { companyId: string }) {
           aria-label="Proje"
           value={selectedProjectId ?? ""}
           onChange={(e) => setSelectedProject(e.target.value || null)}
-          className="max-w-44 rounded-md border-0 bg-transparent px-1 py-0.5 text-[11.5px] font-semibold text-acos-fg0 focus:outline-none"
+          className="max-w-44 rounded-md border-0 bg-acos-bg2 px-1 py-0.5 text-[11.5px] font-semibold text-acos-fg0 focus:outline-none"
         >
           <option value="">Tüm şirket</option>
           {projectItems.map((project) => (
@@ -465,7 +465,7 @@ export function AppShell() {
             onChange={(e) =>
               void navigate({ to: "/c/$companyId", params: { companyId: e.target.value } })
             }
-            className="max-w-40 rounded-md border-0 bg-transparent px-1 py-0.5 text-[11.5px] font-semibold text-acos-fg0 focus:outline-none"
+            className="max-w-40 rounded-md border-0 bg-acos-bg2 px-1 py-0.5 text-[11.5px] font-semibold text-acos-fg0 focus:outline-none"
           >
             {companies.data?.map((company) => (
               <option key={company.id} value={company.id}>
