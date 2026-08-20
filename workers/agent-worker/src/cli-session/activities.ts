@@ -87,6 +87,19 @@ export function createCliSessionActivities(deps: CliSessionActivityDeps) {
   const log = deps.log ?? ((msg, meta) => console.log(JSON.stringify({ msg, ...meta })));
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+  /** The provider row CLI-session llm_calls attribute to (global row; idempotent). */
+  async function ensureCliProvider(): Promise<{ id: string }> {
+    const [byName] = await guardedDb.select({ id: modelProviders.id }).from(modelProviders).where(eq(modelProviders.name, "claude-cli")).limit(1);
+    if (byName) return byName;
+    const [anthropic] = await guardedDb.select({ id: modelProviders.id }).from(modelProviders).where(eq(modelProviders.kind, "anthropic")).limit(1);
+    if (anthropic) return anthropic;
+    await guardedDb.insert(modelProviders).values({ kind: "anthropic", name: "claude-cli", enabled: true }).onConflictDoNothing();
+    const [created] = await guardedDb.select({ id: modelProviders.id }).from(modelProviders).where(eq(modelProviders.name, "claude-cli")).limit(1);
+    if (!created) throw new Error("cli session: could not ensure the claude-cli model_providers row");
+    log("cli session: created model_providers row claude-cli (anthropic) for session-level llm_calls", { providerId: created.id });
+    return created;
+  }
+
   const rt = (ref: CliSessionRef, payload: Record<string, unknown>) =>
     deps.runtimeEvents?.emit(ref.companyId, {
       type: "agent.status",
@@ -229,19 +242,16 @@ export function createCliSessionActivities(deps: CliSessionActivityDeps) {
         let tokensOut = 0;
         const requests = result.usage?.requests ?? [];
         if (requests.length > 0) {
-          const [provider] =
-            (await guardedDb.select({ id: modelProviders.id }).from(modelProviders).where(eq(modelProviders.name, "claude-cli")).limit(1)).length > 0
-              ? await guardedDb.select({ id: modelProviders.id }).from(modelProviders).where(eq(modelProviders.name, "claude-cli")).limit(1)
-              : await guardedDb.select({ id: modelProviders.id }).from(modelProviders).where(eq(modelProviders.kind, "anthropic")).limit(1);
-          if (!provider) {
-            log("cli session: no claude-cli/anthropic model_providers row — usage not persisted to llm_calls", { sessionId: ref.sessionId });
-          }
+          // llm_calls.provider_id is NOT NULL: the CLI session's spend is attributed
+          // to the `claude-cli` provider row, created once if the stack never seeded
+          // it (live finding 2026-08-21: the scripted e2e stack has only the
+          // `scripted` provider, so session-level rows were silently skipped).
+          const provider = await ensureCliProvider();
           for (const r of requests) {
             const tin = (r.usage?.inputTokens ?? 0) + (r.usage?.cacheCreationInputTokens ?? 0);
             const tout = r.usage?.outputTokens ?? 0;
             tokensIn += tin;
             tokensOut += tout;
-            if (!provider) continue;
             await guardedDb
               .insert(llmCalls)
               .values({
