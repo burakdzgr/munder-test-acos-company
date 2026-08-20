@@ -288,48 +288,92 @@ async function main() {
 
   await stage("05-ceo-analyze-requirements", "CEO turns the goal into requirements + a task tree", async () => {
     if (!state.projectId) return SKIP("no project");
+    // FAZ 2A changed the shape of this waypoint: planning now PARKS on an
+    // editable staffing proposal (`awaiting_human`) and the project sits at
+    // `waiting_for_founder` until a human confirms it. The old runner waited
+    // for a task tree that could never appear and burned the whole stage
+    // budget — a harness gap, not a product break. The Founder action this
+    // gate performs is the confirm, exactly as the wizard's user would.
     const seen = await until(async () => {
       const tasks = await get(`/api/v1/companies/${state.companyId}/tasks?projectId=${state.projectId}`);
       const items = list(tasks.body);
-      return items.length > 0 ? items : null;
+      if (items.length > 0) return items;
+      const proposal = await get(
+        `/api/v1/companies/${state.companyId}/projects/${state.projectId}/staffing-proposal`,
+      );
+      if (proposal.status === 200 && proposal.body?.status === "awaiting_human" && !state.proposalConfirmed) {
+        const before = await get(`/api/v1/companies/${state.companyId}/agents`);
+        state.agentsBeforeStaffing = (list(before.body)).length;
+        const confirmed = await post(
+          `/api/v1/companies/${state.companyId}/staffing-proposals/${proposal.body.id}/confirm`,
+          { version: proposal.body.version },
+        );
+        state.proposalConfirmed = confirmed.status < 400;
+        state.proposalResumed = confirmed.body?.resumed ?? null;
+        state.proposalTeams = (proposal.body.teams ?? []).length;
+      }
+      return null;
     }, T.long, 3000);
     if (!seen) {
       const overview = await get(`/api/v1/companies/${state.companyId}/projects/${state.projectId}/overview`);
       return BREAK(`no tasks after ${T.long / 1000}s (project=${overview.body?.status ?? "?"}) - CEO decomposition never landed`, "worker:ceo planning");
     }
     state.taskCount1 = seen.length;
-    return PASS(`${seen.length} task(s), kinds=${[...new Set(seen.map((t) => t.kind))].join(",")}`);
+    const via = state.proposalConfirmed
+      ? ` (Founder confirmed a ${state.proposalTeams}-team staffing proposal, resumed=${state.proposalResumed})`
+      : "";
+    return PASS(`${seen.length} task(s), kinds=${[...new Set(seen.map((t) => t.kind))].join(",")}${via}`);
   });
 
-  await stage("06-staffing-approval-requested", "missing staff becomes ONE batched Founder approval", async () => {
+  await stage("06-staffing-approval-requested", "missing staff becomes ONE batched Founder decision", async () => {
     if (!state.companyId) return SKIP("no company");
-    const approval = await until(async () => {
+    // Two shapes satisfy the invariant this stage protects: "one batched human
+    // decision, never N separate hires". Before FAZ 2A that decision was a
+    // pending approval row. FAZ 2A moved it EARLIER, into the editable staffing
+    // proposal the Founder confirms in stage 05 - and T25 asserts the approvals
+    // table stays completely EMPTY afterwards. So demanding an approval row here
+    // now contradicts a proven assert. Accept either, and name which one ran.
+    const decision = await until(async () => {
       const pending = await get(`/api/v1/companies/${state.companyId}/approvals?status=pending`);
-      const items = list(pending.body);
-      return items.find((a) => /staff|hire|team|kadro|ekip|org/i.test(`${a.kind} ${a.title}`)) ?? null;
+      const approval = (list(pending.body)).find((a) => /staff|hire|team|kadro|ekip|org/i.test(`${a.kind} ${a.title}`));
+      if (approval) return { via: "approval", approval };
+      const proposal = await get(
+        `/api/v1/companies/${state.companyId}/projects/${state.projectId}/staffing-proposal`,
+      );
+      if (proposal.status === 200 && ["confirmed", "applied"].includes(proposal.body?.status)) {
+        return { via: "proposal", proposal: proposal.body };
+      }
+      return null;
     }, T.medium, 3000);
-    if (!approval) {
+    if (!decision) {
       const project = await get(`/api/v1/companies/${state.companyId}/projects/${state.projectId}`);
       const pending = await get(`/api/v1/companies/${state.companyId}/approvals?status=pending`);
-      return BREAK(`no staffing approval after ${T.medium / 1000}s (project=${project.body?.status}, pending=${(list(pending.body)).length}) - gap analysis raised none`, "worker:staffing gap analysis");
+      return BREAK(`no staffing decision after ${T.medium / 1000}s (project=${project.body?.status}, pending=${(list(pending.body)).length}) - neither a batched approval nor a confirmed staffing proposal`, "worker:staffing gap analysis");
     }
-    state.approvalId = approval.id;
-    return PASS(`approval ${approval.kind} "${approval.title}"`);
+    if (decision.via === "approval") {
+      state.approvalId = decision.approval.id;
+      return PASS(`approval ${decision.approval.kind} "${decision.approval.title}"`);
+    }
+    state.staffedViaProposal = true;
+    return PASS(`staffing proposal ${decision.proposal.status} - ONE Founder decision, zero pending hire approvals (FAZ 2A path)`);
   });
 
-  await stage("07-agent-factory-staffing", "approval -> Agent Factory wires team+position+agent+bindings", async () => {
-    if (!state.approvalId) return SKIP("no staffing approval to approve");
-    const before = await get(`/api/v1/companies/${state.companyId}/agents`);
-    const beforeCount = (list(before.body)).length;
-    const verdict = await post(`/api/v1/companies/${state.companyId}/approvals/${state.approvalId}/verdict`, { verdict: "approved" });
-    if (!verdict.ok) return BREAK(`POST /verdict -> ${verdict.status} ${brief(verdict.body)}`, "server:approvals");
+  await stage("07-agent-factory-staffing", "the Founder decision wires team+position+agent+bindings", async () => {
+    if (!state.approvalId && !state.staffedViaProposal) return SKIP("no staffing decision to act on");
+    let beforeCount = state.agentsBeforeStaffing ?? 1;
+    if (state.approvalId) {
+      const before = await get(`/api/v1/companies/${state.companyId}/agents`);
+      beforeCount = (list(before.body)).length;
+      const verdict = await post(`/api/v1/companies/${state.companyId}/approvals/${state.approvalId}/verdict`, { verdict: "approved" });
+      if (!verdict.ok) return BREAK(`POST /verdict -> ${verdict.status} ${brief(verdict.body)}`, "server:approvals");
+    }
     const grown = await until(async () => {
       const after = await get(`/api/v1/companies/${state.companyId}/agents`);
       const items = list(after.body);
       return items.length > beforeCount ? items : null;
     }, T.medium, 3000);
-    if (!grown) return BREAK(`approved but headcount stayed ${beforeCount} after ${T.medium / 1000}s - Agent Factory not triggered by the verdict`, "worker:agent factory");
-    return PASS(`headcount ${beforeCount} -> ${grown.length}`);
+    if (!grown) return BREAK(`the Founder decision left headcount at ${beforeCount} after ${T.medium / 1000}s - Agent Factory not triggered`, "worker:agent factory");
+    return PASS(`headcount ${beforeCount} -> ${grown.length}${state.staffedViaProposal ? " (applied from the confirmed proposal)" : ""}`);
   });
 
   await stage("08-scheduler-dispatch", "Scheduler assigns a task to a capable agent", async () => {
