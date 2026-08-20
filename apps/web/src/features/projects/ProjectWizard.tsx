@@ -9,6 +9,12 @@
 //   2. POST /projects/:id/goal  → Founder hedefi; CEO (LLM) kadroyu önerir
 //   3. GET  .../staffing-proposal → status 'awaiting_human' olana kadar beklenir;
 //      planlama iş akışı bu noktada Temporal sinyalinde DURUYOR
+//      Uç DÖRT durum ayırır (Oscar, 2026-08-20 teyidi):
+//        404            → böyle bir proje/uç yok    → yerel taslak
+//        200 draft      → CEO ÇALIŞIYOR, teams:[]   → BEKLEMEYE DEVAM
+//        200 awaiting_human → öneri hazır           → düzenleme ekranı
+//        200 cancelled  → önerilecek kadro çıkmadı; planlama deterministik
+//                         yoldan zaten sürüyor      → sihirbaz burada BİTER
 //   4. PATCH .../staffing-proposals/:id → kullanıcının düzenlediği TAM liste
 //   5. POST  .../confirm        → iş akışı devam eder, applyPlan takımları kurar
 //
@@ -33,7 +39,7 @@ import {
   type StaffingProposal,
 } from "./staffingProposal.js";
 
-type Step = "brief" | "thinking" | "proposal" | "done";
+type Step = "brief" | "thinking" | "proposal" | "done" | "noproposal";
 
 /** CEO önerisi için bekleme: sözleşmede status 'awaiting_human' olduğunda hazır. */
 const POLL_MS = 2000;
@@ -57,6 +63,7 @@ export function ProjectWizard({
   const [proposal, setProposal] = useState<StaffingProposal | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newTeamName, setNewTeamName] = useState("");
+  const [noProposal, setNoProposal] = useState<"cancelled" | "applied" | null>(null);
   const cancelled = useRef(false);
   // kullanıcı beklemeyi kesip taslakla devam edebilir (uç yoksa ya da
   // CEO adımı uzarsa ekranda çakılı kalmasın)
@@ -73,6 +80,7 @@ export function ProjectWizard({
       setProposal(null);
       setError(null);
       setNewTeamName("");
+      setNoProposal(null);
     } else {
       cancelled.current = false;
     }
@@ -96,13 +104,20 @@ export function ProjectWizard({
       for (;;) {
         if (cancelled.current) throw new Error("iptal");
         const server = await fetchProposal(companyId, project.id);
-        if (server && (server.status === "awaiting_human" || server.status === "draft")) {
+        if (server?.status === "awaiting_human") {
           return { projectId: project.id, proposal: server };
         }
-        if (server && (server.status === "applied" || server.status === "confirmed")) {
+        if (server?.status === "cancelled") {
+          // önerilecek kadro çıkmadı; planlama deterministik yoldan sürüyor.
+          // HATA DEĞİL — burada sihirbazı bitiriyoruz, taslak uydurmuyoruz.
+          return { projectId: project.id, proposal: null, reason: "cancelled" as const };
+        }
+        if (server?.status === "applied" || server?.status === "confirmed") {
           // öneri zaten uygulanmış (insan beklemeyen kurulum) — düzenlenecek bir şey yok
-          return { projectId: project.id, proposal: server };
+          return { projectId: project.id, proposal: null, reason: "applied" as const };
         }
+        // status 'draft' = CEO HÂLÂ ÇALIŞIYOR (satır baştan açılıyor, teams boş).
+        // Hazır sanıp boş listeyle düzenleme ekranına geçmemek için bekleriz.
         if (skipWait.current || Date.now() > deadline) break;
         await new Promise((resolve) => setTimeout(resolve, POLL_MS));
       }
@@ -112,7 +127,14 @@ export function ProjectWizard({
         proposal: localDraftProposal(project.id, name, requirements),
       };
     },
-    onSuccess: ({ proposal: next }) => {
+    onSuccess: ({ projectId: id, proposal: next, reason }) => {
+      if (!next) {
+        setNoProposal(reason ?? "cancelled");
+        setSelectedProject(id);
+        setStep("noproposal");
+        void queryClient.invalidateQueries({ queryKey: [companyId, "tasks", "list"] });
+        return;
+      }
       setProposal(next);
       setStep("proposal");
     },
@@ -402,6 +424,25 @@ export function ProjectWizard({
               </Button>
             </div>
           </>
+        )}
+
+        {step === "noproposal" && (
+          <div
+            className="rounded-md border border-acos-line bg-acos-bg2 p-3 text-xs text-acos-fg1"
+            data-testid="project-wizard-noproposal"
+          >
+            <p className="font-medium text-acos-fg0">{name} açıldı.</p>
+            <p className="mt-1 text-acos-fg2">
+              {noProposal === "applied"
+                ? "Kadro onay beklemeden kuruldu; düzenlenecek bir öneri kalmadı. Proje seçicide bu proje seçili."
+                : "Bu hedef için ayrı bir kadro önerisi çıkmadı — planlama olağan yoldan sürüyor ve iş mevcut ekiplere dağıtılıyor. Proje seçicide bu proje seçili."}
+            </p>
+            <div className="mt-3">
+              <Button onClick={onClose} data-testid="project-wizard-close">
+                Kapat
+              </Button>
+            </div>
+          </div>
         )}
 
         {step === "done" && (

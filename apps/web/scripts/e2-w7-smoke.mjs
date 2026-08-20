@@ -7,10 +7,21 @@
 //        gerçek sözleşme yolu doğrulanır.
 //   node apps/web/scripts/e2-w7-smoke.mjs <shotDir> --no-endpoints → uçlar
 //        henüz inmemişken: türetilmiş takımlar + yerel taslak öneri yolu.
+//   ... --draft-then-ready → GET önce 200 'draft' (CEO çalışıyor, teams:[])
+//        döner: sihirbaz BEKLEMELİ, boş listeyle düzenlemeye atlamamalı.
+//   ... --cancelled → GET 200 'cancelled': önerilecek kadro yok, planlama
+//        deterministik sürüyor; sihirbaz temiz biter, sahte taslak üretmez.
+//   (Üç durum da Oscar'ın 2026-08-20 teyidinden: 404 / draft / awaiting_human
+//    / cancelled ayrımı.)
 import { chromium } from "@playwright/test";
 
 const SHOTS = process.argv[2] ?? ".";
 const ENDPOINTS = !process.argv.includes("--no-endpoints");
+const STATE_MODE = process.argv.includes("--draft-then-ready")
+  ? "draft"
+  : process.argv.includes("--cancelled")
+    ? "cancelled"
+    : "none";
 const CID = "11111111-1111-4111-8111-111111111111";
 const P1 = "22222222-2222-4222-8222-222222222222";
 const P2 = "33333333-3333-4333-8333-333333333333";
@@ -26,6 +37,7 @@ const json = (route, body) =>
   route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 const notFound = (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" });
 const posts = [];
+
 
 const project = (id, name, slug, status) => ({
   id,
@@ -93,6 +105,15 @@ const projectTeams = () => ({
 });
 
 let proposal = null;
+let proposalGets = 0;
+/** satır baştan açılır ama CEO henüz düşünüyor: teams BOŞ. */
+const draftRow = () => ({
+  ...mkProposal(),
+  status: "draft",
+  version: 0,
+  teams: [],
+  rationaleMd: "",
+});
 const mkProposal = () => ({
   id: PROPOSAL,
   projectId: NEW_P,
@@ -126,6 +147,11 @@ await page.route("**/api/v1/**", async (route) => {
   if (p.endsWith("/project-teams")) return ENDPOINTS ? json(route, projectTeams()) : notFound(route);
   if (p.endsWith("/staffing-proposal")) {
     if (!ENDPOINTS) return notFound(route);
+    proposalGets += 1;
+    // 'draft' iki tur sürer, sonra öneri hazırlanır (canlı sağlayıcıdaki
+    // iki LLM turunun taklidi).
+    if (STATE_MODE === "draft" && proposalGets <= 2) return json(route, draftRow());
+    if (STATE_MODE === "draft") proposal = mkProposal();
     return proposal ? json(route, proposal) : notFound(route);
   }
   if (p.includes("/staffing-proposals/")) {
@@ -165,7 +191,14 @@ await page.route("**/api/v1/**", async (route) => {
   }
   if (method === "POST" && p.endsWith("/goal")) {
     // hedef = CEO'nun öneri adımını tetikler (W4)
-    if (ENDPOINTS) proposal = mkProposal();
+    if (ENDPOINTS) {
+      proposal =
+        STATE_MODE === "draft"
+          ? draftRow()
+          : STATE_MODE === "cancelled"
+            ? { ...mkProposal(), status: "cancelled", teams: [], rationaleMd: "" }
+            : mkProposal();
+    }
     return json(route, { started: true, state: "planning" });
   }
   if (p === "/api/v1/auth/me")
@@ -273,6 +306,41 @@ await page.getByTestId("project-wizard-next").click();
 if (!ENDPOINTS) {
   // uç yokken CEO adımı hiç gelmez: kullanıcı beklemeyi kesip taslakla devam eder
   await page.getByTestId("proposal-skip-wait").click({ timeout: 20_000 });
+}
+if (STATE_MODE === "draft") {
+  await page.getByTestId("project-wizard-thinking").waitFor({ timeout: 10_000 });
+  await page.waitForTimeout(2600); // ilk 'draft' turu geçsin
+  const jumped = await page
+    .getByTestId("proposal-teams")
+    .isVisible()
+    .catch(() => false);
+  check(
+    "'draft' = CEO çalışıyor sayıldı — BOŞ listeyle düzenleme ekranına atlamadı",
+    !jumped && (await page.getByTestId("project-wizard-thinking").isVisible()),
+  );
+  await page.screenshot({ path: `${SHOTS}/w6-01b-draft-bekliyor.png` });
+}
+if (STATE_MODE === "cancelled") {
+  await page.getByTestId("project-wizard-noproposal").waitFor({ timeout: 25_000 });
+  check("'cancelled' → sihirbaz temiz bitti (spinner'da asılı kalmadı)", true);
+  check(
+    "'cancelled' → düzenleme ekranı hiç açılmadı, uydurma taslak yok",
+    (await page.getByTestId("proposal-teams").count()) === 0,
+  );
+  check(
+    "'cancelled' hata gibi gösterilmedi",
+    (await page.getByTestId("project-wizard-error").count()) === 0,
+  );
+  await page.screenshot({ path: `${SHOTS}/w6-02c-oneri-yok.png` });
+  await page.getByTestId("project-wizard-close").click();
+  await page.waitForTimeout(800);
+  check(
+    "yeni proje yine de seçildi (iş başladı)",
+    (await page.inputValue('select[aria-label="Proje"]')) === NEW_P,
+  );
+  console.log(results.join(String.fromCharCode(10)));
+  await browser.close();
+  process.exit(results.some((r) => r.startsWith("FAIL")) ? 1 : 0);
 }
 await page.getByTestId("proposal-teams").waitFor({ timeout: 40_000 });
 const teamsText = (await page.getByTestId("proposal-teams").textContent()) ?? "";
