@@ -63,6 +63,12 @@ function makeCrashingStub() {
     sessionClosed: [] as string[],
   };
   const activities = {
+    // E4/T31: the workflow asks the runtime first (patched "t31-cli-runtime");
+    // this stub models the full Worker surface, so it answers "steps" like the
+    // base set does — otherwise "not registered" masks the crash under test.
+    async resolveAgentRuntimeActivity() {
+      return { kind: "steps" as const, reason: "stub" };
+    },
     async startAgentSessionActivity() {},
     async getGuardSnapshotActivity() {
       return {
