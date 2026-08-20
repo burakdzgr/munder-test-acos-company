@@ -218,10 +218,14 @@ export class SessionRegistry {
     return [...this.bySession.keys()].map((id) => this.summary(id)!).filter(Boolean);
   }
 
-  liveCount(): number {
+  liveCount(companyId?: string): number {
     const now = this.nowMs();
     let n = 0;
-    for (const s of this.bySession.values()) if (s.revokedAt === null && now < s.expiresAt) n++;
+    for (const s of this.bySession.values()) {
+      if (s.revokedAt !== null || now >= s.expiresAt) continue;
+      if (companyId !== undefined && s.companyId !== companyId) continue;
+      n++;
+    }
     return n;
   }
 }

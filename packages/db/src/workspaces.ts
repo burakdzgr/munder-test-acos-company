@@ -102,6 +102,22 @@ export interface ProvisionInput {
    *  ISOLATION_LIMITS[level]; enforcement lives in sandbox-manager (S8). */
   limits?: Record<string, unknown> | undefined;
   actor?: EventActor | undefined;
+  /**
+   * E4/T31 (ADR-022 §2): `worktree` (default) = the coding workspace with the
+   * task branch checked out at /work. `session` = the LIGHT session workspace
+   * for planning agents (CEO/lead): same hardened container + egress, NO repo
+   * and NO worktree — so they get a PTY for their live CLI session too. Kinds
+   * never mix: a task may hold one live workspace of each kind, and a
+   * worktree lookup never returns a session workspace (or vice versa).
+   */
+  kind?: "worktree" | "session" | undefined;
+}
+
+/** Session workspaces are tagged in the limits snapshot (no schema change). */
+export const SESSION_WORKSPACE_TAG = { kind: "session" } as const;
+export function isSessionWorkspace(row: { limits: unknown }): boolean {
+  const l = row.limits;
+  return typeof l === "object" && l !== null && (l as { kind?: unknown }).kind === "session";
 }
 
 export interface ProvisionResult {
@@ -184,6 +200,7 @@ export class WorkspaceService {
   ): Promise<ProvisionResult> {
     const actor = input.actor ?? SYSTEM_ACTOR;
     const level: IsolationLevel = input.isolationLevel ?? "coding";
+    const kind = input.kind ?? "worktree";
     if (!(ISOLATION_LEVELS as readonly string[]).includes(level)) {
       throw new WorkspaceError("WORKSPACE_TASK_INVALID", `unknown isolation level "${level}"`);
     }
@@ -230,6 +247,10 @@ export class WorkspaceService {
           eq(workspaces.taskId, input.taskId),
           ...(onLadder < 0 ? [eq(workspaces.isolationLevel, level)] : []),
           notInArray(workspaces.status, ["merged", "discarded", "failed", "destroyed"]),
+          // kinds never mix (E4/T31): worktree lookups skip session workspaces and vice versa
+          kind === "session"
+            ? sql`${workspaces.limits}->>'kind' = 'session'`
+            : sql`coalesce(${workspaces.limits}->>'kind', '') <> 'session'`,
         ),
       )
       // deterministic: the task's first live workspace, never an arbitrary row
@@ -247,37 +268,42 @@ export class WorkspaceService {
       return { workspace: escalated, baseCommit: null, created: false };
     }
 
-    const branch = taskBranchName(task.number, task.title);
-    const volumeName = worktreeVolumeName(task.number, task.id);
+    const branch = kind === "session" ? null : taskBranchName(task.number, task.title);
+    const volumeName = kind === "session" ? "" : worktreeVolumeName(task.number, task.id);
     const image = input.image ?? DEFAULT_IMAGE;
 
     const inserted = await this.db.transaction(async (tx) => {
-      const repo = await this.ensureRepositoryInTx(tx, ctx, projectId);
+      const repo = kind === "session" ? null : await this.ensureRepositoryInTx(tx, ctx, projectId);
       const [row] = await tx
         .insert(workspaces)
         .values({
           companyId: ctx.companyId,
           projectId,
           taskId: task.id,
-          repositoryId: repo.id,
+          repositoryId: repo?.id ?? null,
           agentId: input.agentId ?? task.ownerAgentId,
           isolationLevel: level,
           image,
           branch,
-          volumePath: volumeName,
+          volumePath: volumeName || null,
           status: "provisioning",
-          limits: input.limits ?? {},
+          limits: kind === "session" ? { ...(input.limits ?? {}), ...SESSION_WORKSPACE_TAG } : (input.limits ?? {}),
         })
         .returning();
       return row!;
     });
 
-    let baseCommit: string;
+    let baseCommit: string | null;
     let containerId: string;
     try {
-      await port.ensureRepo(projectId);
-      const worktree = await port.provisionWorktree({ projectId, volumeName, branch });
-      baseCommit = worktree.baseCommit;
+      if (kind === "session") {
+        // light session workspace: hardened container, no repo, no worktree
+        baseCommit = null;
+      } else {
+        await port.ensureRepo(projectId);
+        const worktree = await port.provisionWorktree({ projectId, volumeName, branch: branch! });
+        baseCommit = worktree.baseCommit;
+      }
       const container = await port.createContainer({
         workspaceId: inserted.id,
         isolation: level,

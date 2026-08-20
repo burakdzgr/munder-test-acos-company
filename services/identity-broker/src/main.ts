@@ -9,6 +9,7 @@
 //   ACOS_BROKER_SECRET          REQUIRED, ≥16 chars — control-plane bearer (mint/revoke/usage)
 //   ANTHROPIC_UPSTREAM_URL      default https://api.anthropic.com
 //   BROKER_MAX_LIVE_SESSIONS    default 12 (global safety valve; the company cap is the Scheduler's)
+//   BROKER_MAX_LIVE_SESSIONS_PER_COMPANY  default 4 — identity-boundary backstop of the company cap
 //   BROKER_REAP_GRACE_MS        default 600000 — ended sessions are forgotten after this
 //   credential: CLAUDE_CODE_OAUTH_TOKEN | ANTHROPIC_API_KEY | CLAUDE_CREDENTIALS_FILE (see credentials.ts)
 import { createBrokerServer } from "./broker.js";
@@ -31,6 +32,7 @@ function main(): void {
   const upstream = new URL(process.env.ANTHROPIC_UPSTREAM_URL ?? "https://api.anthropic.com");
   const publicBaseUrl = process.env.IDENTITY_BROKER_PUBLIC_URL ?? `http://host.docker.internal:${port}`;
   const maxLiveSessions = Number(process.env.BROKER_MAX_LIVE_SESSIONS ?? 12);
+  const maxLiveSessionsPerCompany = Number(process.env.BROKER_MAX_LIVE_SESSIONS_PER_COMPANY ?? 4);
   const reapGraceMs = Number(process.env.BROKER_REAP_GRACE_MS ?? 10 * 60 * 1000);
   const log = (msg: string, meta?: Record<string, unknown>) => console.log(JSON.stringify({ msg, ...meta }));
 
@@ -60,6 +62,7 @@ function main(): void {
     credential: () => resolveUpstreamCredential(env),
     publicBaseUrl,
     maxLiveSessions,
+    maxLiveSessionsPerCompany,
     log,
   });
   const reaper = setInterval(() => {

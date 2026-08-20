@@ -34,6 +34,9 @@ export interface BrokerDeps {
   readonly publicBaseUrl: string;
   /** Global safety valve on live sessions (NOT the company cap — that is the Scheduler's). */
   readonly maxLiveSessions?: number;
+  /** Per-company ceiling on live sessions — the identity-boundary backstop of
+   *  the Scheduler's company-scoped session cap (ADR-022 §5). */
+  readonly maxLiveSessionsPerCompany?: number;
   readonly nowMs?: () => number;
   readonly log?: (msg: string, meta?: Record<string, unknown>) => void;
   /** Inbound body ceiling (bytes). */
@@ -128,6 +131,7 @@ export function createBrokerHandler(deps: BrokerDeps): (req: IncomingMessage, re
   const maxBody = deps.maxBodyBytes ?? 32 * 1024 * 1024;
   const upstreamTimeout = deps.upstreamTimeoutMs ?? 10 * 60 * 1000;
   const maxLive = deps.maxLiveSessions ?? 12;
+  const maxLivePerCompany = deps.maxLiveSessionsPerCompany ?? 4;
   const registry = deps.registry;
   let reqCounter = 0;
 
@@ -146,6 +150,7 @@ export function createBrokerHandler(deps: BrokerDeps): (req: IncomingMessage, re
         service: "identity-broker",
         liveSessions: registry.liveCount(),
         maxLiveSessions: maxLive,
+        maxLiveSessionsPerCompany: maxLivePerCompany,
       });
     }
 
@@ -178,6 +183,13 @@ export function createBrokerHandler(deps: BrokerDeps): (req: IncomingMessage, re
             return sendJson(res, 429, {
               code: "broker_saturated",
               message: `broker live-session ceiling reached (${maxLive})`,
+            });
+          }
+          if (isNew && registry.liveCount(parsed.companyId) >= maxLivePerCompany) {
+            log("mint refused: company live-session ceiling", { sessionId: parsed.sessionId, companyId: parsed.companyId, maxLivePerCompany });
+            return sendJson(res, 429, {
+              code: "company_session_cap",
+              message: `company live-session ceiling reached (${maxLivePerCompany})`,
             });
           }
           const limits: Partial<SessionLimits> = {};

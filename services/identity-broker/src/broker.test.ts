@@ -101,6 +101,7 @@ beforeAll(async () => {
     credential: () => ({ kind: "oauth", secret: HOST_SECRET, expiresAt: null }),
     publicBaseUrl: "http://host.docker.internal:3779",
     maxLiveSessions: 50,
+    maxLiveSessionsPerCompany: 50,
     log: (msg, meta) => logs.push(meta ? { msg, meta } : { msg }),
   });
   await new Promise<void>((r) => broker.listen(0, "127.0.0.1", r));
@@ -152,6 +153,35 @@ describe("identity broker — control plane", () => {
     expect((await mintAt("cap-1")).status).toBe(200); // re-issue of a live one is not a new slot
     await fetch(`${base}/internal/v1/sessions/cap-1`, { method: "DELETE", headers: { authorization: `Bearer ${BROKER_SECRET}` } });
     expect((await mintAt("cap-3")).status).toBe(201);
+    await new Promise<void>((r) => b.close(() => r()));
+  });
+
+  it("per-company ceiling: a second company still mints while the first is capped (ADR-022 §5 backstop)", async () => {
+    const registry = new SessionRegistry();
+    const b = createBrokerServer({
+      registry,
+      secret: BROKER_SECRET,
+      upstream: upstreamUrl,
+      credential: () => ({ kind: "oauth", secret: HOST_SECRET, expiresAt: null }),
+      publicBaseUrl: "http://x",
+      maxLiveSessions: 10,
+      maxLiveSessionsPerCompany: 1,
+    });
+    await new Promise<void>((r) => b.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${(b.address() as AddressInfo).port}`;
+    const mintAt = (id: string, companyId: string) =>
+      fetch(`${base}/internal/v1/sessions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${BROKER_SECRET}`, "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: id, companyId, agentId: "a" }),
+      });
+    expect((await mintAt("c1-a", "co-1")).status).toBe(201);
+    const capped = await mintAt("c1-b", "co-1");
+    expect(capped.status).toBe(429);
+    expect(((await capped.json()) as { code: string }).code).toBe("company_session_cap");
+    expect((await mintAt("c2-a", "co-2")).status).toBe(201);
+    await fetch(`${base}/internal/v1/sessions/c1-a`, { method: "DELETE", headers: { authorization: `Bearer ${BROKER_SECRET}` } });
+    expect((await mintAt("c1-b", "co-1")).status).toBe(201);
     await new Promise<void>((r) => b.close(() => r()));
   });
 });

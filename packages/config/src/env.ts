@@ -93,6 +93,20 @@ export const envSchema = z.object({
   EMBEDDINGS_PROVIDER: z.enum(["openai", "ollama"]).default("openai"),
   EMBEDDINGS_MODEL: z.string().min(1).default("text-embedding-3-small"),
 
+  // E4/T31 (ADR-022): agent turn as a live Claude Code CLI session
+  ACOS_AGENT_RUNTIME: z.enum(["steps", "cli"]).default("steps"),
+  IDENTITY_BROKER_URL: optionalUrl, // worker → broker control plane (mint/usage/revoke)
+  ACOS_BROKER_SECRET: optionalSecret, // control-plane bearer of the identity broker
+  ACOS_CONTAINER_GATEWAY_URL: z.url().default("http://server:3000"), // what the CONTAINER uses for the Tool Gateway
+  ACOS_CLI_SESSION_MODE: z.enum(["interactive", "print"]).default("interactive"),
+  ACOS_CLI_WORKSPACE_KIND: z.enum(["auto", "worktree", "session"]).default("auto"),
+  ACOS_CLI_WORKSPACE_IMAGE: z.string().min(1).default("acos/workspace-node"),
+  ACOS_CLI_MODEL: z.string().min(1).optional(),
+  ACOS_CLI_SESSION_MAX_MS: z.coerce.number().int().min(60_000).default(2 * 60 * 60 * 1000),
+  ACOS_CLI_SESSION_MAX_TOKENS: z.coerce.number().int().min(10_000).default(5_000_000),
+  ACOS_CLI_SESSION_MAX_REQUESTS: z.coerce.number().int().min(1).default(400),
+  ACOS_CLI_ADMISSION_WAIT_MS: z.coerce.number().int().min(0).default(10 * 60 * 1000),
+
   // Execution plane
   SANDBOX_MANAGER_URL: z.url().default("http://localhost:3010"),
   MAX_WORKSPACES: z.coerce.number().int().min(1).default(8),
@@ -150,6 +164,21 @@ export interface Config {
     readonly maxWorkspaces: number;
     readonly dockerSock: string;
     readonly egressProxyUrl: string;
+  };
+  /** E4/T31 — CLI-session runtime (ADR-022). */
+  readonly cliRuntime: {
+    readonly runtime: "steps" | "cli";
+    readonly brokerUrl: string | undefined;
+    readonly brokerSecret: string | undefined;
+    readonly containerGatewayUrl: string;
+    readonly sessionMode: "interactive" | "print";
+    readonly workspaceKind: "auto" | "worktree" | "session";
+    readonly workspaceImage: string;
+    readonly model: string | undefined;
+    readonly maxSessionMs: number;
+    readonly maxSessionTokens: number;
+    readonly maxSessionRequests: number;
+    readonly admissionWaitMs: number;
   };
   readonly budgets: { readonly defaultCompanyDailyCents: number };
   readonly observability: {
@@ -221,6 +250,20 @@ export function loadConfig(processEnv: Record<string, string | undefined>): Conf
       maxWorkspaces: env.MAX_WORKSPACES,
       dockerSock: env.DOCKER_SOCK,
       egressProxyUrl: env.EGRESS_PROXY_URL,
+    },
+    cliRuntime: {
+      runtime: env.ACOS_AGENT_RUNTIME,
+      brokerUrl: env.IDENTITY_BROKER_URL,
+      brokerSecret: env.ACOS_BROKER_SECRET,
+      containerGatewayUrl: env.ACOS_CONTAINER_GATEWAY_URL,
+      sessionMode: env.ACOS_CLI_SESSION_MODE,
+      workspaceKind: env.ACOS_CLI_WORKSPACE_KIND,
+      workspaceImage: env.ACOS_CLI_WORKSPACE_IMAGE,
+      model: env.ACOS_CLI_MODEL,
+      maxSessionMs: env.ACOS_CLI_SESSION_MAX_MS,
+      maxSessionTokens: env.ACOS_CLI_SESSION_MAX_TOKENS,
+      maxSessionRequests: env.ACOS_CLI_SESSION_MAX_REQUESTS,
+      admissionWaitMs: env.ACOS_CLI_ADMISSION_WAIT_MS,
     },
     budgets: { defaultCompanyDailyCents: env.DEFAULT_COMPANY_DAILY_BUDGET_CENTS },
     observability: {

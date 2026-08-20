@@ -253,8 +253,46 @@ async function run(): Promise<void> {
       });
   };
 
+  // E4/T31 (ADR-022): CLI-session runtime ports. Only wired when the broker is
+  // configured; otherwise resolveAgentRuntimeActivity keeps every turn on steps.
+  const { createCliSessionActivities } = await import("./cli-session/activities.js");
+  const { createBrokerClient, createGatewaySessionClient, createSandboxSessionClient } = await import("./cli-session/clients.js");
+  const { startTemporalHeartbeat } = await import("./activities/agent-task.js");
+  const cliCfg = config.cliRuntime;
+  const cliRuntimeEnabled = cliCfg.runtime === "cli" && Boolean(cliCfg.brokerUrl) && Boolean(cliCfg.brokerSecret);
+  if (cliCfg.runtime === "cli" && !cliRuntimeEnabled) {
+    console.error("agent-worker: ACOS_AGENT_RUNTIME=cli but IDENTITY_BROKER_URL/ACOS_BROKER_SECRET missing — falling back to steps");
+  }
+  const cliSessionActivities = createCliSessionActivities({
+    guardedDb,
+    config: {
+      runtime: cliRuntimeEnabled ? "cli" : "steps",
+      sessionMode: cliCfg.sessionMode,
+      workspaceKind: cliCfg.workspaceKind,
+      workspaceImage: cliCfg.workspaceImage,
+      model: cliCfg.model,
+      limits: { maxTotalTokens: cliCfg.maxSessionTokens, maxWallMs: cliCfg.maxSessionMs, maxRequests: cliCfg.maxSessionRequests },
+      admissionWaitMs: cliCfg.admissionWaitMs,
+      pollMs: 5_000,
+      endGraceMs: 8_000,
+      cols: 120,
+      rows: 32,
+    },
+    broker: createBrokerClient({ baseUrl: cliCfg.brokerUrl ?? "http://127.0.0.1:3779", token: cliCfg.brokerSecret ?? "" }),
+    gateway: createGatewaySessionClient({
+      baseUrl: serverInternalUrl,
+      token: config.security.internalApiToken,
+      containerGatewayUrl: cliCfg.containerGatewayUrl,
+    }),
+    sandboxSessions: createSandboxSessionClient({ baseUrl: config.sandbox.managerUrl, token: config.security.internalApiToken }),
+    sandboxHttp: { baseUrl: config.sandbox.managerUrl, token: config.security.internalApiToken },
+    runtimeEvents,
+    heartbeat: (detail) => startTemporalHeartbeat(detail),
+  });
+
   const activities = {
     ...trivialActivities,
+    ...cliSessionActivities,
     ...createAgentTaskActivities({
       // TASK 13: Context Compiler CodeIndex sorgusu
       codeIndexQuery: async (q) => {
