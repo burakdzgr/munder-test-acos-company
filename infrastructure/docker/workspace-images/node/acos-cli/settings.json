@@ -1,0 +1,54 @@
+{
+  "$comment": "ACOS in-container Claude Code settings (ADR-022). Passed via `claude --settings`. Baked read-only into acos/workspace-node at /opt/acos/cli. Permission split (ADR-022 §3): sandbox file/bash permissions are bypassed because the container IS the boundary (INV-8); every builtin call is still audited through the Tool Gateway by the PreToolUse hook (INV-3, fail-closed); organisational actions only exist as ACOS MCP tools and keep their approvals.",
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Workflow",
+      "EnterWorktree",
+      "ExitWorktree",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "ScheduleWakeup",
+      "RemoteTrigger",
+      "PushNotification"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Edit|Write|MultiEdit|NotebookEdit|Glob|Grep|Skill|TaskOutput|TaskStop|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /opt/acos/cli/audit-hook.mjs",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /opt/acos/cli/stop-hook.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_INSTALLATION_CHECKS": "1"
+  },
+  "includeCoAuthoredBy": false,
+  "cleanupPeriodDays": 1
+}
