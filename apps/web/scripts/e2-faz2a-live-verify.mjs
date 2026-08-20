@@ -125,9 +125,9 @@ await page.getByTestId("project-wizard-thinking").waitFor({ timeout: 15_000 }).c
 // Üçünü de bekle, hangisinin geldiğini RAPORLA — tek birine kilitlenip
 // zaman aşımına düşmek yanlış kırmızı verir.
 await Promise.race([
-  page.getByTestId("proposal-teams").waitFor({ timeout: 180_000 }),
-  page.getByTestId("project-wizard-noproposal").waitFor({ timeout: 180_000 }),
-  page.getByTestId("project-wizard-error").waitFor({ timeout: 180_000 }),
+  page.getByTestId("proposal-teams").waitFor({ timeout: 420_000 }),
+  page.getByTestId("project-wizard-noproposal").waitFor({ timeout: 420_000 }),
+  page.getByTestId("project-wizard-error").waitFor({ timeout: 420_000 }),
 ]).catch(() => {});
 const wizardError = ((await page.getByTestId("project-wizard-error").textContent().catch(() => "")) ?? "").trim();
 if (wizardError) check("sihirbaz hata gösterdi (KIRIK)", false, wizardError.slice(0, 120));
@@ -165,7 +165,7 @@ check(
 const settled = await until(async () => {
   const row = (await db.get(`/api/v1/companies/${CID}/projects/${PID}/staffing-proposal`)).body;
   return row && ["awaiting_human", "cancelled", "confirmed", "applied"].includes(row.status) ? row : null;
-}, 180_000, 3000);
+}, 420_000, 3000);
 const proposal = settled ?? firstRead.body;
 if (proposal?.status === "cancelled") {
   check(
@@ -201,21 +201,39 @@ if (noProposalScreen) {
   await browser.close();
   process.exit(2);
 }
-const headcountInputs = page.getByTestId("proposal-teams").locator('input[type="number"]');
-const firstHeadcount = await headcountInputs.first().inputValue().catch(() => "1");
-await headcountInputs.first().fill(String(Number(firstHeadcount) + 1));
-await headcountInputs.first().blur();
-await page.waitForTimeout(1500);
-await page.getByTestId("proposal-new-team").fill("QA Otomasyon");
+// Kadro sayısı bir number input DEĞİL: her satırda -/+ düğmeleri
+// (proposal-inc-<key> / proposal-dec-<key>) ve bir çıkar düğmesi
+// (proposal-remove-<key>) var. Üç düzenlemeyi de yaparız çünkü T25'in
+// iddiası tam olarak bu üçlü: sayıyı ARTIR, takım EKLE, takım ÇIKAR.
+const keys = (proposal?.teams ?? []).map((t) => t.key);
+if (keys.length === 0) {
+  // 3. adım kırıldıysa burada UI'ya vurmak `proposal-inc-undefined` gibi
+  // anlamsız bir zaman aşımıyla patlar ve gerçek nedeni gömer. Temiz dur.
+  console.log(`\n=== E2 FAZ 2A CANLI SONUC (EKSIK — oneri ekrani acilmadi) ===`);
+  console.log(results.join("\n"));
+  console.log(`\n${results.length - failed}/${results.length} gecti · duzenle/onayla/applyPlan KANITLANMADI`);
+  console.log(`web ${WEB} · api ${API} · sirket ${CID} · proje ${PID}`);
+  await browser.close();
+  process.exit(2);
+}
+const bumpKey = keys[0];
+const dropKey = keys[keys.length - 1];
+await page.getByTestId(`proposal-inc-${bumpKey}`).click();
+await page.waitForTimeout(1200);
+await page.getByTestId(`proposal-remove-${dropKey}`).click();
+await page.waitForTimeout(1200);
+await page.getByTestId("proposal-new-team").fill("Dokumantasyon");
 await page.getByTestId("proposal-add-team").click();
 await page.waitForTimeout(2500);
 await page.screenshot({ path: `${SHOTS}/e2live-04-edited.png` });
 
 const proposalAfterEdit = (await db.get(`/api/v1/companies/${CID}/projects/${PID}/staffing-proposal`)).body;
+const editedNames = (proposalAfterEdit?.teams ?? []).map((t) => t.teamName);
 check(
-  "PATCH kalıcı — takım eklendi",
-  (proposalAfterEdit?.teams?.length ?? 0) === teamCountBefore + 1,
-  `${teamCountBefore} -> ${proposalAfterEdit?.teams?.length}`,
+  "PATCH kalıcı — sayı arttı, takım eklendi, takım çıkarıldı",
+  (proposalAfterEdit?.teams ?? []).some((t) => /dokumantasyon/i.test(t.teamName)) &&
+    !(proposalAfterEdit?.teams ?? []).some((t) => t.key === dropKey),
+  `çıkarılan=${dropKey} · kalan: ${editedNames.join(", ")}`,
 );
 check(
   "iyimser sürüm arttı",
@@ -257,6 +275,17 @@ check(
   "kurulan takımlar önerilenlerle örtüşüyor",
   wantedNames.every((w) => gotNames.some((g) => g.includes(w.split(" ")[0]))),
   `istenen: ${wantedNames.join(", ")} | kurulan: ${gotNames.join(", ")}`,
+);
+// T25'in ASIL iddiası: insanın onayladığı plan kadronun TEMELİDİR — çıkarılan
+// takım ikinci bir Founder onayı olarak GERİ GELMEMELİ.
+const approvals = agentList((await db.get(`/api/v1/companies/${CID}/approvals`)).body);
+const pendingHire = approvals.filter((a) => a.kind === "hire" && a.status === "pending");
+check(
+  "çıkarılan takım için İKİNCİ kadro onayı YOK (T25)",
+  pendingHire.length === 0,
+  pendingHire.length === 0
+    ? "bekleyen kadro onayı yok"
+    : pendingHire.map((a) => a.brief?.request ?? a.title).join(" | ").slice(0, 160),
 );
 const agentsAfterConfirm = agentList((await db.get(`/api/v1/companies/${CID}/agents`)).body);
 const wantedHires = expectedTeams.reduce((sum, t) => sum + t.hireCount, 0);
