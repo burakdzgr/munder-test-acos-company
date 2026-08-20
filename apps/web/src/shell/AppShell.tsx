@@ -259,7 +259,7 @@ function ProjectTeams({ companyId }: { companyId: string }) {
   return (
     // ORTADA: iki yanı flex-1 olan kapsayıcının içinde ortalanır (E1 §4).
     <div
-      className="pointer-events-none absolute left-1/2 top-0 hidden h-[38px] max-w-[46%] -translate-x-1/2 items-center justify-center gap-3 overflow-x-auto lg:flex [&>*]:pointer-events-auto"
+      className="hidden min-w-0 items-center justify-center gap-3 overflow-x-auto lg:flex"
       data-testid="team-chips"
     >
       {populated.slice(0, 3).map((group) => (
@@ -382,7 +382,11 @@ export function AppShell() {
 
   return (
     <div className="grid h-screen grid-rows-[38px_minmax(0,1fr)_24px] bg-acos-bg0 font-sans text-[13px] text-acos-fg0">
-      <header className="relative flex items-center gap-2.5 overflow-hidden border-b border-acos-line bg-acos-bg1 px-3 text-xs">
+      {/* E1: üç sütunlu üst çubuk — sol küme · ORTADA takım şeridi · sağ küme.
+          (İlk sürüm şeridi mutlak konumla ortalıyordu; geniş ekranda arama
+          kutusunun ÜSTÜNE biniyordu — canlı kurulumda görüldü.) */}
+      <header className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 overflow-hidden border-b border-acos-line bg-acos-bg1 px-3 text-xs">
+        <div className="flex min-w-0 items-center gap-2.5">
         <span className="font-bold">
           A<b style={{ color: "#2ec26a" }}>C</b>OS
         </span>
@@ -409,11 +413,10 @@ export function AppShell() {
           </select>
         </span>
         <PanelLauncher />
-        {/* E1 §4: takım şeridi çubuğun GERÇEK ortasında durur — solundaki ve
-            sağındaki küme genişlikleri farklı olduğu için akışta değil,
-            mutlak konumla ortalanır (dar ekranda gizlenir). */}
+        </div>
+        {/* orta sütun: takım şeridi (dar ekranda gizlenir) */}
         <ProjectTeams companyId={companyId} />
-        <div className="flex-1" />
+        <div className="flex min-w-0 items-center justify-end gap-2.5">
         {/* Layout presets (36 §3): saved Command Center arrangements. */}
         <span className="hidden items-center gap-1 xl:flex" data-testid="layout-presets">
           {PRESETS.map((preset) => (
@@ -537,6 +540,7 @@ export function AppShell() {
           <UserIcon size={14} />
           <span className="max-w-28 truncate">{me.data?.displayName}</span>
         </button>
+        </div>
       </header>
 
       {/* P0-B: no more light island — every route renders on the dark canvas */}
