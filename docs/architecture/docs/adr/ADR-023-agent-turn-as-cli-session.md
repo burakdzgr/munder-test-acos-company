@@ -26,8 +26,10 @@ included. The model must stop being called "like an API".
 ## Decision
 
 1. **An agent turn runs as a real `claude` CLI process** inside the agent's workspace container.
-   Its stdio is attached to the existing `terminal_sessions` PTY, so the human watches the actual
-   session (22 §5.2 frame log, `/shell/open` bidirectional path, unchanged).
+   No new channel: `claude` replaces `/bin/sh` as the `Cmd` of the existing docker-exec TTY seam
+   (`services/sandbox-manager/src/docker.ts` `openShell`), so the same `terminal_sessions` frame log,
+   ring buffer, `term.<id>` NATS subject and WS topic carry it (22 §5.2). The human watches the real
+   session, banner included; **CLI exit = session end**.
 2. **Planning agents get a session workspace too.** CEO and leads have no worktree today, which is
    precisely why they have no PTY. They receive a lightweight workspace with the project repo
    mounted read-only.
@@ -36,9 +38,14 @@ included. The model must stop being called "like an API".
    `request_review`, `update_task_status` — becomes an MCP tool. The control plane (approvals,
    staffing, roll-up, reviewer independence) therefore sits **on top of** the CLI session, not
    beside it.
-4. **Identity is brokered, never mounted.** The subscription credential stays on the host behind a
-   broker (the shape today's `claude-cli-bridge.mjs` already proves); the container receives only a
-   base URL. **No raw token, ever, in an agent container.**
+4. **Identity is brokered, never mounted.** The container credential is a **revocable per-session
+   capability token minted by ACOS**; the subscription credential is held only by the broker process
+   and **never enters a workspace container**. Concretely (proven on the host by Kevin, T31): `claude`
+   honours `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`; the broker swaps the per-session capability
+   token for the host credential (plus the `oauth-2025-04-20` beta) and upstream answers 200; usage is
+   metered from the SSE stream, which is what makes session-level `llm_calls` possible. The container
+   receives ONLY `{ANTHROPIC_BASE_URL=http://host.docker.internal:<broker-port>,
+   ANTHROPIC_AUTH_TOKEN=<opaque revocable session token>}`.
 5. **Concurrency is capped per company.** One CLI process per active agent turn; the Scheduler
    enforces a company-scoped ceiling on simultaneous live sessions.
 
@@ -72,6 +79,19 @@ Whichever route is taken, "the CLI ran a command that the Tool Gateway never saw
 a tradeoff. If neither route proves feasible, this ADR must be reopened rather than quietly
 shipping a bypass.
 
+**Route chosen (Kevin, T31): the wrap.** A Claude Code `PreToolUse` hook, baked read-only into the
+`acos/workspace-node` image, posts every builtin `Bash`/`Read`/`Edit`/`Write`/`Glob`/`Grep` call to
+the Tool Gateway audit endpoint **before** execution and **fails closed**; `WebFetch`/`WebSearch`/
+`Agent` and friends are disabled via `--disallowedTools`; ACOS actions arrive only through the MCP
+gateway. **Trust assumption, stated plainly:** the hook runs at the same uid as the CLI inside the
+sandbox, so it is an *audit* mechanism, not a containment one — the security boundary remains the
+container (INV-8/S8), exactly as it is today.
+
+**Prior record.** `PROGRESS.md` L158 records that the Munder raw-CLI-with-builtin-tools path was
+**rejected under INV-3**. That rejection was correct on its own terms: raw builtins with no audit
+seam do violate INV-3. This ADR supersedes it by adding the audit seam, and cites it so nobody
+concludes the earlier decision was overlooked rather than deliberately revisited.
+
 ## Other invariants touched
 
 - **INV-9 (agent identity ⊥ model).** A CLI session is a model runtime. `agent_model_bindings`
@@ -79,7 +99,10 @@ shipping a bypass.
   history may move into the CLI.
 - **INV-17 (execution plane holds zero domain state).** The MCP server is the Tool Gateway HTTP
   API, never a direct database path from the container.
-- **INV-19 (runaway guards always on).** This is the second real cost. Today the worker sees every
+- **INV-19 (runaway guards always on) — OPEN RISK, not yet solved.** Nothing bounds a looping CLI
+  session today; the guards listed below must be built as part of this work. Recorded as an open
+  risk deliberately: this host was taken down once already (2026-08-20) by unbounded growth, and
+  "we will add limits later" is how that happens again. This is the second real cost. Today the worker sees every
   step and can apply step-cap, loop detector, ping-pong detector and budget guards *between* steps.
   A CLI session runs its own loop, so those guards no longer observe each step. The guards must be
   re-established at the session boundary (wall-clock and token ceiling per session, plus MCP-call
