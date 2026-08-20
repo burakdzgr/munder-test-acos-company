@@ -1457,11 +1457,19 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
             )
             .limit(1);
           if (!liveSession) {
+            // request_help uyandirmasiyla AYNI kural: parent'siz ama projesiz
+            // DEGIL — coken kosumun gorevi hangi projedeyse mudahale gorevi de
+            // oraya ait (workspace + maliyet rollup'i icin).
+            const [crashedTask] = await guardedDb
+              .select({ projectId: tasks.projectId })
+              .from(tasks)
+              .where(and(eq(tasks.companyId, ctx.companyId), eq(tasks.id, input.taskId)));
             const helpTask = await tasksService.create(
               ctx,
               {
                 id: uuidv5("crash-help-task", input.sessionId), // idempotent replay
                 kind: "task",
+                projectId: crashedTask?.projectId ?? undefined,
                 title: "Çöken koşum: yönetici müdahalesi gerekli",
                 objective:
                   `Bir ajanın koşumu çöktü ve görevi BLOCKED bekliyor. ` +

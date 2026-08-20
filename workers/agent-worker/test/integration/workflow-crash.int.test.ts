@@ -38,6 +38,7 @@ import {
   orgEdges,
   orgUnits,
   positions,
+  projects,
   tasks,
   users,
 } from "@acos/db/schema";
@@ -161,6 +162,7 @@ describe("reportWorkflowCrashActivity (33 §2.2, DB)", { timeout: 300_000 }, () 
   let MANAGER = "";
   let WORKER_AGENT = "";
   let workerTaskId = "";
+  let projectId = "";
   let managerTaskId = "";
   const workerSessionId = uuidv7();
   const managerSessionId = uuidv7();
@@ -221,6 +223,14 @@ describe("reportWorkflowCrashActivity (33 §2.2, DB)", { timeout: 300_000 }, () 
       toAgentId: MANAGER,
     });
 
+    // Coken gorev bir PROJEYE ait olmali: uyandirma gorevinin projeyi kalitip
+    // kalitmadigi ancak boyle olculebilir (projesiz fixture'da iddia bos olurdu).
+    const [project] = await db
+      .insert(projects)
+      .values({ companyId, slug: "crash-proj", name: "Crash Project", objectiveMd: "crash fixture", createdByUserId: founderUserId })
+      .returning();
+    projectId = project!.id;
+
     const mkTask = async (n: number, owner: string) => {
       const [task] = await db
         .insert(tasks)
@@ -232,6 +242,7 @@ describe("reportWorkflowCrashActivity (33 §2.2, DB)", { timeout: 300_000 }, () 
           objective: "o",
           status: "ASSIGNED",
           ownerAgentId: owner,
+          projectId,
         })
         .returning();
       return task!.id;
@@ -283,11 +294,24 @@ describe("reportWorkflowCrashActivity (33 §2.2, DB)", { timeout: 300_000 }, () 
 
     // boştaki yönetici P1 müdahale göreviyle uyandırıldı
     const [helpTask] = await db
-      .select({ id: tasks.id, status: tasks.status, priority: tasks.priority })
+      .select({
+        id: tasks.id,
+        status: tasks.status,
+        priority: tasks.priority,
+        projectId: tasks.projectId,
+        parentId: tasks.parentId,
+      })
       .from(tasks)
       .where(and(eq(tasks.companyId, companyId), eq(tasks.ownerAgentId, MANAGER), eq(tasks.priority, "P1")));
     expect(helpTask).toBeDefined();
     expect(helpTask!.status).toBe("ASSIGNED");
+    // Uyandirma gorevi PARENT'SIZ kalir — is kirilimninin cocugu degil (07 §2
+    // tur merdiveni), ebeveynlemek rollup'lari bozardi...
+    expect(helpTask!.parentId).toBeNull();
+    // ...ama PROJESIZ de kalmaz: coken gorevin projesini kalitir, yoksa
+    // WorkspaceService.provision (workspaces.project_id NOT NULL) yoneticiye
+    // workspace acamaz ve harcama proje rollup'ina islenmez.
+    expect(helpTask!.projectId).toBe(projectId);
     expect(started).toContainEqual({ agentId: MANAGER, taskId: helpTask!.id });
 
     // idempotent: aynı oturum için ikinci çağrı patlamaz ve kopya üretmez
