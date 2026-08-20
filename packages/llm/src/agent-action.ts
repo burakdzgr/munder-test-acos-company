@@ -127,6 +127,19 @@ export type AgentAction = z.infer<typeof AgentActionSchema>;
  */
 export const CONTEXT_SENTINEL_UUID = "00000000-0000-4000-8000-000000000000";
 
+/**
+ * Self-assignment sentinel (T29, Founder decision 2026-08-20): a manager may
+ * keep a slice of the work it just decomposed instead of delegating every
+ * child ("sana gorev verdim, sen boldun ama burayi ben halledecegim dedin").
+ * `delegate_task.toAgentId = SELF_SENTINEL_UUID` means "I take this subtask
+ * myself" — an explicit, auditable intent that stays inside the delegation
+ * engine: the reporting-line rule already blesses it (07 §6, self-assignment
+ * of one's own subtask) and the capacity model still applies, so the work
+ * counts against the manager's OWN WIP cap. INV-10 holds: the Scheduler is
+ * still the deterministic owner of every assignment it is asked to make.
+ */
+export const SELF_SENTINEL_UUID = "00000000-0000-4000-8000-00000000005e";
+
 export const AGENT_ACTION_TYPES = [
   "use_tool",
   "send_message",

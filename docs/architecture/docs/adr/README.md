@@ -29,6 +29,8 @@ per the convention in `_DECISIONS.md` §21.
 | [ADR-018](ADR-018-deployment-architecture.md) | Deployment architecture | Accepted | Docker Compose single server → multi-VM compose worker scale-out → K8s only if fleet demands |
 | [ADR-019](ADR-019-orm-and-migrations.md) | ORM & migrations | Accepted | Drizzle ORM + drizzle-kit; SQL-first typed repositories with tenant guard; plain SQL migrations in repo |
 | [ADR-020](ADR-020-embeddings-strategy.md) | Embeddings strategy | Accepted | Per-row embedding model + dimension, HNSW index per active config, per-company embedding configuration |
+| [ADR-021](ADR-021-memory-graph-renderer.md) | Memory graph renderer | Accepted | 3D R3F/three.js "galaxy" as the default memory graph; 2D cytoscape kept as the WebGL fallback |
+| [ADR-022](ADR-022-manager-self-assignment.md) | Manager self-assignment | Accepted | A manager may keep a slice of its own decomposition; Scheduler still owns assignment (INV-10), self counts against the manager's own WIP cap |
 
 ## ADR process
 

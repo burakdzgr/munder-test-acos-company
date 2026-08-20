@@ -49,7 +49,7 @@ import {
 } from "@acos/db/schema";
 import { outputLanguageDirective } from "@acos/llm";
 import type { ModelRouter, RoutingContext, LlmMessage, LlmUsage } from "@acos/llm";
-import { CONTEXT_SENTINEL_UUID, type AgentAction } from "@acos/llm/agent-action";
+import { CONTEXT_SENTINEL_UUID, SELF_SENTINEL_UUID, type AgentAction } from "@acos/llm/agent-action";
 import { FENCE_PREAMBLE, provenanceFence } from "@acos/tools";
 import type { RuntimeEventType } from "@acos/contracts";
 import { heartbeat } from "@temporalio/activity";
@@ -968,6 +968,7 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
         `- {"type":"send_message","channelId":"<uuid>","kind":"text|help_request|review_request|escalation|status","body":"...","mentions":[],"refs":[]}`,
         `- {"type":"create_task","kind":"initiative|epic|task|subtask","parentTaskId":"<uuid>","title":"<=200","objective":"...","successCriteria":["..."],"priority":"P0|P1|P2|P3","estimatedEffort":1-13,"risk":"low|medium|high|critical","requiredCapabilities":["frontend","backend",...]}`,
         `- {"type":"delegate_task","taskId":"<uuid>","toAgentId":"<uuid>","note":"<=1000"} — toAgentId için ${CONTEXT_SENTINEL_UUID} kullan: atamayı Scheduler yapar (yetenek+yük+geçmiş skoru). Belirli bir ajanı DAYATMA.`,
+        `  KENDİNE ALMAK MEŞRUDUR: bir alt görevi kendin üstlenmek istiyorsan toAgentId için ${SELF_SENTINEL_UUID} kullan — küçük, kritik ya da senin bağlamını gerektiren dilim için doğru karar budur. Geri kalanı yine delege et; kendine aldığın iş KENDİ WIP tavanına sayılır, tavan dolduysa istek reddedilir.`,
         `- {"type":"request_review","taskId":"<uuid>","artifactId":"<uuid>","summary":"<=2000"}`,
         `- {"type":"request_help","topic":"<=200","body":"<=4000","audience":"peer|team|lead|manager|specialist"} — blokajlarda İLK adres: audience:"manager" seçersen yöneticin uyandırılır ve DM ile yanıt verir; cevabı wait_for {"what":"reply"} ile bekle`,
         `- {"type":"escalate","reason":"<=2000","attempted":["..."],"options":[{"option":"...","risk":"...","cost":"..."}],"recommendation":"..."} — Founder'a resmi onay talebi. SON ÇAREDİR: önce request_help(manager) dene; escalate yalnız (a) yöneticin çözemedi/yanıtlamadı, (b) karar gerçekten Founder-seviyesi (bütçe/politika/geri döndürülemez etki) ise`,
@@ -977,6 +978,7 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
         `- {"type":"wait_for","what":"dependency|reply|review|approval|timer","refId":"<uuid>"?,"timeoutMinutes":1-1440}`,
         `- {"type":"abandon","reason":"<=2000"}`,
         `Special uuid ${CONTEXT_SENTINEL_UUID} = "current context": own task (create_task.parentTaskId), next unassigned child (delegate_task.taskId), an eligible report (delegate_task.toAgentId), own task thread (send_message.channelId).`,
+        `Special uuid ${SELF_SENTINEL_UUID} = "myself" (delegate_task.toAgentId only): I take this subtask on.`,
         "Output RAW JSON only — no markdown fences, no commentary before or after.",
       ].join("\n");
       // The catalog rides with the stable prefix (it is identical on every
@@ -1551,7 +1553,17 @@ export function createAgentTaskActivities(deps: AgentTaskActivityDeps) {
             }
             let toAgentId = action.toAgentId;
             let schedulerOverride = false;
-            if (toAgentId === CONTEXT_SENTINEL_UUID) {
+            if (toAgentId === SELF_SENTINEL_UUID) {
+              // T29 (Founder karari 2026-08-20): yonetici kendi bolduyu isin
+              // bir dilimini KENDI ustlenebilir. Bu ACIK bir niyettir; TASK 12
+              // yetenek-override'i buraya UYGULANMAZ, cunku o kural CEO'nun
+              // ILGISIZ bir ajana is dayatmasini engellemek icindir — kendi alt
+              // gorevinin sorumlulugunu almak dayatma degildir (07 §6, izin
+              // katmani zaten kendine atamayi onaylar). Tavan hala capacityCheck:
+              // is yoneticinin KENDI WIP limitine sayilir, doluysa reddedilir ve
+              // model delege etmeye yonelir.
+              toAgentId = input.agentId;
+            } else if (toAgentId === CONTEXT_SENTINEL_UUID) {
               const target = await delegationService.resolveDelegateTarget(
                 ctx,
                 input.agentId,

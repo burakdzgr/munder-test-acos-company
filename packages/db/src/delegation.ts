@@ -215,16 +215,30 @@ export class DelegationService {
       if (named) return named.id;
     }
     const scored = await this.scoreDelegateCandidates(ctx, managerAgentId, taskId ?? null);
+    // T29: the pool now contains the manager itself, whose WIP fills up like
+    // anyone's. Handing back a candidate that cannot take the work would turn
+    // a routine "this one is busy" into a failed delegation, so the top
+    // permitted-AND-free candidate wins; if EVERYONE is full we still return
+    // the top permitted one, so the caller gets the informative WIP_LIMIT
+    // result (with candidates) instead of a bare "no eligible delegate".
+    let firstPermitted: string | null = null;
     for (const row of scored) {
       const allowed = await this.mayDelegate(ctx, managerAgentId, row.agentId);
-      if (allowed.ok) return row.agentId;
+      if (!allowed.ok) continue;
+      firstPermitted ??= row.agentId;
+      const capacity = await this.capacityCheck(ctx, row.agentId);
+      if (capacity.ok) return row.agentId;
     }
-    return null;
+    return firstPermitted;
   }
 
   /**
-   * Deterministic candidate scoring over the manager's ACTIVE direct
-   * reports. One SQL pass computes every component; weights live here in
+   * Deterministic candidate scoring over the manager's ACTIVE direct reports
+   * PLUS the manager itself (T29 — a manager may keep a slice of its own
+   * decomposition). Self is scored by exactly the same formula, so it wins
+   * only when it genuinely is the best fit; its own running parent task
+   * already counts as load, which is the natural handicap that stops a lead
+   * from hoarding. One SQL pass computes every component; weights live here in
    * code so the ranking is reproducible and auditable:
    *   +2.0 × skill match     (Σ level×confidence over skills named in the task text)
    *   +0.6 × familiarity     (DONE tasks in the same project, capped at 5)
@@ -291,10 +305,17 @@ export class DelegationService {
           WHERE m.company_id = ${ctx.companyId} AND m.created_by_agent_id = a.id
             AND m.status = 'active' AND m.scope = 'project'
             AND m.scope_ref = (SELECT project_id FROM t)), 0) AS memory_hits
-      FROM org_edges e
-      JOIN agents a ON a.id = e.to_agent_id AND a.company_id = e.company_id
-      WHERE e.company_id = ${ctx.companyId} AND e.from_agent_id = ${managerAgentId}
-        AND e.kind = 'manages' AND e.ended_at IS NULL AND a.status = 'active'
+      FROM agents a
+      WHERE a.company_id = ${ctx.companyId} AND a.status = 'active'
+        AND (
+          -- T29: the manager is a candidate for its OWN subtasks
+          a.id = ${managerAgentId}
+          OR EXISTS (
+            SELECT 1 FROM org_edges e
+            WHERE e.company_id = ${ctx.companyId} AND e.from_agent_id = ${managerAgentId}
+              AND e.to_agent_id = a.id AND e.kind = 'manages' AND e.ended_at IS NULL
+          )
+        )
       ORDER BY a.employee_number ASC
     `);
     const rows = result.rows as Array<{
@@ -313,7 +334,14 @@ export class DelegationService {
     // TASK 12: gerekli yeteneklerin HİÇBİRİNE uymayan aday elenir — CEO
     // ilgisiz ajana zorla atayamaz (bypass koruması). Yetenek listesi boşsa
     // filtre uygulanmaz.
-    const filtered = rows.filter(
+    // T29: a manager with NO active direct report is not its own delegate —
+    // the empty pool must keep meaning "staff the team first" (the
+    // NO_ELIGIBLE_DELEGATE hint that drives agent.hire), otherwise an
+    // unstaffed CEO would quietly take every subtask itself and the company
+    // would never be built. Self only competes once a team actually exists.
+    const hasReports = rows.some((r) => r.id !== managerAgentId);
+    const pool = hasReports ? rows : rows.filter((r) => r.id !== managerAgentId);
+    const filtered = pool.filter(
       (r) => Number(r.cap_total) === 0 || Number(r.cap_hits) > 0,
     );
     return filtered

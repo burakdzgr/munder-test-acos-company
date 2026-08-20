@@ -41,6 +41,7 @@ export {
   TaskResultSchema,
   AGENT_ACTION_TYPES,
   CONTEXT_SENTINEL_UUID,
+  SELF_SENTINEL_UUID,
   type AgentAction,
   type AgentActionType,
   type TaskResult,

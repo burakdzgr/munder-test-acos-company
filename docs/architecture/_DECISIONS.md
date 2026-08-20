@@ -175,6 +175,14 @@ APPROVAL transitions only via Approval Engine. All transitions emit `task.status
 **Delegation limits:** max delegation depth 5 (goal→subtask), max reassignments per task 3, then
 forced manager intervention; per-task token/cost budget inherited pro-rata from parent.
 
+**Manager self-assignment is legitimate** (Founder decision 2026-08-20, ADR-022): a manager may keep
+a slice of the work it just decomposed instead of delegating every child. The Scheduler stays the
+deterministic owner of assignment (INV-10) — the manager simply joins its own candidate pool under
+the same scoring, and an explicit self-choice (`delegate_task.toAgentId = SELF_SENTINEL_UUID`) still
+passes the reporting-line rule (07 §6 already permits self-assignment of one's own subtask) and the
+capacity model. Self-taken work counts against the manager's OWN WIP cap, and a manager with no
+active direct report is not its own candidate — an empty pool still means "staff the team first".
+
 ## 8. Agent runtime (the heart)
 
 - One **Temporal workflow per active task assignment**: `agentTaskWorkflow(agentId, taskId)`.
