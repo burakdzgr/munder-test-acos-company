@@ -136,16 +136,23 @@ async function main() {
   if (!hasColumn("tool_invocations", "id")) {
     record("SKIP", "the turn closed its task via the gateway", "no tool_invocations table");
   } else {
-    const sessionColumn = hasColumn("tool_invocations", "agent_session_id")
-      ? "agent_session_id"
+    // Scoping the audit rows to THIS session takes one of three shapes
+    // depending on how the row was written: the worker loop tags the agent
+    // session directly, while the CLI's builtin rows carry the MCP session's
+    // identity and reach the agent session through Oscar's mcp_sessions row
+    // (Kevin, T31 §3). Try them in order of directness.
+    const scope = hasColumn("tool_invocations", "agent_session_id")
+      ? `agent_session_id::text = '${session.id}'`
       : hasColumn("tool_invocations", "session_id")
-        ? "session_id"
-        : null;
-    if (!sessionColumn) {
+        ? `session_id::text = '${session.id}'`
+        : hasColumn("tool_invocations", "mcp_session_id") && hasColumn("mcp_sessions", "agent_session_id")
+          ? `mcp_session_id in (select id from mcp_sessions where agent_session_id::text = '${session.id}')`
+          : null;
+    if (!scope) {
       record("SKIP", "the turn closed its task via the gateway", "no session column to join on");
     } else {
       const rows = sql(
-        `select tool_name, count(*) from tool_invocations where ${sessionColumn}::text = '${session.id}' group by tool_name`,
+        `select tool_name, count(*) from tool_invocations where ${scope} group by tool_name`,
       );
       const names = rows.map((row) => row.split("|")[0]);
       const completed = names.some((name) => /complete_task/.test(name));
@@ -171,16 +178,40 @@ async function main() {
   if (!hasColumn("llm_calls", "agent_session_id")) {
     record("SKIP", "model calls are attributed to this session", "no llm_calls.agent_session_id");
   } else {
+    // Kevin's activity writes one llm_calls row per broker request, tagged
+    // runtime='cli'. Assert the tag too: rows without it mean the turn went
+    // through the old API-call path even though the PTY looked right.
     const count = Number(
+      sql(`select count(*) from llm_calls where agent_session_id::text = '${session.id}'`)[0] ?? "0",
+    );
+    const cliTagged = Number(
       sql(
-        `select count(*) from llm_calls where agent_session_id::text = '${session.id}'`,
+        `select count(*) from llm_calls where agent_session_id::text = '${session.id}' and context_telemetry->>'runtime' = 'cli'`,
       )[0] ?? "0",
     );
     record(
-      count > 0 ? "PASS" : "FAIL",
-      "model calls are attributed to this session",
-      `${count} llm_calls row(s)`,
+      count > 0 && cliTagged === count ? "PASS" : "FAIL",
+      "model calls are attributed to this session and tagged runtime=cli",
+      count === 0
+        ? "no llm_calls rows — nothing reached the broker"
+        : `${cliTagged}/${count} row(s) tagged runtime='cli'`,
     );
+
+    // The broker meters per session and the activity mirrors its request count
+    // into agent_sessions — so the two can be compared without a broker
+    // surface. A mismatch means requests happened that nothing accounted for.
+    if (!hasColumn("agent_sessions", "steps_count")) {
+      record("SKIP", "session accounting matches the broker", "no agent_sessions.steps_count");
+    } else {
+      const steps = Number(
+        sql(`select steps_count from agent_sessions where id::text = '${session.id}'`)[0] ?? "-1",
+      );
+      record(
+        steps === count ? "PASS" : "FAIL",
+        "session accounting matches the broker",
+        `agent_sessions.steps_count=${steps} vs ${count} metered request(s)`,
+      );
+    }
   }
 
   // ---- 4. it never held the key (INV-2 / S2) ------------------------------
