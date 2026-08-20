@@ -85,8 +85,12 @@ function preflight() {
   const cap = process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "";
   add(cap !== "", "MAX_LIVE_SESSIONS_PER_COMPANY set (gate P3 checks cap < roster once staffed)", cap || "unset");
 
+  // The workspace image must carry the CLI kit (/opt/acos/cli). A kit-less image
+  // starts, the session opens, and the turn quietly falls back — the run then
+  // "passes" while proving nothing about Decision A. Kevin builds and verifies
+  // the tag; naming the expected one here makes a stale value visible.
   const kit = process.env.ACOS_CLI_WORKSPACE_IMAGE ?? "";
-  add(kit !== "", "ACOS_CLI_WORKSPACE_IMAGE set (workspace image must carry the CLI kit)", kit || "unset");
+  add(kit !== "", "ACOS_CLI_WORKSPACE_IMAGE set (expected acos/workspace-node:e4-live)", kit || "unset");
 
   return checks.every((c) => c.ok);
 }
@@ -113,6 +117,26 @@ if (!FLAG("go")) {
   log("  4. live-run-runtime-evidence.sh report  (4a/4b/4d/4e + INV-2 scan)");
   log("  5. e2e-live-verify.mjs         (image identity + Oscar's control plane + 1d/409 + CLI session)");
   log("  6. e2e-stack.mjs down          (always, pass or fail)");
+  // The shape gate needs a STAFFED company, which only exists once a run is
+  // under way — so a dry run can only exercise it against an existing one.
+  // Pass --company to do that; otherwise say plainly where it does run, rather
+  // than printing a green that means nothing.
+  const dryCompany = arg("company", null);
+  if (dryCompany) {
+    log("\n-- precondition gate against the given company");
+    const gateSql = readFileSync(join(process.cwd(), "scripts", "live-run-precondition-gate.sql"), "utf8");
+    const out = spawnSync(
+      "docker",
+      ["compose", "-p", PROJECT, "-f", "infrastructure/docker/compose.yaml", "exec", "-T", "postgres",
+       "psql", "-U", "acos", "-d", "acos", "-At", "-F", "|", "-v", "ON_ERROR_STOP=1",
+       "-v", `company='${dryCompany}'`, "-v", `cap=${process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "2"}`, "-f", "-"],
+      { encoding: "utf8", input: gateSql },
+    );
+    for (const line of `${out.stdout ?? ""}${out.stderr ?? ""}`.trim().split("\n")) log(`   ${line}`);
+  } else {
+    log("\n   (shape gate P1-P3 not run here: it needs a staffed company. In --go it runs the");
+    log("    moment staffing lands and stops the driver on FAIL, before the expensive phase.)");
+  }
   process.exit(ready ? 0 : 3);
 }
 if (!ready) die("preflight has blockers — fix them before spending real tokens");
@@ -188,7 +212,7 @@ try {
     "docker",
     ["compose", "-p", PROJECT, "-f", "infrastructure/docker/compose.yaml", "exec", "-T", "postgres",
      "psql", "-U", "acos", "-d", "acos", "-At", "-F", "|", "-v", "ON_ERROR_STOP=1",
-     "-v", `company='${companyId}'`, "-v", `cap=${process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "3"}`, "-f", "-"],
+     "-v", `company='${companyId}'`, "-v", `cap=${process.env.MAX_LIVE_SESSIONS_PER_COMPANY ?? "2"}`, "-f", "-"],
     { encoding: "utf8", input: gateSql },
   );
   const gateText = `${gateOut.stdout ?? ""}${gateOut.stderr ?? ""}`.trim();
