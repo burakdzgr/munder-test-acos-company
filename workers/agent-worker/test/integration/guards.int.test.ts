@@ -8,6 +8,7 @@ import { Worker } from "@temporalio/worker";
 import { TestWorkflowEnvironment } from "@temporalio/testing";
 import { STEP_HARD_CAP, uuidv7 } from "@acos/domain";
 import { TASK_QUEUES } from "@acos/config";
+import { STUB_GUARD_SNAPSHOT, buildStubActivities } from "../support/stub-activities.js";
 
 const require = createRequire(import.meta.url);
 const workflowsPath = require.resolve("../../src/workflows/index.ts");
@@ -36,13 +37,7 @@ function makeStubActivities(options: StubOptions) {
     executed: [] as string[],
   };
   let scriptIndex = 0;
-  const activities = {
-    // E4/T31: the workflow asks the runtime first (patched "t31-cli-runtime");
-    // canned stubs answer "steps" like the base activity set does.
-    async resolveAgentRuntimeActivity() {
-      return { kind: "steps" as const, reason: "stub" };
-    },
-    async startAgentSessionActivity() {},
+  const activities = buildStubActivities({
     async buildWorkingSetActivity(input: { stepNo: number }) {
       return { messages: [{ role: "user", content: `step ${input.stepNo}` }], digest: "d" };
     },
@@ -65,16 +60,8 @@ function makeStubActivities(options: StubOptions) {
       calls.persisted.push({ stepNo: input.stepNo, actionType: input.action.type });
       return { inserted: true };
     },
-    async resumeFromWaitActivity() {},
     async getGuardSnapshotActivity() {
-      return {
-        budgetCents: null,
-        spentCents: 0,
-        remainingCents: null,
-        estimatedNextStepCents: 0,
-        deadline: null,
-        ...options.snapshot,
-      };
+      return { ...STUB_GUARD_SNAPSHOT, ...options.snapshot };
     },
     async guardEscalateActivity(input: { guard: string; detail: string }) {
       calls.guardEscalate.push({ guard: input.guard, detail: input.detail });
@@ -82,14 +69,7 @@ function makeStubActivities(options: StubOptions) {
     async closeAgentSessionActivity(input: { status: string }) {
       calls.sessionClosed.push(input.status);
     },
-    async triageInboxActivity() {
-      return { verdict: "ignore" as const };
-    },
-    async markInboxReadActivity() {},
-    async echoActivity(note: string) {
-      return `echo:${note}`;
-    },
-  };
+  });
   return { activities, calls };
 }
 
