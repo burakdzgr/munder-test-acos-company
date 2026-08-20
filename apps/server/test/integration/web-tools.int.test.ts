@@ -61,14 +61,15 @@ beforeAll(async () => {
     if (req.url?.startsWith("/search")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
-        JSON.stringify({
-          web: {
-            results: [
-              { title: "Fastify", url: "https://fastify.dev", description: "web framework" },
-              { title: "Zod", url: "https://zod.dev", description: "schema validation" },
-            ],
-          },
-        }),
+        // T22: sağlayıcı AbacusAI'ye geçti ve yanıt şekli DEĞİŞTİ (kök dizi),
+        // ama bu sahte sunucu eski sağlayıcının {web:{results}} şeklini
+        // konuşmaya devam ediyordu → dispatch "payload.slice is not a
+        // function" ile düşüyordu. Sahte sunucu artık üretimdeki sözleşmeyi
+        // kodluyor; sağlayıcı bir daha değişirse İKİSİ birden güncellenmeli.
+        JSON.stringify([
+          { title: "Fastify", url: "https://fastify.dev", description: "web framework" },
+          { title: "Zod", url: "https://zod.dev", description: "schema validation" },
+        ]),
       );
       return;
     }

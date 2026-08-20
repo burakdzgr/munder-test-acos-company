@@ -110,7 +110,10 @@ describe("companies module (T17)", () => {
       headers: authHeaders(),
     });
     expect(settings.statusCode).toBe(200);
-    expect(settings.json()).toMatchObject({ outputLanguage: "en", defaultAutonomyLevel: 2 });
+    // T22: varsayılan çıktı dili migration 0017 ile 'tr' oldu (Founder kararı,
+    // 2026-08-16: bu kurulumda Founder Türkçe çalışıyor). Test 'en' beklemeye
+    // devam ediyordu — davranış değil BEKLENTİ bayattı.
+    expect(settings.json()).toMatchObject({ outputLanguage: "tr", defaultAutonomyLevel: 2 });
   });
 
   it("updates settings and emits company.settings.updated", async () => {
@@ -130,8 +133,12 @@ describe("companies module (T17)", () => {
         sql`${events.companyId} = ${companyId} AND ${events.type} = 'company.settings.updated'`,
       );
     expect(eventRows).toHaveLength(1);
-    // seq 1 = company.created, 2 = company.member.added (T22), 3 = settings.updated
-    expect(eventRows[0]!.seq).toBe(3); // gap-free continuation
+    // seq 1 = company.created, 2 = company.member.added, 3 = budget.created,
+    // 4 = settings.updated. T22: 3. sıradaki budget.created SONRADAN eklendi
+    // (provisionCompanyDefaults şirketin günlük varsayılan bütçesini
+    // CostService üzerinden kuruyor ki Founder onu zaman çizelgesinde görsün).
+    // İddianın ASIL konusu boşluksuz devam — sayı değil, süreklilik.
+    expect(eventRows[0]!.seq).toBe(4); // gap-free continuation
   });
 
   it("non-members get 404 (no existence leaks — 21 §2.3)", async () => {

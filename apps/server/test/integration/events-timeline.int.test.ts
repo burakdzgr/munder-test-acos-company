@@ -223,6 +223,10 @@ describe("producer contract matrix (T22)", () => {
         "agent.resumed",
         "agent.started",
         "agent.updated",
+        // T22: şirket kurulurken varsayılan günlük bütçe CostService üzerinden
+        // kuruluyor ve olayı zaman çizelgesine düşüyor — matris elle tutulan
+        // bir liste olduğu için geride kalmıştı.
+        "budget.created",
         "company.created",
         "company.member.added",
         "company.settings.updated",
