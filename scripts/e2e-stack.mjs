@@ -56,6 +56,17 @@ const stackEnv = {
   // `up` aborts ("port is already allocated") — the offset list must cover
   // EVERY published port in compose.yaml, not just the famous four.
   OLLAMA_PORT: port(21434),
+  // OLLAMA LANDMINE (2026-08-20). seed.ts registers reasoning/coding/fast
+  // profiles for llama3.2:3b whenever OLLAMA_BASE_URL is set — but nothing
+  // ever PULLS that model, and the ollama volume lives under DATA_DIR, which
+  // teardown wipes. So the bottom of the live fallback chain was a guaranteed
+  // hard crash: the first call that fell through tier 1 (bridge 503 under
+  // load) died with `model 'llama3.2:3b' not found` and took the rework turn
+  // with it. An empty value (compose uses `${VAR-default}`, not `${VAR:-…}`)
+  // removes the tier entirely: scripted never calls a provider, and the live
+  // lane must run on the Claude bridge or fail LOUDLY — silently degrading a
+  // proof run to a 3B model is worse than not running it.
+  OLLAMA_BASE_URL: "",
   WORKSPACE_NET_NAME: `${PROJECT}-workspaces`,
   // Slot 0 keeps the historical subnet; isolated stacks move into 10.x so they
   // never overlap it or each other (172.16-172.31 has no room above 172.31).

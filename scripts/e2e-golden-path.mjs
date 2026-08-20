@@ -367,16 +367,30 @@ async function main() {
     // created when the agent reaches its FIRST tool call — seconds in scripted
     // mode, minutes on a live provider. A single read here reported "no PTY"
     // while the live run demonstrably had one (A7, 2026-08-19).
+    // The PTY is NOT bound to the dispatched task. `workTaskId` is what the
+    // scheduler handed out (the goal); the worktree — and therefore the
+    // terminal — is created for the LEAF delivery task the chain produces
+    // several levels down (goal -> initiative -> epic -> task). Matching on
+    // the dispatched id reported "NO PTY" on a run whose database held an
+    // active terminal_sessions row on TASK-4 the whole time (2026-08-20).
+    // The company is created by this run, so ANY terminal in it is ours;
+    // prefer the exact task, accept any descendant.
     const pty = await until(async () => {
       const terminals = await get(`/api/v1/companies/${state.companyId}/terminals`);
-      return list(terminals.body).find((t) => t.taskId === state.workTaskId) ?? null;
+      const items = list(terminals.body);
+      return (
+        items.find((t) => t.taskId === state.workTaskId) ??
+        items.find((t) => t.taskId) ??
+        null
+      );
     }, LANE === "scripted" ? T.short : T.long, 5000);
     if (!pty) {
-      const detail = `session ${session.status}/${session.currentActivity} but NO PTY terminal bound to the task - worktree work is not live/observable`;
+      const detail = `session ${session.status}/${session.currentActivity} but NO PTY terminal in the company - worktree work is not live/observable`;
       return LANE === "scripted" ? LANE_LIMIT(detail) : BREAK(detail, "sandbox-manager:terminal");
     }
     state.terminalId = pty.id;
-    return PASS(`session ${session.status} + PTY ${pty.id}`);
+    const on = pty.taskNumber ? `TASK-${pty.taskNumber}` : "task";
+    return PASS(`session ${session.status} + PTY ${pty.id} on ${on} (${pty.branch ?? "no branch"})`);
   });
 
   // 07 §2: `goal` and `initiative` are CONTAINERS. They never carry review

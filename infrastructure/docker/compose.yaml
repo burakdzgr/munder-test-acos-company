@@ -131,7 +131,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CLAUDE_CLI_BRIDGE_URL: ${CLAUDE_CLI_BRIDGE_URL:-}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # `-` (`:-` DEĞİL): açıkça BOŞ verilen değer korunur. Boş bırakmak
+      # Ollama katmanını tamamen kapatır — seed.ts yalnızca
+      # OLLAMA_BASE_URL doluyken llama3.2:3b profillerini yazar ve model
+      # çekilmemişse zincirin dibi garantili çökme olur (2026-08-20 canlı
+      # koşusu tam olarak burada öldü: 'model llama3.2:3b not found').
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL-http://ollama:11434}
       # D4 (27 §12): per-project egress allowlist include, rendered here and
       # read by egress-proxy (read-only on its side).
       EGRESS_INCLUDE_PATH: /var/acos/egress/projects.conf
@@ -197,7 +202,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CLAUDE_CLI_BRIDGE_URL: ${CLAUDE_CLI_BRIDGE_URL:-}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      # `-` (`:-` DEĞİL): açıkça BOŞ verilen değer korunur. Boş bırakmak
+      # Ollama katmanını tamamen kapatır — seed.ts yalnızca
+      # OLLAMA_BASE_URL doluyken llama3.2:3b profillerini yazar ve model
+      # çekilmemişse zincirin dibi garantili çökme olur (2026-08-20 canlı
+      # koşusu tam olarak burada öldü: 'model llama3.2:3b not found').
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL-http://ollama:11434}
       # use_tool → Tool Gateway internal HTTP (T40, S3)
       SERVER_INTERNAL_URL: http://server:3000
       # TASK 6: greenfield bootstrap sandbox'a doğrudan gider
