@@ -314,16 +314,39 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
         taskId,
         authorAgentId,
       });
-      if (review.reviewerAgentId && deps.startReviewWorkflow) {
-        await deps.startReviewWorkflow({
-          companyId: ctx.companyId,
-          reviewId: review.id,
-          taskId,
-          reviewerAgentId: review.reviewerAgentId,
-          authorAgentId,
-        });
+      // T53: bu dal eskiden `if (reviewer && deps.startReviewWorkflow)` idi ve
+      // dep YOKSA hiçbir iz bırakmadan atlıyordu — "başlatıldı" ile "hiç
+      // başlatılmadı" ayırt EDİLEMİYORDU. E4 canlı run #2'nin platosu buydu:
+      // sunucunun MCP dispatcher'ında dep eksikti, `reviews` satırı `pending`
+      // açılıyor, görev REVIEW'da kalıyor, sweep §4 bu hali kasten dışladığı
+      // için kilit kendini açmıyordu. P0-2'de aynı yolda yutulan
+      // REVIEW_NO_ELIGIBLE_REVIEWER ile AYNI SINIF sessizlik; ikinci ağzı da
+      // kapatıyoruz. `startedWorkflow` çağırana gerçeği söyler.
+      let startedWorkflow = false;
+      if (review.reviewerAgentId) {
+        if (deps.startReviewWorkflow) {
+          await deps.startReviewWorkflow({
+            companyId: ctx.companyId,
+            reviewId: review.id,
+            taskId,
+            reviewerAgentId: review.reviewerAgentId,
+            authorAgentId,
+          });
+          startedWorkflow = true;
+        } else {
+          console.warn(
+            "review opened but no startReviewWorkflow dependency is wired — the reviewer's turn will NOT start; the task stays in REVIEW until the stuck-task sweep reopens it",
+            {
+              companyId: ctx.companyId,
+              taskId,
+              reviewId: review.id,
+              reviewerAgentId: review.reviewerAgentId,
+              authorAgentId,
+            },
+          );
+        }
       }
-      return { reviewId: review.id, reviewerAgentId: review.reviewerAgentId };
+      return { reviewId: review.id, reviewerAgentId: review.reviewerAgentId, startedWorkflow };
     } catch (err) {
       if (err instanceof ReviewError &&
           (err.code === "REVIEW_TASK_INVALID" || err.code === "REVIEW_NO_ELIGIBLE_REVIEWER")) {
@@ -465,7 +488,14 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
             ok: true,
             status: updated.status,
             reviewRequested: true,
-            ...(opened && { reviewId: opened.reviewId, reviewerAgentId: opened.reviewerAgentId }),
+            // T53: `reviewStarted:false` = satır açıldı ama incelemecinin turu
+            // BAŞLAMADI. Gözlem yüzeyinde görünmesi şart; aksi halde ajan da
+            // denetim de bunu başarılı bir devir sanır.
+            ...(opened && {
+              reviewId: opened.reviewId,
+              reviewerAgentId: opened.reviewerAgentId,
+              reviewStarted: opened.startedWorkflow,
+            }),
           };
         }
         case "use_tool": {
@@ -1142,7 +1172,7 @@ export function createActionDispatcher(deps: ActionDispatchDeps) {
                 ok: true,
                 completed: false,
                 reviewRequested: true,
-                ...(opened && { reviewId: opened.reviewId }),
+                ...(opened && { reviewId: opened.reviewId, reviewStarted: opened.startedWorkflow }),
               };
             } catch (err) {
               if (err instanceof TaskEngineError) {

@@ -68,6 +68,10 @@ declare module "fastify" {
     approvalSignalPort: ApprovalSignalPort | null;
     /** Assignment → agentTaskWorkflow start (09 §4) — attached by main.ts (T36). */
     agentWorkflowStarter: import("./modules/workflows/client.js").AgentWorkflowStarter | null;
+    /** request_review → reviewWorkflow start (15 §2, T43) — attached by main.ts
+     *  (T53). null ⇒ Temporal yok: inceleme satırı yine açılır ama turu kimse
+     *  başlatmaz, bu yüzden dispatcher bunu SESSİZ geçmez, warn'lar. */
+    reviewWorkflowStarter: import("./modules/workflows/client.js").ReviewWorkflowStarter | null;
     /** Tool execution seam (17 §4 step 7) — attached by T40 wiring; null ⇒
      *  allow-decisions dispatch-fail (still audited). */
     toolDispatchPort: ToolDispatchPort | null;
@@ -322,6 +326,7 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
   await registerAgentRoutes(app, agentsSvc, companiesSvc);
   await registerEventRoutes(app, eventsSvc, companiesSvc);
   app.decorate("agentWorkflowStarter", null);
+  app.decorate("reviewWorkflowStarter", null);
   await registerTaskRoutes(
     app,
     tasksSvc,
@@ -499,6 +504,22 @@ export async function buildApp(options: BuildAppOptions): Promise<App> {
           guardedDb: options.guardedDb,
           startAgentWorkflow: async (input) => {
             await app.agentWorkflowStarter?.(input);
+          },
+          // T53 — E4 canlı run #2'nin platosu tam buradaydı: bu dep YOKTU.
+          // CLI şeridinde her `request_review` sunucunun MCP dispatcher'ından
+          // geçiyor; dep olmayınca `dispatch.ts` inceleme workflow'unu SESSİZCE
+          // atlıyor, görev REVIEW'da kalıcı kilitleniyordu (sweep §4 bu hali
+          // kasten dışlar). Starter yoksa (Temporal kapalı) sessiz geçmiyoruz:
+          // satır durur, savunma katmanı sweep onu kurtarır, ama log'da görünür.
+          startReviewWorkflow: async (input) => {
+            if (!app.reviewWorkflowStarter) {
+              app.log.warn(
+                { taskId: input.taskId, reviewId: input.reviewId, reviewerAgentId: input.reviewerAgentId },
+                "review opened but no reviewWorkflow starter is wired — the reviewer's turn will NOT start until the stuck-task sweep picks it up",
+              );
+              return;
+            }
+            await app.reviewWorkflowStarter(input);
           },
           ...(app.commsSignalPort && { signalPort: app.commsSignalPort }),
           invokeTool: async (req) => {

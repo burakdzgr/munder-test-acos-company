@@ -278,3 +278,87 @@ describe("review → QA → kapanış (P0-2)", { timeout: 120_000 }, () => {
     expect(await statusOf(task.id)).toBe("QA");
   });
 });
+
+// T53 — E4 canlı run #2'nin kök-nedeni: inceleme AÇILIYOR ama TURU BAŞLAMIYOR.
+//
+// `openCodeReview` eskiden `if (reviewer && deps.startReviewWorkflow)` diyordu:
+// dep YOKSA hiçbir iz bırakmadan atlıyordu. Sunucunun MCP dispatcher'ı (CLI
+// şeridinin TEK aksiyon yolu — Decision A) o dep olmadan kuruluyordu, yani her
+// `request_review` sessizce yarım kalıyordu: `reviews` satırı `pending` açılır,
+// görev REVIEW'a geçer, gözlem `{reviewRequested:true}` döner — ve incelemecinin
+// turu HİÇ başlamaz. Canlı sonuç: 2 leaf REVIEW'da dondu, 5 konteyner çocuk-DONE
+// bekleyerek WAITING'de kaldı, 0 DONE. Elle başlatılan TEK reviewWorkflow 300
+// ms'de tamamlandı ve zincir kendiliğinden aktı — eksik olan tek şey BAŞLATICIYDI.
+//
+// Bu test o sessizliği kilitler: dep yoksa gözlem `reviewStarted:false` DEMEK
+// ZORUNDA. "Başarı" ile "hiç başlamadı" ayırt edilebilir olmalı.
+describe("request_review → reviewWorkflow başlatıcısı (T53)", { timeout: 120_000 }, () => {
+  async function inProgressTask(title: string) {
+    counter += 1;
+    const task = await tasksService.create(
+      ctx,
+      { kind: "task", title: `${title} ${counter}`, objective: "x", projectId },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, task.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, task.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, task.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, task.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+    return task;
+  }
+
+  const requestReview = async (
+    dispatcher: { dispatch: (i: Record<string, unknown>) => Promise<Record<string, unknown>> },
+    taskId: string,
+  ) =>
+    dispatcher.dispatch({
+      companyId,
+      agentId: OWNER,
+      taskId,
+      sessionId: crypto.randomUUID(),
+      stepId: crypto.randomUUID(),
+      action: { type: "request_review", taskId, summary: "bitti" },
+    });
+
+  it("başlatıcı YOKSA: satır açılır ama gözlem reviewStarted:false der (sessiz yutma yok)", async () => {
+    const { createActionDispatcher } = await import("@acos/agent-actions");
+    const dispatcher = createActionDispatcher({ guardedDb }); // dep BİLEREK yok
+    const task = await inProgressTask("Başlatıcısız inceleme");
+
+    const observation = await requestReview(dispatcher, task.id);
+
+    expect(observation.ok).toBe(true);
+    expect(observation.reviewRequested).toBe(true);
+    // inceleme kaydı GERÇEKTEN açıldı — vakumlu bir "false" değil bu
+    expect(observation.reviewId).toBeDefined();
+    expect(await statusOf(task.id)).toBe("REVIEW");
+    // ASIL İDDİA: gözlem yalan söylemiyor
+    expect(observation.reviewStarted).toBe(false);
+  });
+
+  it("başlatıcı VARSA: aynı akış reviewStarted:true der ve doğru review'u başlatır", async () => {
+    const started: Array<{ reviewId: string; taskId: string; reviewerAgentId: string }> = [];
+    const { createActionDispatcher } = await import("@acos/agent-actions");
+    const dispatcher = createActionDispatcher({
+      guardedDb,
+      startReviewWorkflow: async (input) => {
+        started.push({
+          reviewId: input.reviewId,
+          taskId: input.taskId,
+          reviewerAgentId: input.reviewerAgentId,
+        });
+      },
+    });
+    const task = await inProgressTask("Başlatıcılı inceleme");
+
+    const observation = await requestReview(dispatcher, task.id);
+
+    expect(observation.reviewStarted).toBe(true);
+    expect(started).toHaveLength(1);
+    expect(started[0]!.taskId).toBe(task.id);
+    // açılan satırın TA KENDİSİ başlatılmalı — başkası değil
+    expect(started[0]!.reviewId).toBe(observation.reviewId);
+    // INV-14: yazarın kendisi değil
+    expect(started[0]!.reviewerAgentId).not.toBe(OWNER);
+  });
+});

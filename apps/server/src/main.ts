@@ -224,6 +224,15 @@ async function main(): Promise<void> {
       guardedDb, // ajan başına tek canlı oturum kapısı (kuyruk)
       config.agentRuntime.maxLiveSessionsPerCompany, // E4/A: şirket eşzamanlılık tavanı
     );
+    // T53: request_review → incelemecinin reviewWorkflow'u. Sunucu bu workflow'u
+    // ZATEN başlatabiliyordu (aşağıda sweep'in `review_reopened` bulgusu için),
+    // eksik olan yalnızca MCP dispatcher'ın dep'iydi — CLI şeridinde inceleme
+    // zincirinin hiç başlamamasının tek sebebi buydu.
+    const { createReviewWorkflowStarter } = await import("./modules/workflows/client.js");
+    app.reviewWorkflowStarter = createReviewWorkflowStarter(
+      temporalClient,
+      (err, input) => app.log.warn({ err, ...input }, "reviewWorkflow start failed"),
+    );
     // project creation → projectIntakeWorkflow on the intake queue (T42)
     app.intakeStarter = async ({ companyId, projectId, source }) => {
       await temporalClient.workflow
@@ -347,7 +356,14 @@ async function main(): Promise<void> {
         // P0-2: kadro tamamlanınca yeniden açılan inceleme — reviewer'ın
         // reviewWorkflow'u burada başlar (worker main'deki starter ile aynı
         // id şeması: review.<reviewId>; duplicate start yutulur)
-        if (finding.kind === "review_reopened" && finding.review && temporalClientRef) {
+        // T53: `review_never_started` de aynı işlemi ister — incelemeci atanmış
+        // ama turu hiç açılmamış. Aynı `review.<reviewId>` id'si kullanıldığı
+        // için dispatcher ile sweep yarışırsa ikinci başlatma zararsız yutulur.
+        if (
+          (finding.kind === "review_reopened" || finding.kind === "review_never_started") &&
+          finding.review &&
+          temporalClientRef
+        ) {
           await temporalClientRef.workflow
             .start("reviewWorkflow", {
               taskQueue: "agent-tasks",

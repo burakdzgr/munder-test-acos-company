@@ -294,15 +294,25 @@ describe("stuck-task sweep (09 §9, 07 §8)", { timeout: 60_000 }, () => {
     // INV-14: yazar değil — inceleme-yetkin MANAGER seçildi
     expect(finding!.review?.reviewerAgentId).toBe(MANAGER);
     const rows = await db
-      .select({ status: reviews.status, reviewerAgentId: reviews.reviewerAgentId })
+      .select({ id: reviews.id, status: reviews.status, reviewerAgentId: reviews.reviewerAgentId })
       .from(reviews)
       .where(and(eq(reviews.companyId, companyId), eq(reviews.taskId, task.id)));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.status).toBe("pending");
 
-    // açık review satırı varken ikinci sweep aynı görevi bir daha almaz
+    // Açık review satırı varken sweep aynı görevi bir daha YENİDEN AÇMAZ...
     const again = await sweepStuckTasks(db, guardedDb, { now: later });
-    expect(again.findings.filter((f) => f.taskId === task.id)).toHaveLength(0);
+    expect(again.findings.filter((f) => f.kind === "review_reopened" && f.taskId === task.id)).toHaveLength(0);
+    // ...ama T53'ten beri sessizce bırakmaz da: satır `pending` ve incelemecinin
+    // turu hiç açılmadıysa 4b kuralı onu `review_never_started` olarak bildirir
+    // ve çağıran aynı `review.<reviewId>` ile workflow'u başlatır. Eskiden bu
+    // hal HİÇBİR kuralın kapsamında değildi — görev REVIEW'da kalıcı kilitliydi.
+    const stalled = again.findings.find(
+      (f) => f.taskId === task.id && f.kind === "review_never_started",
+    );
+    expect(stalled).toBeDefined();
+    expect(stalled!.review?.reviewId).toBe(rows[0]!.id);
+    expect(stalled!.review?.reviewerAgentId).toBe(MANAGER);
   });
 
   it("QA'da incelemecisiz asılı kalan görevi de yeniden açar — ve turu QA olarak açar (T11b)", async () => {
@@ -368,6 +378,89 @@ describe("stuck-task sweep (09 §9, 07 §8)", { timeout: 60_000 }, () => {
     expect(rows).toHaveLength(1);
     // QA'daki bir görev için 'code' turu açmak incelemeyi bir adım geri sarardı
     expect(rows[0]!.kind).toBe("qa");
+  });
+
+  it("incelemecisi ATANMIŞ ama turu hiç başlamamış incelemeyi kurtarır (T53 — E4 canlı platosu)", async () => {
+    // E4 canlı run #2'nin donduğu tam hal: dispatcher review satırını AÇTI,
+    // incelemeciyi ATADI, ama reviewWorkflow'u hiç BAŞLATMADI (sunucunun MCP
+    // dispatcher'ında dep eksikti). §4 yalnız review satırı OLMAYAN yetimi
+    // görüyor (`NOT EXISTS pending|in_review`), yani bu hal kuralın bilerek
+    // dışındaydı: görev REVIEW'da KALICI kilitliydi — 30 dk sonra da açılmazdı.
+    const [project] = await db
+      .insert(projects)
+      .values({
+        companyId,
+        slug: `stalledproj${(counter += 1)}`,
+        name: "stalledproj",
+        objectiveMd: "x",
+        status: "executing",
+        createdByUserId: founderUserId,
+      })
+      .returning();
+    const [repo] = await db
+      .insert(repositories)
+      .values({
+        companyId,
+        projectId: project!.id,
+        name: "stalledproj",
+        barePath: `/data/repos/${project!.id}.git`,
+      })
+      .returning();
+    const task = await service.create(
+      ctx,
+      { kind: "task", title: `Turu başlamayan inceleme ${counter}`, objective: "x", projectId: project!.id },
+      { kind: "founder" },
+    );
+    await state.transition(ctx, task.id, "BACKLOG", { kind: "founder" });
+    await state.transition(ctx, task.id, "PLANNED", { kind: "founder" });
+    await state.assign(ctx, task.id, { agentId: OWNER }, { kind: "founder" });
+    await state.transition(ctx, task.id, "IN_PROGRESS", { kind: "agent", agentId: OWNER });
+    await state.transition(ctx, task.id, "REVIEW", { kind: "agent", agentId: OWNER });
+    // dispatcher'ın yaptığı: satır açıldı + incelemeci atandı, workflow YOK
+    const [review] = await db
+      .insert(reviews)
+      .values({
+        companyId,
+        taskId: task.id,
+        projectId: project!.id,
+        repositoryId: repo!.id,
+        branch: `task/${counter}-stalled`,
+        kind: "code",
+        authorAgentId: OWNER,
+        reviewerAgentId: MANAGER,
+      })
+      .returning();
+
+    // eşik dolmadan dokunmaz — sağlıklı bir inceleme yarıda yakalanmasın
+    const early = await sweepStuckTasks(db, guardedDb);
+    expect(early.findings.filter((f) => f.taskId === task.id)).toHaveLength(0);
+
+    const later = new Date(Date.now() + 6 * 60 * 1000);
+    const result = await sweepStuckTasks(db, guardedDb, { now: later });
+    const finding = result.findings.find((f) => f.taskId === task.id);
+    // ÖNCEDEN: bu görev hiç görülmezdi
+    expect(finding).toBeDefined();
+    expect(finding!.kind).toBe("review_never_started");
+    // Çağıran AYNI review'u başlatmalı — yenisini açmak turu geri sarardı
+    expect(finding!.review?.reviewId).toBe(review!.id);
+    expect(finding!.review?.reviewerAgentId).toBe(MANAGER);
+    expect(finding!.review?.authorAgentId).toBe(OWNER);
+    // ve YENİ review satırı AÇILMAMALI (tek inceleme, tek yürütme)
+    const rows = await db
+      .select({ id: reviews.id })
+      .from(reviews)
+      .where(and(eq(reviews.companyId, companyId), eq(reviews.taskId, task.id)));
+    expect(rows).toHaveLength(1);
+
+    // turu BAŞLAMIŞ bir inceleme (in_review) bu kuralın işi değildir
+    await db
+      .update(reviews)
+      .set({ status: "in_review" })
+      .where(and(eq(reviews.companyId, companyId), eq(reviews.id, review!.id)));
+    const afterStart = await sweepStuckTasks(db, guardedDb, { now: later });
+    expect(
+      afterStart.findings.filter((f) => f.taskId === task.id && f.kind === "review_never_started"),
+    ).toHaveLength(0);
   });
 
   it("HİÇ çocuğu olmayan konteyneri bildirir ve BİR KEZ eskale eder (T11a)", async () => {

@@ -28,7 +28,7 @@ import type { GuardedDb } from "./tenant.js";
 import { TasksService, TaskStateService } from "./task-engine.js";
 import { DelegationService } from "./delegation.js";
 import { ReviewError, ReviewsService } from "./reviews.js";
-import { agentSessions, orgEdges, tasks } from "./schema/index.js";
+import { agentSessions, orgEdges, reviews, tasks } from "./schema/index.js";
 import { appendEvents } from "./outbox.js";
 
 /** 07 §8 [WRITER-DECISION]: "default 2h" — görev kendi süresini taşımıyorsa. */
@@ -71,11 +71,12 @@ export interface StuckTaskFinding {
     | "rework_stalled"
     | "orphan_child_assigned"
     | "review_reopened"
+    | "review_never_started"
     | "container_childless";
   /** Sahibinin canlı oturumu yoksa çağıran workflow'u yeniden başlatmalı. */
   needsWorkflowRestart: boolean;
   stuckForMs: number;
-  /** review_reopened: çağıran reviewWorkflow'u bu bilgiyle başlatmalı. */
+  /** review_reopened + review_never_started: çağıran reviewWorkflow'u bu bilgiyle başlatmalı. */
   review?: { reviewId: string; reviewerAgentId: string; authorAgentId: string };
 }
 
@@ -412,6 +413,70 @@ export async function sweepStuckTasks(
     }
   }
 
+  // 4b. BAŞLAMAYAN İNCELEMELER (T53 — E4 canlı run #2'nin kök-nedeni). §4 yalnız
+  // review satırı OLMAYAN yetimi görür (`NOT EXISTS pending|in_review`); tam
+  // tersi hal — satır VAR, incelemeci ATANMIŞ, ama incelemecinin turu HİÇ
+  // başlamamış — o filtrenin bilerek dışında kalıyordu ve hiçbir mekanizma onu
+  // kurtarmıyordu: görev REVIEW'da KALICI kilitleniyordu.
+  //
+  // Canlı kanıt (2026-08-21, 20:40): sunucunun MCP dispatcher'ında
+  // `startReviewWorkflow` dep'i eksikti; iki leaf REVIEW'da dondu, 5 konteyner
+  // çocuk-DONE bekleyerek WAITING'de kaldı, 0 DONE. Elle başlatılan TEK
+  // reviewWorkflow 300 ms'de tamamlandı ve zincir kendiliğinden yeniden aktı —
+  // eksik olan tek şey BAŞLATICIYDI.
+  //
+  // Bu kural o wiring'e GÜVENMEZ: incelemeyi hangi dispatcher açarsa açsın,
+  // tur açılmamışsa sweep aynı `review.<reviewId>` ile başlatır (duplicate
+  // start yutulur, çift yürütme olmaz). Savunma katmanı; asıl düzeltme
+  // dispatcher'ın dep'idir.
+  const stalledReviewRows = await db.execute(sql`
+    SELECT t.id, t.company_id, t.number, t.title, t.owner_agent_id,
+           r.id AS review_id, r.reviewer_agent_id, r.author_agent_id,
+           r.created_at AS since
+      FROM ${tasks} t
+      JOIN ${reviews} r
+        ON r.company_id = t.company_id AND r.task_id = t.id
+     WHERE t.status IN ('REVIEW', 'QA')
+       AND r.status = 'pending'
+       AND r.reviewer_agent_id IS NOT NULL
+       -- §4 ile aynı gerekçe: konteynerler roll-up ile kapanır, inceleme görmez.
+       AND t.kind NOT IN ('goal', 'initiative')
+       -- Turu açılmış bir inceleme burada işimiz değil: in_review zaten
+       -- başlamış demektir; pending + zaman ise 'hiç başlamadı'nın imzasıdır.
+  `);
+  const stalledReviews = (stalledReviewRows.rows as Array<{
+    id: string;
+    company_id: string;
+    number: number;
+    title: string;
+    owner_agent_id: string | null;
+    review_id: string;
+    reviewer_agent_id: string;
+    author_agent_id: string;
+    since: string | Date;
+  }>).filter((r) => now.getTime() - new Date(r.since).getTime() >= orphanStaleMs);
+
+  for (const stalled of stalledReviews) {
+    result.findings.push({
+      companyId: stalled.company_id,
+      taskId: stalled.id,
+      taskNumber: Number(stalled.number),
+      title: stalled.title,
+      ownerAgentId: stalled.owner_agent_id,
+      managerAgentId: stalled.owner_agent_id
+        ? await managerOf(db, stalled.company_id, stalled.owner_agent_id)
+        : null,
+      kind: "review_never_started",
+      needsWorkflowRestart: false,
+      stuckForMs: now.getTime() - new Date(stalled.since).getTime(),
+      review: {
+        reviewId: stalled.review_id,
+        reviewerAgentId: stalled.reviewer_agent_id,
+        authorAgentId: stalled.author_agent_id,
+      },
+    });
+  }
+
   // 5. ÇOCUKSUZ KONTEYNERLER (T11a): 07 §2'ye göre hedef/girişim kendi işini
   // YAPMAZ, çocuklarından TÜREYEREK kapanır. Sahibi hiç bölmeden turunu
   // kapatırsa (ya da complete_task'ı konteyner fence'ine çarparsa) ortada
@@ -533,6 +598,8 @@ export function describeStuckTask(finding: StuckTaskFinding): string {
           ? `${minutes} dakikadır HİÇ alt görevi olmayan bir konteyner olarak IN_PROGRESS — bölünmesi ya da iptali gerekiyor`
           : finding.kind === "review_reopened"
             ? `${minutes} dakikadır incelemecisiz REVIEW/QA'daydı — tur yeniden açıldı`
+            : finding.kind === "review_never_started"
+              ? `${minutes} dakikadır incelemecisi ATANMIŞ ama turu hiç başlamamış bir inceleme bekliyor — reviewWorkflow başlatılıyor`
             : finding.kind === "rework_stalled"
               ? `${minutes} dakikadır düzeltme bekliyor ama tur hiç başlamadı`
               : `${minutes} dakikadır atanmış ama başlamadı`;
