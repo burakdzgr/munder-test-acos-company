@@ -143,6 +143,9 @@ if (!ready) die("preflight has blockers — fix them before spending real tokens
 
 mkdirSync(OUT_DIR, { recursive: true });
 const runStart = new Date().toISOString();
+// This run's company slug, handed to the driver and used to adopt the company
+// by identity rather than by "newest".
+const RUN_SLUG = `gp-live-${runStart.replace(/[-:.TZ]/g, "").slice(0, 14)}`;
 let watcher = null;
 let exitCode = 2;
 
@@ -159,31 +162,56 @@ try {
   // tmpfs and vanish when the container is reaped. Evidence has to be taken
   // while the agents are alive, or the report says SKIP and we learn nothing.
   const mapPath = join(OUT_DIR, "golden-path.json");
+  // Both env names, on purpose: the driver reads ACOS_E2E_BASE_URL first and
+  // ACOS_SERVER_URL second, and setting only one of them is what sent a
+  // Founder-witnessed run to the default port and produced nothing.
   const driver = spawn(
     "node",
     ["scripts/e2e-golden-path.mjs", "--json", mapPath],
-    { env: { ...stackEnv, ACOS_E2E_BASE_URL: SLOT_SERVER, ACOS_E2E_LANE: "live" }, stdio: "inherit" },
+    {
+      env: {
+        ...stackEnv,
+        ACOS_E2E_BASE_URL: SLOT_SERVER,
+        ACOS_SERVER_URL: SLOT_SERVER,
+        ACOS_E2E_COMPANY_SLUG: RUN_SLUG,
+        ACOS_E2E_LANE: "live",
+      },
+      stdio: "inherit",
+    },
   );
+  let driverCode = null;
   const driverExit = new Promise((resolve) => driver.on("exit", (code) => resolve(code ?? 1)));
+  driverExit.then((code) => { driverCode = code; });
 
+  // Adopt the company by the slug WE handed the driver. "Newest company" is not
+  // identity: stack up seeds the demo org after runStart, so that heuristic
+  // adopts a fully-staffed fixture when the driver is already dead — the run
+  // then measures the seed and reports shape gates green with zero agent turns.
   const companyId = await (async () => {
     for (let i = 0; i < 120; i += 1) {
       try {
         const response = await fetch(`${SLOT_SERVER}/api/v1/companies`);
         const body = await response.json();
         const items = Array.isArray(body) ? body : (body?.items ?? []);
-        const fresh = items.find((c) => Date.parse(c.createdAt ?? 0) >= Date.parse(runStart) - 5_000);
-        if (fresh?.id) return fresh.id;
+        const mine = items.find((c) => c.slug === RUN_SLUG);
+        if (mine?.id) return mine.id;
       } catch {
         /* server still starting */
       }
+      // A driver that has exited without creating its company is a dead run.
+      // Waiting out the full budget only delays the same verdict.
+      if (driverCode !== null) return null;
       await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
     return null;
   })();
   if (!companyId) {
     driver.kill();
-    die("no company appeared within 10 minutes — the driver never got started");
+    die(
+      driverCode === null
+        ? `no company with slug ${RUN_SLUG} appeared within 10 minutes — the driver never got started`
+        : `the driver exited (code ${driverCode}) without creating company ${RUN_SLUG} — nothing ran, see its output above`,
+    );
   }
   const officeUrl = `http://localhost:${SLOT_WEB}/c/${companyId}/office-window`;
   writeFileSync(join(OUT_DIR, "office-window.txt"), `${officeUrl}\n`);

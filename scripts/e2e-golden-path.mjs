@@ -16,7 +16,12 @@
 // it — the runner refuses the dev port unless `--allow-live` is passed.
 import { readFileSync, writeFileSync } from "node:fs";
 
-const BASE = process.env.ACOS_SERVER_URL ?? "http://localhost:13000";
+// Two names reach this runner: `ACOS_SERVER_URL` (how a human starts it) and
+// `ACOS_E2E_BASE_URL` (what the live-run wrapper and the verifiers already use
+// everywhere else). Reading only one of them cost a Founder-witnessed live run:
+// the wrapper set the E2E name, this line read the other, the driver dialled the
+// default port, and the run produced nothing. Accept both.
+const BASE = process.env.ACOS_E2E_BASE_URL ?? process.env.ACOS_SERVER_URL ?? "http://localhost:13000";
 const ALLOW_LIVE = process.argv.includes("--allow-live");
 // The live workload run drives this same script but must produce the SHAPE the
 // live assert set expects (Oscar's plan §1): a goal that splits into 2+ leaves
@@ -196,7 +201,16 @@ async function bootstrapCeo() {
 async function main() {
   console.log(`golden-path runner -> ${BASE}  [lane=${LANE}]`);
 
-  const health = await get("/api/health");
+  // A refused connection makes fetch REJECT, so an unreachable base url used to
+  // surface as an unhandled rejection stack trace instead of this message —
+  // exactly the wrong thing to read when a live run has just died.
+  let health = { ok: false, status: 0 };
+  try {
+    health = await get("/api/health");
+  } catch (error) {
+    console.error(`server unreachable at ${BASE} (${error?.cause?.code ?? error?.message ?? "connect failed"}) - start one with: node scripts/e2e-stack.mjs up`);
+    process.exit(2);
+  }
   if (!health.ok) {
     console.error(`server unreachable at ${BASE} (${health.status}) - start one with: node scripts/e2e-stack.mjs up`);
     process.exit(2);
@@ -215,8 +229,13 @@ async function main() {
   }
 
   await stage("01-company-create", "Founder creates a company", async () => {
-    const slug = `gp-${STAMP}`;
-    const created = await post("/api/v1/companies", { name: `Golden Path ${STAMP}`, slug, currency: "USD" });
+    // The wrapper needs to identify THIS run's company with certainty. Picking
+    // "the newest company" is not identity: `e2e-stack.mjs up` seeds the demo
+    // org (SEED_DEMO=true) after the wrapper stamps its start, so a dead driver
+    // still leaves a freshly-created, fully-staffed company for the wrapper to
+    // adopt — which is how a run with zero agent turns passed a shape gate.
+    const slug = process.env.ACOS_E2E_COMPANY_SLUG || `gp-${STAMP}`;
+    const created = await post("/api/v1/companies", { name: `Golden Path ${slug.replace(/^gp-/, "")}`, slug, currency: "USD" });
     if (!created.ok) return BREAK(`POST /companies -> ${created.status} ${brief(created.body)}`, "server:companies");
     state.companyId = created.body.id;
     return PASS(`company ${slug} (${state.companyId})`);

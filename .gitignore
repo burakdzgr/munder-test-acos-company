@@ -16,3 +16,10 @@ apps/web/test-results/
 apps/web/playwright-report/
 apps/web/scripts/.pixellab-cache/
 apps/web/scripts/pixellab-run.log
+
+# Live workload run output (evidence, golden-path map, office-window url).
+# It is written INTO the repo root before the stack comes up, so leaving it
+# tracked-visible makes the tree dirty and stamps the images `<sha>-dirty` —
+# the four-layer verify then fails "runs the commit under test" on its own
+# artifacts.
+live-run-*/
