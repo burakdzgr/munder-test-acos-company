@@ -355,7 +355,15 @@ async function main() {
       return PASS(`approval ${decision.approval.kind} "${decision.approval.title}"`);
     }
     state.staffedViaProposal = true;
-    return PASS(`staffing proposal ${decision.proposal.status} - ONE Founder decision, zero pending hire approvals (FAZ 2A path)`);
+    // T25's hard edge: the batched proposal REPLACES hire approvals, it does not
+    // precede them. A hire/staffing approval row in ANY status here means the old
+    // path fired too and the Founder is being asked twice for one decision.
+    const every = await get(`/api/v1/companies/${state.companyId}/approvals`);
+    const hires = (list(every.body)).filter((a) => /staff|hire|kadro|ekip|ise al/i.test(`${a.kind} ${a.title}`));
+    if (hires.length > 0) {
+      return BREAK(`staffing proposal ${decision.proposal.status} but ${hires.length} hire approval(s) exist too (${hires.map((a) => `${a.kind}:${a.status}`).join(", ")}) - the Founder is asked twice for one decision`, "worker:staffing gap analysis");
+    }
+    return PASS(`staffing proposal ${decision.proposal.status} - ONE Founder decision, zero hire approvals in any status (FAZ 2A path)`);
   });
 
   await stage("07-agent-factory-staffing", "the Founder decision wires team+position+agent+bindings", async () => {
