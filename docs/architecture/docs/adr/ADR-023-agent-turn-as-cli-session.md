@@ -58,48 +58,39 @@ run arbitrary code in is not a place a subscription credential can live. The bro
 chosen instead and is the only option compatible with S2. Recorded here because the rejected option
 looked convenient and will look convenient again.
 
-## INV-3 for CLI agents: an explicit amendment, not an exception
+## INV-3 holds as written — the PreToolUse hook is the mechanism
 
-**INV-3 (S3) as written:** "All tool executions pass the Tool Gateway. No bypass path exists in
-code; every invocation has a `tool_invocations` audit row."
+**INV-3 (S3):** "All tool executions pass the Tool Gateway. No bypass path exists in code; every
+invocation has a `tool_invocations` audit row."
 
-**Settled position (god, 2026-08-20, Founder informed):** the **sandbox is the security boundary**.
-A CLI agent's built-in `Read`/`Write`/`Bash` run inside its own workspace container and do **not**
-pass the Tool Gateway — by design. Organisational decisions (`create_task`, `delegate_task`,
-`agent.hire`, `complete_task`, …) continue to go through ACOS over MCP and stay fully
-gateway-audited. Audit and cost visibility for the rest **move to the session level**: broker
-per-session metering → session-scoped `llm_calls`, plus the company session cap.
+A stock Claude Code CLI carries its own `Bash`/`Read`/`Edit`/`Write`/`Glob`/`Grep` tools, and left
+alone they would execute inside the container with no audit row — that is the concern this ADR had
+to answer before anything shipped.
 
-**State it plainly, because it is a real change:** for CLI-run agents the sandbox boundary and
-session-level metering **replace** the per-tool ledger as the audit control. This is a deliberate
-narrowing of INV-3's guarantee for one class of agent, decided by the Founder's authority — not a
-discovery that INV-3 was never meant literally. Recorded this way so a future reviewer sees a
-decision, not a drift.
+**Answered, and built (Kevin, T31):** a **`PreToolUse` hook**, baked read-only into the
+`acos/workspace-node` image, routes every builtin call to the Tool Gateway **audit + policy**
+endpoint *before* execution and **fails closed**. Every operation therefore still yields a
+`tool_invocations` row, and the Gateway can **deny** it — proven in practice by blocking a
+`Read /etc/passwd`. `WebFetch`/`WebSearch`/`Agent` and friends are disabled outright via
+`--disallowedTools`; ACOS organisational actions arrive only through the MCP gateway.
 
-Consequences that must be tracked rather than assumed away:
+So INV-3 is **preserved per-operation**, not narrowed: the CLI's in-container children are covered
+by the same gateway that covers the worker-driven path. `18 §13`'s S3 mechanism list should name the
+hook alongside the eslint boundary rule and the sandbox-manager dispatch-token check.
 
-- **INV-3's own enforcement text needs scoping.** `18 §13` lists S3 enforcement as "eslint boundary
-  rule + sandbox-manager rejects exec without valid dispatch token — CI lint + negative integration
-  test". That mechanism and its test remain correct for the worker-driven path; they simply do not
-  cover a CLI's in-container child processes. Unless the S3 row is scoped to say so, the invariant
-  list and the shipped system will contradict each other, and the next reviewer will read the
-  contradiction as a bug.
-- **INV-7 (S7) coverage narrows.** S7 requires a full audit log for "R2+ tool invocations". A CLI
-  agent performing R2-class work through its built-ins produces no `tool_invocations` row, so for
-  that class the S7 record becomes session-scoped rather than per-operation.
-- **INV-5 (S5) loses a checkpoint.** Risky tool calls triggered by untrusted external content are
-  today detectable at the Gateway per invocation. For CLI agents that per-call checkpoint is gone;
-  what remains is the sandbox boundary and whatever the session-level signals can show.
-
-**Net effect on implementation:** Kevin's fail-closed per-operation `PreToolUse` audit hook is
-**not required** and is dropped. That is a simplification of the runtime, and the argument for it is
-sound — the container still bounds everything the CLI can reach, and org actions remain audited.
-What is genuinely lost is per-operation forensics inside the sandbox; the ADR records that as the
-price rather than pretending it is free.
+**Trust assumption, stated plainly:** the hook runs at the same uid as the CLI inside the sandbox.
+It is an *enforcement and audit* seam within a boundary that is still the container (INV-8/S8) —
+the hook is not itself the containment.
 
 **Prior record.** `PROGRESS.md` L158 records that the Munder raw-CLI-with-builtin-tools path was
-rejected under INV-3. This ADR supersedes that rejection with the boundary argument above, and
-cites it so the earlier decision reads as deliberately revisited rather than overlooked.
+rejected under INV-3. That rejection was correct on its own terms — raw builtins with no seam do
+violate INV-3. This ADR supersedes it because the seam now exists, and cites it so the earlier
+decision reads as deliberately revisited rather than overlooked.
+
+**Consequently INV-5 (S5) and INV-7 (S7) are unaffected.** The per-call checkpoint for risky calls
+triggered by untrusted content is the hook; the R2+ audit record is the `tool_invocations` rows.
+Session-level metering (broker → session-scoped `llm_calls`) is *added* for cost visibility, not a
+replacement for the per-operation ledger.
 
 ## Other invariants touched
 
@@ -146,7 +137,6 @@ model humans already understand carry over.
 - **Run the CLI on the host with the worktree mounted.** Credential handling gets easier, sandbox
   isolation (INV-1/S1, INV-8/S8) gets worse. Rejected: isolation is the harder guarantee to regain.
 - **Mount the subscription credential into the container.** Violates INV-2. See above.
-- **Let the CLI use its built-in tools freely, with no boundary argument.** That was the shape
-  rejected under INV-3 in PROGRESS.md L158. What makes the current design acceptable is not that
-  the concern went away but that the sandbox boundary + session-level metering are named as the
-  replacement audit control — see the INV-3 amendment above.
+- **Let the CLI use its built-in tools freely, unaudited.** That is the shape rejected under INV-3
+  in PROGRESS.md L158, and it stays rejected. What makes the current design acceptable is the
+  PreToolUse hook: the ops are audited and deniable, so the invariant holds rather than bends.
